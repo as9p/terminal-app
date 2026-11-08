@@ -143,7 +143,15 @@ fn held_back_past_exit(shell: &str) -> (SessionHandle, Receiver<ClientEvent>, Cl
 }
 
 fn assert_no_events(rx: &Receiver<ClientEvent>, wait: Duration) {
-    assert_eq!(rx.recv_timeout(wait), Err(RecvTimeoutError::Timeout));
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            // A title follows the output that set it, so it can still be on its way.
+            Ok(ClientEvent::Title(_)) => {}
+            other => return assert_eq!(other, Err(RecvTimeoutError::Timeout)),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -373,10 +381,6 @@ const FLOOD_SIZE: Size = Size {
     cols: 400,
     rows: 100,
 };
-// The fewest bytes one flood line can arrive as: `L`, a digit, a space, the filler and
-// the end of line.
-#[cfg(windows)]
-const FLOOD_LINE_BYTES: u64 = 3 + 380 + 2;
 
 /// A cmd loop printing numbered lines that fill most of a `FLOOD_SIZE` row, forever when
 /// `lines` is None. Wrapped in brackets so more commands can follow it on the same line.
@@ -440,23 +444,22 @@ fn number_after(text: &str, label: &str) -> Option<u16> {
         .ok()
 }
 
-/// Waits for the process to be gone, asking `tasklist` since the host only says so later.
+/// Whether `tasklist` lists the process, since the host only says it ended later.
+#[cfg(windows)]
+fn is_running(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
 #[cfg(windows)]
 fn wait_until_gone(pid: u32) {
     let deadline = Instant::now() + SLOW_LIMIT;
-    loop {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .unwrap();
-        let listing = String::from_utf8_lossy(&output.stdout);
-        if !listing.contains(&format!(" {pid} ")) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "pid {pid} still running: {listing}"
-        );
+    while is_running(pid) {
+        assert!(Instant::now() < deadline, "pid {pid} still running");
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -561,18 +564,24 @@ fn stale_client_dropped() {
 // ConPTY's output only ends once the host closes it, so on Windows the drain grace is how
 // an exit normally gets announced. It waits while a client is held back and starts again
 // once that client acks. `set /p` holds cmd between the flood and its last words, so it
-// finishes only once output is being held back.
+// finishes only once output is being held back. The flood is a file passed through `type`,
+// because cmd sets a title for every `echo` in a loop and that makes the amount unknown.
+// A little over the limit, so all of it but what the host's buffers hold gets sent.
 #[cfg(windows)]
 #[test]
 fn output_tail_survives_a_held_back_client_at_exit() {
-    let lines = (FLOOD_LIMIT + 64 * 1024) / FLOOD_LINE_BYTES + 1;
+    let line = format!("{}\r\n", "x".repeat(390));
+    let lines = (FLOOD_LIMIT + 4096) as usize / line.len() + 1;
+    let flood = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("flood-then-tail.txt");
+    std::fs::write(&flood, line.repeat(lines)).unwrap();
     // The caret keeps the marker out of cmd's echo of the command line.
     let (handle, rx, id) = spawn_flooding(&format!(
-        "{} & set /p _=& echo tail^-marker& exit",
-        flood_loop(Some(lines))
+        "type {} & set /p _=& echo tail^-marker& exit",
+        flood.display()
     ));
     let sent = read_past_limit(&rx);
     let pid = handle.pid().unwrap();
+    assert!(is_running(pid));
     handle.write(b"go\r\n").unwrap();
     wait_until_gone(pid);
     // Well past the drain grace, with the program gone and its tail waiting.
@@ -606,122 +615,6 @@ fn kill_ends_a_held_back_flood() {
             }
         }
     }
-}
-
-// Temporary: measures ConPTY on the runner and reports through its panic message.
-#[cfg(windows)]
-#[test]
-fn conpty_probe() {
-    let mut notes = Vec::new();
-    let collect = |rx: &Receiver<ClientEvent>, limit: Duration, until: &str| {
-        let deadline = Instant::now() + limit;
-        let mut seen = Vec::new();
-        while let Ok(event) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            if let ClientEvent::Output(bytes) = event {
-                seen.extend_from_slice(&bytes);
-                if without_escapes(&String::from_utf8_lossy(&seen)).contains(until) {
-                    break;
-                }
-            }
-        }
-        String::from_utf8_lossy(&seen).into_owned()
-    };
-
-    // A: rate and dropped lines while keeping up.
-    let (handle, rx, id) =
-        spawn_flooding(&format!("{} & echo probe^-done", flood_loop(Some(12000))));
-    let start = Instant::now();
-    let (mut taken, mut chunks, mut biggest) = (0u64, 0u64, 0usize);
-    let mut all = Vec::new();
-    loop {
-        let left = (start + Duration::from_secs(90)).saturating_duration_since(Instant::now());
-        match rx.recv_timeout(left) {
-            Ok(ClientEvent::Snapshot(bytes) | ClientEvent::Output(bytes)) => {
-                taken += bytes.len() as u64;
-                chunks += 1;
-                biggest = biggest.max(bytes.len());
-                handle.ack(id, taken);
-                all.extend_from_slice(&bytes);
-                let tail = &all[all.len().saturating_sub(4096)..];
-                if String::from_utf8_lossy(tail).contains("probe-done") {
-                    break;
-                }
-            }
-            Ok(_) => {}
-            Err(err) => {
-                notes.push(format!("A stopped: {err}"));
-                break;
-            }
-        }
-    }
-    let secs = start.elapsed().as_secs_f64();
-    let plain = without_escapes(&String::from_utf8_lossy(&all));
-    let numbers: std::collections::BTreeSet<u64> = plain
-        .split('L')
-        .filter_map(|part| part.split(' ').next()?.parse().ok())
-        .collect();
-    let middle = all.len() / 2;
-    notes.push(format!(
-        "A: {taken} bytes in {secs:.2}s = {:.0} B/s, {chunks} chunks, biggest {biggest}, \
-         {} distinct line numbers of 12000, max {:?}, sample {:?}",
-        taken as f64 / secs,
-        numbers.len(),
-        numbers.last(),
-        String::from_utf8_lossy(&all[middle..(middle + 900).min(all.len())])
-    ));
-    handle.kill();
-
-    // B: does cmd keep running while the host holds back.
-    let file = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("probe-b-done");
-    let _ = std::fs::remove_file(&file);
-    let (handle, rx, id) = spawn_flooding(&format!(
-        "{} & echo done>probe-b-done& set /p _=& exit",
-        flood_loop(Some(20000))
-    ));
-    let start = Instant::now();
-    let mut sent = 0;
-    while sent <= FLOOD_LIMIT && start.elapsed() < Duration::from_secs(60) {
-        if let Ok(ClientEvent::Snapshot(bytes) | ClientEvent::Output(bytes)) =
-            rx.recv_timeout(Duration::from_secs(1))
-        {
-            sent += bytes.len() as u64;
-        }
-    }
-    let held = start.elapsed();
-    std::thread::sleep(Duration::from_secs(3));
-    let done_while_held = file.exists();
-    handle.ack(id, sent);
-    let mut taken = sent;
-    let acked = Instant::now();
-    while !file.exists() && acked.elapsed() < Duration::from_secs(30) {
-        if let Ok(ClientEvent::Output(bytes)) = rx.recv_timeout(Duration::from_millis(100)) {
-            taken += bytes.len() as u64;
-            handle.ack(id, taken);
-        }
-    }
-    notes.push(format!(
-        "B: over at {sent} after {held:?}, flood done while held {done_while_held}, \
-         done {:?} after ack, {taken} taken",
-        file.exists().then(|| acked.elapsed())
-    ));
-    handle.kill();
-
-    // C: the size the program sees after a resize.
-    let handle = Session::spawn(spec(), SIZE).unwrap();
-    let (tx, rx) = client();
-    handle.attach(tx, SIZE);
-    handle.resize(Size {
-        cols: 100,
-        rows: 40,
-    });
-    handle.write(b"mode con\r\n").unwrap();
-    let mode = collect(&rx, Duration::from_secs(5), "Code page");
-    handle
-        .write(b"powershell -NoProfile -Command \"$s=$Host.UI.RawUI.WindowSize; 'ps-' + 'size ' + $s.Width + 'x' + $s.Height\"\r\n")
-        .unwrap();
-    let ps = collect(&rx, Duration::from_secs(20), "ps-size ");
-    notes.push(format!("C: mode {mode:?}\nps {:?}", without_escapes(&ps)));
-    panic!("{}", notes.join("\n"));
 }
 
 #[cfg(unix)]
