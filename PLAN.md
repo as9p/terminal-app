@@ -146,7 +146,7 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 **Files:** Create `.github/workflows/host.yml`, `docs/windows-test.md`.
 
 - [x] **Step 1:** Create the private repo `as9p/terminal-app` if it's missing, and push. If the permission check refuses, hand Alex the command.
-- [ ] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
+- [x] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
 - [ ] **Step 3:** Ask a PC session, by message starting `From session <name>:`, to clone the repo, run the tests, type in a real host session through a small test client, and try Mac to Windows chat resume. Save its reported results in `docs/windows-test.md`, marked as reported, not seen here.
 - [ ] **Step 4:** Commit: `ci(host): test on Windows and Mac`.
 

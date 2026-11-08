@@ -117,6 +117,19 @@ fn start_host() -> Result<Child, String> {
         // Signals sent to the app's process group, such as Ctrl+C in a shell, must not reach it.
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // The host is a console program, so without this a windowed app starting it would open
+        // a console window, and closing that window would end the host.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        // "/" means the root of whichever drive the app started on, which can be a removable one.
+        if let Some(home) = dirs::home_dir() {
+            command.current_dir(home);
+        }
+    }
     command
         .spawn()
         .map_err(|error| format!("Cannot start the host at {}: {error}", binary.display()))

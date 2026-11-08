@@ -6,13 +6,14 @@ use bytes::Bytes;
 #[cfg(unix)]
 use crossbeam_channel::RecvTimeoutError;
 use crossbeam_channel::{Receiver, unbounded};
-use term_host::{ClientEvent, ClientTx, Kind, Session, SessionHandle, Size, SpawnSpec, clean_env};
+use term_host::{ClientEvent, ClientTx, Kind, Session, Size, SpawnSpec, clean_env};
 #[cfg(unix)]
-use term_host::{ClientId, Screen};
+use term_host::{ClientId, Screen, SessionHandle};
 use uuid::Uuid;
 
 const SIZE: Size = Size { cols: 80, rows: 24 };
 const READ_LIMIT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
 const SLOW_LIMIT: Duration = Duration::from_secs(10);
 // Long enough to notice a program that is still going. Only ever used to check that
 // nothing happens, so a slow machine can't make a correct host fail on it.
