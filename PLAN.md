@@ -85,17 +85,17 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 
 **Produces:** `Screen::new(size, scrollback: usize)`, `feed(&[u8])`, `resize(Size)`, `snapshot() -> Vec<u8>`. Scrollback is 20000 lines to match Alex's kitty.
 
-- [ ] **Step 1:** Clone Orca into the scratchpad and read how its daemon makes snapshots, reference only. Write three lines in the handoff on what to borrow. Copy no code without its notice.
-- [ ] **Step 2:** Write failing tests:
+- [x] **Step 1:** Clone Orca into the scratchpad and read how its daemon makes snapshots, reference only. Write three lines in the handoff on what to borrow. Copy no code without its notice.
+- [x] **Step 2:** Write failing tests:
   - `snapshot_round_trip`: feed colors, wide characters, cursor moves and 500 scrolled lines, feed the snapshot into a fresh `Screen`, and assert the same formatted contents, scrollback and cursor.
   - `alt_screen_round_trip`: the same while a full-screen program is active, with modes like mouse and bracketed paste kept.
   - `attach_mid_stream_no_loss_no_dup`: while a session prints numbered lines, attach; the snapshot plus later bytes contain every number once, in order.
   - `flood_stays_bounded`: a client that never acks stops forwarding at 4 MiB unacked, the program is throttled, a second session keeps echoing, and `kill()` works.
   - `stale_client_dropped`: a client with no ack for 5 s is dropped, and the throttle lifts.
-- [ ] **Step 3:** Run them. Expected: fail.
-- [ ] **Step 4:** Implement on `vt100`, with the actor holding back output while a live client is over 4 MiB unacked.
-- [ ] **Step 5:** Benchmark 30 MB of colored text with `cargo bench -p term-host --bench parse`. Pass is at least 80 MB/s in release, because the actor parses every byte. Measure memory with 20000 lines full at 200 columns, and report it. If speed fails, swap `Screen`'s insides to `alacritty_terminal` 0.26 (Apache-2.0), keeping its interface, and note why.
-- [ ] **Step 6:** Run the tests. Expected: pass. Commit: `feat(host): keep a screen copy and attach without losing output`.
+- [x] **Step 3:** Run them. Expected: fail.
+- [x] **Step 4:** Implement on `vt100`, with the actor holding back output while a live client is over 4 MiB unacked.
+- [x] **Step 5:** Benchmark 30 MB of colored text with `cargo bench -p term-host --bench parse`. Pass is at least 80 MB/s in release, because the actor parses every byte. Measure memory with 20000 lines full at 200 columns, and report it. If speed fails, swap `Screen`'s insides to `alacritty_terminal` 0.26 (Apache-2.0), keeping its interface, and note why.
+- [x] **Step 6:** Run the tests. Expected: pass. Commit: `feat(host): keep a screen copy and attach without losing output`.
 
 ## Task 5: WebSocket server
 
@@ -215,4 +215,15 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 
 **Task 1 (9e3ca5c):** Plain `claude --resume <id>` works from a moved folder on the Mac, and keeps writing to the original transcript. No command lists Remote Control sessions. `~/.claude/sessions/<pid>.json` has a `bridgeSessionId` field, and what fills it is unknown. Verified by reading the diff and report and checking that no test folders or processes remain. Mac to Windows resume is still open for Task 8. The test ran through a wrapper script after `env -u` was blocked (see open questions).
 
-**Task 3:** Host sessions work: spawn, write, resize, kill with escalation, attach, detach, exit events. Verified by 22 passing tests, clippy, fmt, and 200 repeat runs of the session tests with no failures. Two macOS flakes fixed in `host/src/pty.rs`: a bounded retry on the kernel's -6 open race, and running libnotify's run-once setup before any fork, because a fork child could die with SIGKILL in `_notify_fork_child`. Which parent thread held that gate is still unknown. Any new code that forks must call `prepare_for_fork` first. Task 4: attach only subscribes so far, snapshot and throttle are yours. Task 8: the Windows parts have never compiled; the startup cursor reply rests on memory of the ConPTY stall, and the Windows echo test runs `more` inside COMSPEC. Task 11: `SpawnSpec.uuid` is unused so far, Claude uses `chat`; any exit after `kill()` now reports not clean, including a shell that answers SIGHUP with a normal exit.
+**Task 3 (149b986):** Host sessions work: spawn, write, resize, kill with escalation, attach, detach, exit events. Verified by 22 passing tests, clippy, fmt, and 200 repeat runs of the session tests with no failures. Two macOS flakes fixed in `host/src/pty.rs`: a bounded retry on the kernel's -6 open race, and running libnotify's run-once setup before any fork, because a fork child could die with SIGKILL in `_notify_fork_child`. Which parent thread held that gate is still unknown. Any new code that forks must call `prepare_for_fork` first. Task 4: attach only subscribes so far, snapshot and throttle are yours. Task 8: the Windows parts have never compiled; the startup cursor reply rests on memory of the ConPTY stall, and the Windows echo test runs `more` inside COMSPEC. Task 11: `SpawnSpec.uuid` is unused so far, Claude uses `chat`; any exit after `kill()` now reports not clean, including a shell that answers SIGHUP with a normal exit.
+
+**Task 4 (6dde78d, 0482277, 0a283cc, 6eed1ef, c965361):** Screen copy on vt100, attach through the actor, flood limit. Verified by 27 session tests (five clean repeat runs), 5 screen tests, clippy, fmt, and a mutation check that broke `session.rs` 14 ways: 13 caught. The survivor, "drain not restarted", cannot run on macOS, which ends output when the program exits (seen with a probe). The test for it only bites on Linux.
+
+- Orca, read only: (1) a headless emulator per session serialized on attach, the same shape as `Screen`; (2) its "serialize() omits parser state" comment names a real bug, and `Screen::feed` takes the idea as `held`; (3) its alt screen restore lists modes one by one, including some vt100 never tracks (4h, 1004, ?7l, ?45), the place to start if we track modes ourselves.
+- Speed: 105 to 113 MB/s release, pass line 80. Memory: 142.5 MiB at 20000 lines of 200 columns. Short lines: 109 MiB resident, 281 MiB after the first attach, because the snapshot walks a clone and macOS keeps the freed pages. It stays there, reused by later snapshots. Full size snapshot about 45 ms. Task 12 can revisit.
+- A snapshot cannot restore: scroll margins, saved cursor, origin mode, tab stops, character sets (`ESC ( 0` line drawing comes back as letters), modes vt100 does not track (autowrap off, focus 1004, 2026), OSC state (title, cwd, hyperlinks), lines cut on narrow then widen. This affects reattach only; the live stream goes to xterm directly.
+- Ruling: a kill ends the hold. macOS keeps a killed program in `ps` state `E` while its terminal has unread output, so a pure hold never reports its exit. A client over the limit at kill time loses the final bytes and still gets `Exited`. The cause is inferred from behaviour, not kernel source.
+- Task 5: `SessionHandle::write` blocks while the program is not reading, so it must never run on the async runtime or a path shared with other sessions. A dropped stale client sees only a disconnected channel, which means "attach again". Acks are running totals and include the snapshot.
+- Task 6: snapshot replay has never run in xterm.js. Check it, with xterm scrollback at 20000 or more.
+- Task 8: on Windows the terminal has no end of output at exit, so the drain grace is the main path there, and the hold has never run against ConPTY. These tests are `cfg(unix)`. Give the hold and the drain restart a Windows test.
+- Known risk: endless small acks can hold a program indefinitely, following "resets on any ack". Only a local client with the token can do this.
