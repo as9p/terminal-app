@@ -29,6 +29,9 @@ const SCROLLBACK: usize = 20_000;
 const FLOOD_LIMIT: u64 = 4 * 1024 * 1024;
 // A client over the limit this long without acking is holding everyone back for nothing.
 const STALE_LIMIT: Duration = Duration::from_secs(5);
+// How long after a resize to check that it held. See `Actor::check_size`.
+const SIZE_SETTLE: Duration = Duration::from_millis(50);
+const SIZE_RETRIES: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -124,6 +127,8 @@ impl Session {
             clients: Vec::new(),
             kill_sent: false,
             kill_deadline: never(),
+            size_check: never(),
+            size_retries: 0,
             exit: None,
             announced: None,
             announced_signal: Some(announced_tx),
@@ -305,6 +310,8 @@ struct Actor {
     clients: Vec<Client>,
     kill_sent: bool,
     kill_deadline: Receiver<Instant>,
+    size_check: Receiver<Instant>,
+    size_retries: u8,
     // Set when the program ends. `announced` follows once the output has drained.
     exit: Option<Exit>,
     announced: Option<Exit>,
@@ -361,6 +368,7 @@ impl Actor {
                     self.force_kill();
                 },
                 recv(stale_deadline) -> _ => self.drop_stale_clients(),
+                recv(self.size_check) -> _ => self.check_size(),
                 recv(drain_deadline) -> _ => {
                     drain_deadline = never();
                     // Lets the reader stop at its next read instead of feeding nobody.
@@ -489,10 +497,35 @@ impl Actor {
             return;
         }
         self.size = size;
-        self.update_status(|status| status.size = size);
         self.screen.resize(size);
+        self.size_retries = SIZE_RETRIES;
+        self.apply_size();
+    }
+
+    fn apply_size(&mut self) {
         if let Some(master) = &self.master {
-            let _ = master.resize(size.into());
+            let _ = master.resize(self.size.into());
+        }
+        self.size_check = after(SIZE_SETTLE);
+    }
+
+    // A resize can be undone with no error: readline reads the size and writes it back each
+    // time it returns to its prompt, so a resize landing between the two is lost. Nothing
+    // reports that, so look again shortly after. `list` shows a size only once it has held,
+    // and the retries stop a program that keeps setting its own size from fighting forever.
+    fn check_size(&mut self) {
+        self.size_check = never();
+        let size = self.size;
+        let undone = self
+            .master
+            .as_ref()
+            .and_then(|master| master.get_size().ok())
+            .is_some_and(|now| now.cols != size.cols || now.rows != size.rows);
+        if undone && self.size_retries > 0 {
+            self.size_retries -= 1;
+            self.apply_size();
+        } else {
+            self.update_status(|status| status.size = size);
         }
     }
 

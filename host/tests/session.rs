@@ -421,6 +421,29 @@ fn resize_reaches_program() {
     read_until(&rx, SLOW_LIMIT, |out| out.contains("40 100"));
 }
 
+// What readline does by accident when a resize lands while it returns to its prompt, made
+// to happen every time.
+#[cfg(unix)]
+#[test]
+fn undone_resize_is_applied_again() {
+    let (handle, rx) = spawn_shell("/bin/sh");
+    handle
+        .write(
+            b"trap 'trap - WINCH; stty rows 5 cols 5' WINCH; echo rea''dy; \
+              sleep 1 & wait; sleep 0.3; stty size\n",
+        )
+        .unwrap();
+    read_until(&rx, SLOW_LIMIT, |out| out.contains("ready"));
+    handle.resize(Size {
+        cols: 100,
+        rows: 40,
+    });
+    let out = read_until(&rx, SLOW_LIMIT, |out| {
+        out.contains("40 100") || out.contains("5 5\r\n")
+    });
+    assert!(out.contains("40 100"), "the undone size stayed: {out:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn attach_resizes_first() {

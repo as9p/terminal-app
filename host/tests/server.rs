@@ -1053,6 +1053,23 @@ mod sessions {
     }
 
     #[tokio::test]
+    async fn attaching_again_replaces_the_old_attachment() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        attach(&mut ws, session).await;
+
+        type_line(&mut ws, session, "echo on''ce").await;
+        let mut seen = read_until(&mut ws, session, "once").await;
+        while let Some(Heard::Bytes(_, bytes)) = hear_any(&mut ws, Duration::from_millis(300)).await
+        {
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert_eq!(seen.matches("once").count(), 1, "{seen:?}");
+    }
+
+    #[tokio::test]
     async fn stuck_program_drops_input() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
