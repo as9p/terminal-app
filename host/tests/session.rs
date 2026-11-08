@@ -49,7 +49,8 @@ fn read_until(rx: &Receiver<ClientEvent>, limit: Duration, done: impl Fn(&str) -
         }
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
-            Ok(ClientEvent::Snapshot(_)) => {}
+            // Windows' ConPTY sets a title as soon as the program starts.
+            Ok(ClientEvent::Snapshot(_) | ClientEvent::Title(_)) => {}
             Ok(ClientEvent::Output(bytes)) => seen.extend_from_slice(&bytes),
             other => panic!("stopped with {other:?}, output so far: {text:?}"),
         }
