@@ -11,6 +11,11 @@ bytes = "1"
 crossbeam-channel = "0.5"
 portable-pty = "0.9"
 uuid = "1"
+vt100 = "0.18"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "parse"
+harness = false

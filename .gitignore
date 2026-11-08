@@ -11,3 +11,6 @@ tools/keylat/keylat
 tools/keylat/*.log
 tools/keylat/*.out
 tools/keylat/*.csv
+
+# Generated speed test output
+tools/speed/.cache/
