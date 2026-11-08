@@ -1,0 +1,10 @@
+accessibility=true screen=true
+display max fps=120
+target term-speed-spike window 1728x1084 id=24736
+changes while idle for 1 s=0
+stopped at round 14: on top is Brave Browser id=18657, wanted id=24736
+key typed, frame display time: samples=14 min=10.3 median=23.7 p95=30.0 max=30.0 ms
+key typed, frame reached tool: samples=14 min=10.8 median=24.1 p95=30.7 max=30.7 ms
+backspace, frame display time: samples=14 min=10.9 median=22.0 p95=784.3 max=784.3 ms
+missed=0 frames shown before the key=0 stopped early=true stream error=none
+finished

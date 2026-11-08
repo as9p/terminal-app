@@ -1,0 +1,31 @@
+=== xterm whole window
+accessibility=true screen=true
+display max fps=120
+target term-speed-spike window 1728x1084 id=26184
+changes while idle for 1 s=0
+key typed, frame display time: samples=60 min=12.5 median=21.4 p95=34.6 max=41.5 ms
+key typed, frame reached tool: samples=60 min=13.1 median=21.9 p95=35.2 max=42.2 ms
+backspace, frame display time: samples=60 min=12.3 median=22.9 p95=32.6 max=38.5 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished
+=== xterm calibration
+calibration press 0: changed=3608 box x=27-91 y=0-95 kept=2544
+calibration press 1: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 2: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 3: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 4: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 5: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 6: changed=1024 box x=0-31 y=0-31 kept=0
+calibration press 7: changed=1024 box x=0-31 y=0-31 kept=0
+calibration found no pixels that change on every key
+=== ghostty calibration
+calibration press 0: changed=24771 box x=27-91 y=0-2144 kept=4620
+calibration press 1: changed=9600 box x=0-35 y=0-2159 kept=0
+calibration press 2: changed=9600 box x=0-35 y=0-2159 kept=0
+calibration press 3: changed=9600 box x=0-35 y=0-2159 kept=0
+calibration press 4: changed=966 box x=0-35 y=0-29 kept=0
+calibration press 5: changed=9600 box x=0-35 y=0-2159 kept=0
+calibration press 6: changed=966 box x=0-35 y=0-29 kept=0
+calibration press 7: changed=9600 box x=0-35 y=0-2159 kept=0
+calibration found no pixels that change on every key
+all-done

@@ -1,0 +1,213 @@
+# Stage 1 implementation plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax. After each task, tick its boxes and add a short handoff under "Handoffs".
+
+**Goal:** A terminal Alex can use every day on the Mac: tabs and splits with kitty's look and keys, sessions that survive closing the window, restore after a reboot, and a host that also passes its tests on Windows.
+
+**Architecture:** A Rust host owns the terminals and serves them over a WebSocket on loopback. A Tauri client draws them with xterm.js and talks to the host through that same WebSocket, so the phone page can reuse the code later. One thread per session handles output and client attach in order, which keeps a reattaching client from losing or repeating bytes.
+
+**Tech stack:** Rust workspace, `portable-pty` 0.9, `vt100` 0.18, `tokio` plus `tokio-tungstenite` 0.30, `libproc` 0.15 on Mac, Tauri 2 (not the 3 alpha), TypeScript, Vite, `@xterm/xterm` 6 and `@xterm/addon-webgl` 0.19, pnpm.
+
+**Spec:** `DESIGN.md`. Read it with this plan.
+
+## Global constraints
+
+- MIT license. Keep Orca's notice on anything copied from it. Never copy from kitty, cmux or AGPL projects.
+- The host never depends on xterm.js. It sends plain terminal bytes.
+- The host only listens on 127.0.0.1 in stage 1.
+- The app never creates a worktree unless the user explicitly asks for one.
+- Speed targets: at least 40 MB/s with a visible tab through the host, and typing and backspace medians within 5 ms of kitty, on a release build.
+- Any `tools/keylat` run takes focus for about a minute, so get a fresh go from Alex before each one.
+- Any new tab UI goes through `ui-review-page`. No tab or split UI code before Alex says go.
+- `DESIGN.md` holds private details. The GitHub repo stays private until Alex decides otherwise and that file is cleaned.
+- Run `grep -c -i -F -f ~/.claude-sync/block-words.txt` over new text files before a push. Never print a matching word.
+- No `gh auth switch`. Use `GH_TOKEN=$(gh auth token --user as9p) gh ...`. Never touch any github.com/as9pa URL.
+- No em-dashes or emoji in code comments, docs or commits. Sentence case for UI labels.
+
+## Review focus
+
+Each of these has its test in the task that owns the code.
+
+1. Host started from inside a Claude session or a Finder launch: it must not leak `CLAUDECODE`, `CLAUDE_CONFIG_DIR` or `KITTY_*` into tabs, and `claude` must still be on the PATH in a tab. (Task 3)
+2. A web page in Alex's browser tries to open the local WebSocket: it must be refused, even though it runs on the same computer. (Task 5)
+3. A reboot hangs up every shell before the host stops: tabs must stay restorable, while typing `exit` or closing a tab removes them. (Task 11)
+4. A restored Claude tab whose chat never got a first message: `--resume` would fail, so it must start fresh with the same id. (Task 11)
+5. A program floods output (`yes`) while the client falls behind: host memory stays bounded, other tabs still respond, and Ctrl+C works within a second. (Task 4)
+
+---
+
+## Task 1: Risky tests that need no second account
+
+**Files:** Create `docs/risky-tests.md`. Modify `DESIGN.md` (the lines these tests settle).
+
+- [ ] **Step 1:** Resume under a different path on the Mac. In a scratch folder run `claude -p --model haiku "Remember the word plum"` with `CLAUDECODE` unset, note the session id, move the folder, then try `claude -p --resume <id> "What word?"` from the new path: first as is, then after copying the transcript into the new path's folder under `~/.claude/projects/`. Record which works.
+- [ ] **Step 2:** Find whether Remote Control sessions can be listed. Read `claude remote-control --help` and `claude --help`, and look for a matching file under `~/.claude`. Read only. Don't start a server. Record the answer, with the exact command or file, or "no list found".
+- [ ] **Step 3:** Write results to `docs/risky-tests.md` and update the "Not tested" lines in `DESIGN.md`.
+- [ ] **Step 4:** Commit: `docs: record resume path and Remote Control list tests`.
+
+Mac to Windows resume waits for Task 8, when a PC session is involved.
+
+## Task 2: Risky tests that need a second account (waits on Alex)
+
+**Files:** Modify `docs/risky-tests.md`, `DESIGN.md`. Waiting on Alex doesn't block the other tasks.
+
+- [ ] **Step 1:** Alex signs in to a second account in a test folder: `CLAUDE_CONFIG_DIR=~/.claude-test-b claude`, then `/login`. Use a personal account, no work data.
+- [ ] **Step 2:** Create a chat on the main account with a haiku prompt in a scratch folder. Link `~/.claude-test-b/projects` to `~/.claude/projects`, then resume that chat under the second account and confirm it remembers the word. If that fails, try copying the chat file, as `DESIGN.md` describes.
+- [ ] **Step 3:** Start two `claude remote-control` servers side by side from a scratch folder, one per account, for about a minute, then stop both. Alex checks the Claude app shows both. Confirm no server is left running.
+- [ ] **Step 4:** Record results, update `DESIGN.md`, commit: `docs: record account resume and two server tests`.
+
+## Task 3: Terminal sessions in the host
+
+**Files:** Create `LICENSE` (MIT), `Cargo.toml` (workspace), `host/Cargo.toml`, `host/src/{main,lib,pty,env,session}.rs`, `host/tests/session.rs`.
+
+**Produces:**
+- `Session::spawn(spec: SpawnSpec, size: Size) -> Result<SessionHandle>`
+- `SpawnSpec { kind: Kind, cwd: PathBuf, uuid: Uuid }`, `Kind::Shell`, `Kind::Claude { chat: Uuid, resume: bool }`
+- `SessionHandle::{write(&[u8]), resize(Size), kill(), attach(ClientTx, Size), detach(ClientId), ack(ClientId, u64), pid()}`
+- `clean_env(from: impl Iterator<Item=(String,String)>) -> Vec<(String,String)>`
+
+Each session has a reader thread feeding a bounded channel and one actor thread. The actor forwards bytes to attached clients first, then feeds the screen copy. Attach, detach and resize go through the actor, so attach happens at one exact point in the output.
+
+- [ ] **Step 1:** Write failing tests in `host/tests/session.rs`:
+  - `echo_round_trip`: spawn `cat` (Windows: `cmd /c more`), write `hello\n`, read it back within 2 s.
+  - `resize_reaches_program`: resize to 100x40, `stty size` prints `40 100` (Unix only).
+  - `exit_reports_clean_or_signal`: `exit` reports clean; a `SIGHUP` kill reports a signal (Unix only).
+  - `clean_env_strips`: `CLAUDECODE`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_*`, `KITTY_*`, `ORCA_*` removed; `TERM=xterm-256color`, `COLORTERM=truecolor` set.
+  - `login_shell_finds_path`: a spawn with a bare environment still gets the PATH from the login shell (Unix only).
+- [ ] **Step 2:** Run `cargo test -p term-host --test session`. Expected: fails to compile.
+- [ ] **Step 3:** Implement. Shell: `$SHELL -l`, using `SHELL` from the host's environment so the speed tests can swap it. Windows: `COMSPEC`. Claude on Unix: `$SHELL -lic 'exec claude --session-id <uuid>'`, or `--resume <uuid>` when `resume` is true. Claude on Windows: `cmd /c claude ...`.
+- [ ] **Step 4:** Run the tests. Expected: pass.
+- [ ] **Step 5:** Commit: `feat(host): spawn and run terminal sessions`.
+
+## Task 4: Screen copy and attach
+
+**Files:** Create `host/src/screen.rs`, `host/tests/screen.rs`, `host/benches/parse.rs`, `tools/speed/gen-output.sh` (from the test build). Modify `host/src/session.rs`.
+
+**Produces:** `Screen::new(size, scrollback: usize)`, `feed(&[u8])`, `resize(Size)`, `snapshot() -> Vec<u8>`. Scrollback is 20000 lines to match Alex's kitty.
+
+- [ ] **Step 1:** Clone Orca into the scratchpad and read how its daemon makes snapshots, reference only. Write three lines in the handoff on what to borrow. Copy no code without its notice.
+- [ ] **Step 2:** Write failing tests:
+  - `snapshot_round_trip`: feed colors, wide characters, cursor moves and 500 scrolled lines, feed the snapshot into a fresh `Screen`, and assert the same formatted contents, scrollback and cursor.
+  - `alt_screen_round_trip`: the same while a full-screen program is active, with modes like mouse and bracketed paste kept.
+  - `attach_mid_stream_no_loss_no_dup`: while a session prints numbered lines, attach; the snapshot plus later bytes contain every number once, in order.
+  - `flood_stays_bounded`: a client that never acks stops forwarding at 4 MiB unacked, the program is throttled, a second session keeps echoing, and `kill()` works.
+  - `stale_client_dropped`: a client with no ack for 5 s is dropped, and the throttle lifts.
+- [ ] **Step 3:** Run them. Expected: fail.
+- [ ] **Step 4:** Implement on `vt100`, with the actor holding back output while a live client is over 4 MiB unacked.
+- [ ] **Step 5:** Benchmark 30 MB of colored text with `cargo bench -p term-host --bench parse`. Pass is at least 80 MB/s in release, because the actor parses every byte. Measure memory with 20000 lines full at 200 columns, and report it. If speed fails, swap `Screen`'s insides to `alacritty_terminal` 0.26 (Apache-2.0), keeping its interface, and note why.
+- [ ] **Step 6:** Run the tests. Expected: pass. Commit: `feat(host): keep a screen copy and attach without losing output`.
+
+## Task 5: WebSocket server
+
+**Files:** Create `host/src/{server,protocol,paths,auth}.rs`, `host/tests/server.rs`. Modify `host/src/main.rs`.
+
+**Produces, protocol version 1:**
+- Text frames are JSON. Client: `hello{token,proto}`, `create{uuid,kind,cwd,cols,rows}`, `attach{session,cols,rows}`, `detach{session}`, `resize{session,cols,rows}`, `kill{session}`, `ack{session,bytes}`, `list`, `layout_get`, `layout_set{json}`. Host: `hello_ok{proto,host_version}`, `sessions{items}`, `created{session,uuid}`, `attached{session,snapshot_bytes}`, `title{session,title}`, `exited{session,clean}`, `layout{json}`, `error{code,message}`.
+- Binary frames are a 4-byte little-endian session number, then bytes, in both directions.
+- Port 47211, or `TERM_HOST_PORT`. Data folder from the `dirs` crate plus `terminal-app`, or `TERM_APP_DATA`. Token file `host-token` holds 32 random bytes as hex, mode 0600.
+
+- [ ] **Step 1:** Write failing tests:
+  - `refuses_foreign_origin`: `Origin: https://example.com` is refused before the upgrade.
+  - `allows_app_origins`: `tauri://localhost` and `http://tauri.localhost` are accepted. `http://localhost:1420` is accepted only in debug builds.
+  - `refuses_bad_token`: wrong token closes; no `hello` within 5 s closes; a wrong `proto` returns `error{code:"proto_mismatch"}` and closes.
+  - `create_attach_type_echo`: full round trip over a real socket.
+  - `sessions_survive_disconnect`: disconnect, reconnect, attach, and the screen and process are still there.
+  - `binds_loopback_only`: connecting through a non-loopback address of this computer fails.
+  - `second_host_exits`: a second host on the same port exits without touching the first.
+- [ ] **Step 2:** Run them. Expected: fail.
+- [ ] **Step 3:** Implement, with `TCP_NODELAY` set on every socket, since a delayed small packet would add typing latency.
+- [ ] **Step 4:** Run them. Expected: pass. Commit: `feat(host): serve sessions over a local WebSocket`.
+
+## Task 6: One terminal in a Tauri window
+
+**Files:** Create `client/` (`package.json`, `vite.config.ts`, `index.html`, `src/{main,connection,terminal,theme}.ts`, `src-tauri/`). Base the window on `~/projects/term-speed-spike/src-tauri`.
+
+**Produces:** Tauri command `host_connection() -> {port, token}`, which starts the host detached if nothing answers. `Connection` and `TerminalView` classes for the tabs task.
+
+Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono 14, line height 1.1, beam cursor with no blink, padding 8, scrollback 20000, copy on select, left Option as Alt, no bell sound, Shift+Enter sends `\x1b\r`, colors from `current-theme.conf`, hidden title bar.
+
+- [ ] **Step 1:** Build it with one shell session. Ack bytes from xterm's write callback.
+- [ ] **Step 2:** Run `pnpm -C client tsc --noEmit` and `pnpm -C client tauri build`. Expected: both succeed.
+- [ ] **Step 3:** Check by hand on the release build: type, run `vim` and `claude`, Cmd+Q, reopen, and the same session returns with its screen. A foreign proto shows a clear message and kills nothing. Stop the host afterward.
+- [ ] **Step 4:** Commit: `feat(client): show a host session in a Tauri window`.
+
+## Task 7: First speed check through the host
+
+**Files:** Create `tools/keylat/test-app.sh`, `tools/speed/throughput.sh`, `tools/speed/README.md`. Modify `DESIGN.md` speed tables.
+
+- [ ] **Step 1:** Write `test-app.sh` from `test-build2.sh`: a release build, a host on its own port and data folder, and `SHELL` set to `cat-shell.sh`, then 60 presses with `keep-size`.
+- [ ] **Step 2:** Ask Alex for a go, then run it through `runner.command` as `run-kitty-test.sh` shows. Rerun kitty in the same sitting, so the comparison is fair, and run each 3 times.
+- [ ] **Step 3:** Measure throughput with 30 MB of colored text, three times, visible tab.
+- [ ] **Step 4:** Record median, 95th percentile, share over 30 ms, backspace and MB/s in `DESIGN.md`. Missing a target stops this plan's UI work until the cause is known.
+- [ ] **Step 5:** Commit: `test: measure typing and output speed through the host`.
+
+## Task 8: Windows host
+
+**Files:** Create `.github/workflows/host.yml`, `docs/windows-test.md`.
+
+- [ ] **Step 1:** Create the private repo `as9p/terminal-app` if it's missing, and push. If the permission check refuses, hand Alex the command.
+- [ ] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
+- [ ] **Step 3:** Ask a PC session, by message starting `From session <name>:`, to clone the repo, run the tests, type in a real host session through a small test client, and try Mac to Windows chat resume. Save its reported results in `docs/windows-test.md`, marked as reported, not seen here.
+- [ ] **Step 4:** Commit: `ci(host): test on Windows and Mac`.
+
+## Task 9: Tab and split review (waits on Alex)
+
+**Files:** None in the repo. Publishes an artifact through `ui-review-page`.
+
+- [ ] **Step 1:** Take real screenshots of Orca and kitty with many tabs. Close test windows after.
+- [ ] **Step 2:** Publish the review: tab bar look, many-tab behavior (recommended: title shrinks first, status never hides, minimum width, then sideways scroll), the status marker, split dividers, a new Claude tab key, and a states strip.
+- [ ] **Step 3:** Wait for Alex's go. Record the answers in `DESIGN.md`.
+
+## Task 10: Tabs, splits and kitty keys
+
+**Files:** Create `client/src/{tabs,splits,keys,layout}.ts`, `client/src/layout.test.ts`. Modify `client/src/main.ts`, `theme.ts`.
+
+**Produces:** `Layout` as JSON saved through `layout_set`: tabs, each holding a split tree whose leaves are session uuids.
+
+Keys, from Alex's kitty config: Cmd+T new tab in current folder, Cmd+W close pane, Cmd+Shift+W close tab, Cmd+Shift+] and [ next and previous tab, Cmd+1 to 9 go to a tab, Cmd+Shift+T rename tab, Cmd+D vertical split in current folder, Cmd+Shift+D horizontal split, Cmd+Alt+arrows move between panes, Cmd+Shift+Enter zoom pane, Cmd+C and Cmd+V copy and paste. New Claude tab uses the key from the review.
+
+- [ ] **Step 1:** Write failing tests for the layout logic: `close_last_pane_closes_tab`, `close_tab_kills_every_session`, `layout_round_trips_json`, `unknown_session_in_saved_layout_is_dropped`, `resize_rounds_to_whole_cells`.
+- [ ] **Step 2:** Run `pnpm -C client vitest run`. Expected: fail.
+- [ ] **Step 3:** Implement to match the review. Attach to a session the first time its tab is shown. A tab's title comes from the host's `title` event, and rename overrides it.
+- [ ] **Step 4:** Run tests, `tsc` and `tauri build`. Expected: pass. Check every key by hand on the release build, plus 40 open tabs against the rule that status never hides.
+- [ ] **Step 5:** Commit: `feat(client): add tabs, splits and kitty keys`.
+
+## Task 11: Restore after reboot
+
+**Files:** Create `host/src/state.rs`, `host/tests/state.rs`. Modify `host/src/{server,session,main}.rs`, `client/src/main.ts`.
+
+**Produces:** `State { sessions: Vec<SavedSession>, layout: Json }`, saved to `state.json` by writing a temp file and renaming, at most every 2 s. `SavedSession { uuid, kind, cwd, title, chat }`.
+
+Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session started in, for now. Restored shells start at once. Restored Claude tabs start on first attach, so a reboot doesn't launch every chat together.
+
+- [ ] **Step 1:** Write failing tests:
+  - `clean_exit_removes`: `exit` or explicit close removes a session from state.
+  - `signal_exit_keeps`: `SIGHUP` keeps it. Any exit after the host gets `SIGTERM` keeps it.
+  - `restart_restores_shell_in_folder`: stop the host, start it, and the shell is back in its last folder, or home if that folder is gone.
+  - `claude_restore_uses_resume`: with a transcript present the command has `--resume <id>`; with none, it has `--session-id <id>`. Use a fake `claude` on the PATH.
+  - `claude_restore_is_lazy`: no process starts until attach.
+  - `corrupt_state_moved_aside`: a bad file is renamed, and the host still starts.
+- [ ] **Step 2:** Run them. Expected: fail.
+- [ ] **Step 3:** Implement. Check for a transcript under the config folder's `projects/*/<id>.jsonl`, honoring `CLAUDE_CONFIG_DIR`. Keep window size with `tauri-plugin-window-state`.
+- [ ] **Step 4:** Run them. Expected: pass. Check by hand: tabs, splits and a real Claude tab, kill the host and all shells, reopen, and all return. A `claude` typed by hand in a shell tab comes back as a shell until the stage 2 hooks can see it. Record that limit in `DESIGN.md`.
+- [ ] **Step 5:** Commit: `feat: restore sessions and layout after a restart`.
+
+## Task 12: Speed pass
+
+**Files:** Modify whatever the measurements point to. Modify `DESIGN.md` speed tables.
+
+- [ ] **Step 1:** Ask Alex for a go, and measure the full app as in Task 7, 3 runs each against kitty, with the sidebar-free tab bar on.
+- [ ] **Step 2:** Find the cause of presses over 30 ms using timestamps at keydown, socket send, host read, host send, client receive and draw. Use the `superpowers:systematic-debugging` skill. Report the cause with its evidence.
+- [ ] **Step 3:** Fix what the evidence supports, one change at a time, measuring each. Ask Alex for a go before each focus-taking run. Keep only changes that measurably help.
+- [ ] **Step 4:** Report whether it matches or beats kitty. If it can't, record the gap and the case for replacing only the Mac drawing, for Alex to decide.
+- [ ] **Step 5:** Run all tests and the release build. Remind Alex to turn off the Mac screen recording permissions if testing is over. Commit: `perf: speed pass`.
+
+---
+
+## Open questions for Alex
+
+- Which account is the second one for Task 2. Waiting on Alex, not blocking.
+
+## Handoffs
+
+(One short note per finished task: what changed, what was verified and how, anything the next task should know.)
