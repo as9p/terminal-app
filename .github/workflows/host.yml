@@ -1,0 +1,29 @@
+name: host
+
+# Only when the host can have changed. On a private repo a macOS minute costs ten of the free
+# monthly minutes and a Windows minute costs two.
+on:
+  push:
+    paths:
+      - "host/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/host.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      # A failure on one system says nothing about the other, so let both finish.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p term-host

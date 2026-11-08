@@ -135,7 +135,7 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 
 **Files:** Create `tools/keylat/test-app.sh`, `tools/speed/throughput.sh`, `tools/speed/README.md`. Modify `DESIGN.md` speed tables.
 
-- [ ] **Step 1:** Write `test-app.sh` from `test-build2.sh`: a release build, a host on its own port and data folder, and `SHELL` set to `cat-shell.sh`, then 60 presses with `keep-size`.
+- [x] **Step 1:** Write `test-app.sh` from `test-build2.sh`: a release build, a host on its own port and data folder, and `SHELL` set to `cat-shell.sh`, then 60 presses with `keep-size`.
 - [ ] **Step 2:** Ask Alex for a go, then run it through `runner.command` as `run-kitty-test.sh` shows. Rerun kitty in the same sitting, so the comparison is fair, and run each 3 times.
 - [ ] **Step 3:** Measure throughput with 30 MB of colored text, three times, visible tab.
 - [ ] **Step 4:** Record median, 95th percentile, share over 30 ms, backspace and MB/s in `DESIGN.md`. Missing a target stops this plan's UI work until the cause is known.
@@ -208,6 +208,9 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 
 - Which account is the second one for Task 2. Waiting on Alex, not blocking.
 - Whether test runs may unset `CLAUDECODE` through a wrapper script. Something blocked `env -u` in Task 1 and the agent worked around it. The source of the block is unknown. Task 2 needs an answer.
+- Task 6 Step 3: Alex's hand check of the release app, including the stray 280x168 window and the small round bubble near the cursor.
+- Task 7 Steps 2 and 3: a go for `tools/speed/run-sitting.sh task-7`. It takes the keyboard for about 4 minutes. Tasks 9 and 10 wait on its result.
+- Task 8 Step 1: the permission check refused creating the private repo, so Alex runs that command. The workflow in Step 2 and the PC test in Step 3 can't run until the repo exists.
 
 ## Handoffs
 
