@@ -125,6 +125,20 @@ fn read_acking_until(
 }
 
 #[cfg(unix)]
+/// Leaves a program finished while its client is over the limit and its last output waits.
+#[cfg(unix)]
+fn held_back_past_exit(shell: &str) -> (SessionHandle, Receiver<ClientEvent>, ClientId, u64) {
+    let handle = Session::spawn_with_env(spec(), SIZE, shell_env(shell)).unwrap();
+    let (tx, rx) = client();
+    let id = handle.attach(tx, SIZE);
+    handle.write(b"go\n").unwrap();
+    let sent = read_past_limit(&rx);
+    handle.write(b"go\n").unwrap();
+    // Well past the drain grace, with the program gone and its tail waiting.
+    assert_no_events(&rx, Duration::from_millis(1500));
+    (handle, rx, id, sent)
+}
+
 fn assert_no_events(rx: &Receiver<ClientEvent>, wait: Duration) {
     assert_eq!(rx.recv_timeout(wait), Err(RecvTimeoutError::Timeout));
 }
@@ -143,6 +157,7 @@ mod fixtures {
         pub flood: String,
         pub counting_flood: String,
         pub flood_then_tail: String,
+        pub flood_then_background: String,
         pub wide_history: String,
         pub root: PathBuf,
         pub home: String,
@@ -207,6 +222,16 @@ mod fixtures {
                     "flood-then-tail",
                     &format!(
                         "read -r _\nhead -c {} /dev/zero | tr '\\0' x\nread -r _\nprintf tail-marker\nexit 0",
+                        super::FLOOD_LIMIT + 1024
+                    ),
+                ),
+                // The same, leaving a background program that holds the terminal open, so
+                // the end of output does not come and only the drain grace can end the wait.
+                flood_then_background: script(
+                    &root,
+                    "flood-then-background",
+                    &format!(
+                        "read -r _\nhead -c {} /dev/zero | tr '\\0' x\nread -r _\n(trap '' HUP; exec sleep 8) &\nprintf tail-marker\nexit 0",
                         super::FLOOD_LIMIT + 1024
                     ),
                 ),
@@ -575,18 +600,27 @@ fn idle_client_under_the_limit_is_kept() {
 #[cfg(unix)]
 #[test]
 fn output_tail_survives_a_held_back_client_at_exit() {
-    let handle =
-        Session::spawn_with_env(spec(), SIZE, shell_env(&fixtures::get().flood_then_tail)).unwrap();
-    let (tx, rx) = client();
-    let id = handle.attach(tx, SIZE);
-    handle.write(b"go\n").unwrap();
-    let sent = read_past_limit(&rx);
-    handle.write(b"go\n").unwrap();
-    // Well past the drain grace, with the program gone and its tail waiting.
-    assert_no_events(&rx, Duration::from_millis(1500));
-
+    let (handle, rx, id, sent) = held_back_past_exit(&fixtures::get().flood_then_tail);
     handle.ack(id, sent);
     read_until(&rx, READ_LIMIT, |out| out.contains("tail-marker"));
+    assert_eq!(wait_for_exit(&rx, READ_LIMIT), (true, None));
+}
+
+#[cfg(unix)]
+#[test]
+fn exit_is_announced_when_a_hold_lifts_and_the_terminal_stays_open() {
+    let (handle, rx, id, sent) = held_back_past_exit(&fixtures::get().flood_then_background);
+    handle.ack(id, sent);
+    read_until(&rx, READ_LIMIT, |out| out.contains("tail-marker"));
+    assert_eq!(wait_for_exit(&rx, READ_LIMIT), (true, None));
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_after_exit_ends_the_wait_for_a_held_back_client() {
+    let (handle, rx, _id, _sent) = held_back_past_exit(&fixtures::get().flood_then_tail);
+    handle.kill();
+    // Sooner than the stale limit, and clean because the program ended before the kill.
     assert_eq!(wait_for_exit(&rx, READ_LIMIT), (true, None));
 }
 
