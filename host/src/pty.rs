@@ -73,7 +73,7 @@ fn is_open_race(message: &str) -> bool {
 /// does not have, and the child then dies with SIGKILL before it reaches exec. Running
 /// the setup before any fork leaves the child nothing to wait on.
 #[cfg(target_os = "macos")]
-fn prepare_for_fork() {
+pub fn prepare_for_fork() {
     use std::sync::Once;
 
     unsafe extern "C" {
@@ -86,7 +86,7 @@ fn prepare_for_fork() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn prepare_for_fork() {}
+pub fn prepare_for_fork() {}
 
 pub(crate) fn spawn(spec: &SpawnSpec, size: Size, env: Vec<(String, String)>) -> Result<Pty> {
     prepare_for_fork();
