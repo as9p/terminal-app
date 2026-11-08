@@ -1,7 +1,41 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use term_host::{Screen, Size};
+
+/// Counts live bytes, because resident size cannot tell memory the screen still holds from
+/// memory it freed: the system allocator keeps freed pages around for reuse.
+struct Counting;
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: every call is passed straight to the system allocator, only counted on the way.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        LIVE.fetch_add(new_size, Ordering::Relaxed);
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+fn live_mb() -> f64 {
+    LIVE.load(Ordering::Relaxed) as f64 / MB
+}
 
 const SIZE: Size = Size {
     cols: 200,
@@ -151,7 +185,63 @@ fn measure_speed() {
     black_box(screen.vt().scrollback_len());
 }
 
+/// Resident size right now, where `peak_rss_mb` can never show memory being given back.
+fn current_rss_mb() -> f64 {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps runs");
+    let kib: f64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("ps prints a number");
+    kib * 1024.0 / MB
+}
+
+/// A shell's output is mostly short lines, which vt100 stores trimmed. A snapshot must not
+/// leave them padded, and the memory it uses for the moment should be reused by the next
+/// one, so several sessions are attached in turn. Run alone with the `short` argument, to
+/// keep the other measurements out of the resident size.
+fn measure_short_lines() {
+    const SESSIONS: usize = 4;
+    let before = current_rss_mb();
+    let mut rng = Rng(0x0dd_ba11_c0ff_ee42);
+    let mut line = Vec::new();
+    let mut screens = Vec::new();
+    for _ in 0..SESSIONS {
+        let mut screen = Screen::new(SIZE, SCROLLBACK);
+        for _ in 0..SCROLLBACK + usize::from(SIZE.rows) {
+            line.clear();
+            push_line(&mut rng, 40, &mut line);
+            screen.feed(&line);
+        }
+        screens.push(screen);
+    }
+    let live_filled = live_mb();
+    let rss_filled = current_rss_mb() - before;
+
+    let start = Instant::now();
+    let mut size = 0;
+    for screen in &mut screens {
+        let snapshot = screen.snapshot();
+        size = snapshot.len();
+        black_box(snapshot);
+    }
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0 / SESSIONS as f64;
+    println!(
+        "short lines, {SESSIONS} sessions of {SCROLLBACK} lines at 40 characters: live {live_filled:.1} MiB before snapshots, {:.1} MiB after; resident {rss_filled:.1} MiB before, {:.1} MiB after; each snapshot {elapsed:.1} ms and {:.1} MiB",
+        live_mb(),
+        current_rss_mb() - before,
+        size as f64 / MB,
+    );
+    black_box(screens);
+}
+
 fn main() {
+    if std::env::args().any(|arg| arg == "short") {
+        measure_short_lines();
+        return;
+    }
     measure_memory_and_snapshot();
     measure_speed();
 }

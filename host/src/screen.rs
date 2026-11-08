@@ -52,9 +52,8 @@ impl Screen {
     }
 
     /// Bytes that rebuild this screen when replayed into a terminal of the same size,
-    /// whatever that terminal was showing. Takes `&mut self` because vt100 only shows
-    /// scrollback and the hidden main screen through its own scroll offset and active
-    /// grid. Both are put back before returning.
+    /// whatever that terminal was showing. Takes `&mut self` because vt100 only shows the
+    /// hidden main screen through its active grid, which is put back before returning.
     pub fn snapshot(&mut self) -> Vec<u8> {
         let mut out = b"\x1bc".to_vec();
 
@@ -85,11 +84,16 @@ impl Screen {
     /// Writes the main grid top to bottom as ordinary output, so that the rows past the
     /// bottom of the receiver scroll into its own scrollback. Ends with the pen reset, and
     /// the cursor where the main grid has it.
-    fn write_main(&mut self, out: &mut Vec<u8>) {
-        let screen = self.parser.screen_mut();
+    ///
+    /// Walks a copy because reading a scrollback row pads it to full width for good, which
+    /// took a short-line session from 27 to 170 MiB at its first attach. The copy costs that
+    /// much for the moment instead. The system allocator tends to keep the freed pages
+    /// resident, but the next snapshot reuses them, so sessions do not add up.
+    fn write_main(&self, out: &mut Vec<u8>) {
+        let mut copy = self.parser.screen().clone();
+        let screen = &mut copy;
         let (rows, cols) = screen.size();
         let (rows, cols) = (rows.get(), cols.get());
-        let offset = screen.scrollback();
         let mut previous = None;
 
         for back in (1..=screen.scrollback_len()).rev() {
@@ -114,7 +118,6 @@ impl Screen {
         out.extend_from_slice(b"\x1b[m");
         out.extend_from_slice(screen.cursor_state_formatted().as_bytes());
         out.extend_from_slice(b"\x1b[m");
-        self.parser.screen_mut().set_scrollback(offset);
     }
 
     /// The vt100 screen itself, for tests that compare cells and scrollback. Takes

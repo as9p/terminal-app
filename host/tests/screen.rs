@@ -30,11 +30,12 @@ fn row_state(screen: &vt100::Screen, row: u16, cols: u16) -> RowState {
         .map(|col| {
             let cell = screen.cell(row, col).expect("cell in range");
             format!(
-                "{:?} {:?} {:?} b{} i{} u{} r{} w{} c{}",
+                "{:?} {:?} {:?} b{} d{} i{} u{} r{} w{} c{}",
                 cell.contents(),
                 cell.fgcolor(),
                 cell.bgcolor(),
                 cell.bold(),
+                cell.dim(),
                 cell.italic(),
                 cell.underline(),
                 cell.inverse(),
@@ -77,10 +78,11 @@ fn state(screen: &mut Screen) -> State {
             vt.cursor_style(),
         ),
         pen: format!(
-            "{:?} {:?} {} {} {} {}",
+            "{:?} {:?} {} {} {} {} {}",
             vt.fgcolor(),
             vt.bgcolor(),
             vt.bold(),
+            vt.dim(),
             vt.italic(),
             vt.underline(),
             vt.inverse(),
@@ -117,7 +119,7 @@ fn feed_edges(screen: &mut Screen) {
 fn feed_main(screen: &mut Screen) {
     for i in 0..500u32 {
         let line = format!(
-            "\x1b[38;5;{}mline {i} \x1b[38;2;{};{};{}mtruecolor \x1b[1mbold\x1b[22;3;4;7m mix\x1b[m 日本語\r\n",
+            "\x1b[38;5;{}mline {i} \x1b[38;2;{};{};{}mtruecolor \x1b[1mbold\x1b[22;2mdim\x1b[22;3;4;7m mix\x1b[m 日本語\r\n",
             i % 256,
             i % 256,
             255 - i % 256,
