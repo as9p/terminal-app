@@ -56,7 +56,8 @@ pub enum ClientEvent {
     Output(Bytes),
     /// The window title changed. Also sent right after the snapshot when there is one.
     Title(String),
-    /// `clean` means a normal process exit, whatever the exit code.
+    /// `clean` means a normal process exit, whatever the exit code, except that on Windows an
+    /// error status code (a crash or Ctrl+C) is not clean.
     Exited {
         clean: bool,
         signal: Option<i32>,

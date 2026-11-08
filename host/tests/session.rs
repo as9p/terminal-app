@@ -464,6 +464,25 @@ fn wait_until_gone(pid: u32) {
     }
 }
 
+// A Windows crash shows up as an error status code, the closest thing to a Unix signal, so
+// the app must say the program stopped instead of closing the tab as if it ended normally.
+#[cfg(windows)]
+#[test]
+fn exit_code_tells_a_crash_from_a_normal_exit() {
+    let handle = Session::spawn(spec(), SIZE).unwrap();
+    let (tx, rx) = client();
+    handle.attach(tx, SIZE);
+    handle.write(b"exit 3\r\n").unwrap();
+    assert_eq!(wait_for_exit(&rx, SLOW_LIMIT), (true, None));
+
+    let handle = Session::spawn(spec(), SIZE).unwrap();
+    let (tx, rx) = client();
+    handle.attach(tx, SIZE);
+    // -1073741819 is 0xC0000005, an access violation.
+    handle.write(b"exit -1073741819\r\n").unwrap();
+    assert_eq!(wait_for_exit(&rx, SLOW_LIMIT), (false, None));
+}
+
 // The host checks the size after every resize and applies it again when it differs, so a
 // stale answer here would mean extra resizes every time.
 #[cfg(windows)]

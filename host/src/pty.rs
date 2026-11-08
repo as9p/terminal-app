@@ -179,8 +179,13 @@ pub(crate) fn wait_for_exit(child: &mut (dyn Child + Send + Sync)) -> Exit {
 /// Blocks until the program ends.
 #[cfg(not(unix))]
 pub(crate) fn wait_for_exit(child: &mut (dyn Child + Send + Sync)) -> Exit {
+    // Windows has no signals. A crash or a Ctrl+C ends a program with an error status code
+    // instead, 0xC0000000 and up (0xC0000005 for an access violation, 0xC000013A for Ctrl+C),
+    // so only those count as unclean, as a signal does on Unix. Any other exit code is clean.
     Exit {
-        clean: child.wait().is_ok(),
+        clean: child
+            .wait()
+            .is_ok_and(|status| status.exit_code() < 0xC000_0000),
         signal: None,
     }
 }
