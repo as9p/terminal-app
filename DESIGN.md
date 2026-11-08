@@ -140,7 +140,7 @@ From onorca.dev on 2026-11-08, as Orca's own claims and not tested here:
 - Available only for a Claude chat, when the other machine is awake, the project exists there or can be pulled, and the project isn't machine-tied. Otherwise the option is greyed with the reason.
 - Mid-turn, it waits for the turn to end.
 - It carries uncommitted changes and chat history. Running commands don't move.
-- Resuming a chat under a different path, especially Mac to Windows, is untested. Test this before promising it.
+- Resuming a chat under a different path works on the Mac: `claude --resume <id>` from a moved folder found the chat with no copying, and continued it in the original transcript file (tested 2026-11-08, see `docs/risky-tests.md`). Mac to Windows is still untested, including when the old path's folder is missing on the other machine. Test this before promising it.
 
 ## Remote Control
 
@@ -163,7 +163,7 @@ Remote Control is Claude Code's own feature for opening a session on this comput
 - It needs a subscription login. A folder Claude hasn't been trusted in needs `claude` run there once first.
 
 **Not tested:**
-- Whether a list of Remote Control sessions can be read at all, from a command or a file. Without one, the sidebar can show only sessions this app started, not ones from elsewhere.
+- Remote Control sessions: no command lists them (checked 2026-11-08, see `docs/risky-tests.md`). `~/.claude/sessions/<pid>.json` has a `bridgeSessionId` field for running local sessions, but whether sessions from a `claude remote-control` server fill it is unknown. Sessions started elsewhere have no known local record, so the sidebar can show only sessions on this computer.
 - Running two servers side by side under different accounts.
 
 **Risks:**
