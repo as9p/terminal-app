@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>terminal-app</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #16141f;
+        color: #cdd6f4;
+        font: 14px monospace;
+      }
+      /* The overlay title bar leaves nothing to grab, so this strip is what moves the window. */
+      #drag-strip {
+        position: fixed;
+        inset: 0 0 auto 0;
+        height: 28px;
+      }
+      #status {
+        padding: 36px 8px 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="drag-strip" data-tauri-drag-region></div>
+    <div id="status">Looking for the host</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

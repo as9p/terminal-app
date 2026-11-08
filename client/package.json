@@ -1,0 +1,21 @@
+{
+  "name": "terminal-app-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:host": "cargo build -p term-host",
+    "build": "tsc --noEmit && vite build",
+    "build:host": "node scripts/build-host.mjs",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Moving the window by its drag strip. host_connection is an app command and needs no entry here.",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
+}
