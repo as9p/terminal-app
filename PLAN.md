@@ -40,10 +40,10 @@ Each of these has its test in the task that owns the code.
 
 **Files:** Create `docs/risky-tests.md`. Modify `DESIGN.md` (the lines these tests settle).
 
-- [ ] **Step 1:** Resume under a different path on the Mac. In a scratch folder run `claude -p --model haiku "Remember the word plum"` with `CLAUDECODE` unset, note the session id, move the folder, then try `claude -p --resume <id> "What word?"` from the new path: first as is, then after copying the transcript into the new path's folder under `~/.claude/projects/`. Record which works.
-- [ ] **Step 2:** Find whether Remote Control sessions can be listed. Read `claude remote-control --help` and `claude --help`, and look for a matching file under `~/.claude`. Read only. Don't start a server. Record the answer, with the exact command or file, or "no list found".
-- [ ] **Step 3:** Write results to `docs/risky-tests.md` and update the "Not tested" lines in `DESIGN.md`.
-- [ ] **Step 4:** Commit: `docs: record resume path and Remote Control list tests`.
+- [x] **Step 1:** Resume under a different path on the Mac. In a scratch folder run `claude -p --model haiku "Remember the word plum"` with `CLAUDECODE` unset, note the session id, move the folder, then try `claude -p --resume <id> "What word?"` from the new path: first as is, then after copying the transcript into the new path's folder under `~/.claude/projects/`. Record which works.
+- [x] **Step 2:** Find whether Remote Control sessions can be listed. Read `claude remote-control --help` and `claude --help`, and look for a matching file under `~/.claude`. Read only. Don't start a server. Record the answer, with the exact command or file, or "no list found".
+- [x] **Step 3:** Write results to `docs/risky-tests.md` and update the "Not tested" lines in `DESIGN.md`.
+- [x] **Step 4:** Commit: `docs: record resume path and Remote Control list tests`.
 
 Mac to Windows resume waits for Task 8, when a PC session is involved.
 
@@ -207,7 +207,10 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 ## Open questions for Alex
 
 - Which account is the second one for Task 2. Waiting on Alex, not blocking.
+- Whether test runs may unset `CLAUDECODE` through a wrapper script. Something blocked `env -u` in Task 1 and the agent worked around it. The source of the block is unknown. Task 2 needs an answer.
 
 ## Handoffs
 
 (One short note per finished task: what changed, what was verified and how, anything the next task should know.)
+
+**Task 1 (9e3ca5c):** Plain `claude --resume <id>` works from a moved folder on the Mac, and keeps writing to the original transcript. No command lists Remote Control sessions. `~/.claude/sessions/<pid>.json` has a `bridgeSessionId` field, and what fills it is unknown. Verified by reading the diff and report and checking that no test folders or processes remain. Mac to Windows resume is still open for Task 8. The test ran through a wrapper script after `env -u` was blocked (see open questions).
