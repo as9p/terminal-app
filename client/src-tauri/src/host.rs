@@ -27,10 +27,16 @@ static START_LOCK: Mutex<()> = Mutex::new(());
 pub struct HostConnection {
     port: u16,
     token: String,
+    /// The page needs this for the `cwd` of a new session.
+    home: String,
 }
 
 pub fn find_or_start() -> Result<HostConnection, String> {
     let _guard = START_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let home = dirs::home_dir()
+        .ok_or("This computer has no home folder")?
+        .to_string_lossy()
+        .into_owned();
     let port = port_from(std::env::var("TERM_HOST_PORT").ok())?;
     let data_dir = data_dir_from(std::env::var_os("TERM_APP_DATA"), dirs::data_dir())?;
     let token_path = data_dir.join(TOKEN_FILE);
@@ -49,6 +55,7 @@ pub fn find_or_start() -> Result<HostConnection, String> {
     Ok(HostConnection {
         port,
         token: token?,
+        home,
     })
 }
 

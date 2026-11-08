@@ -1,6 +1,11 @@
 {
   "identifier": "default",
-  "description": "Moving the window by its drag strip. host_connection is an app command and needs no entry here.",
+  "description": "Moving the window by its drag strip, closing it when its session exits cleanly, and copy on select, which writes the clipboard and never reads it. host_connection is an app command and needs no entry here.",
   "windows": ["main"],
-  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-close",
+    "clipboard-manager:allow-write-text"
+  ]
 }

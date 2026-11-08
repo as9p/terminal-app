@@ -13,6 +13,7 @@ async fn host_connection() -> Result<host::HostConnection, String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![host_connection])
         .run(tauri::generate_context!())
         .expect("tauri failed to run");
