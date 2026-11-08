@@ -95,16 +95,17 @@ fn read_past_limit(rx: &Receiver<ClientEvent>) -> u64 {
     sent
 }
 
-/// Reads and acks the way a client that keeps up would, until `marker` shows up.
+/// Reads and acks the way a client that keeps up would, until `marker` shows up. `taken` is
+/// what the client already holds, since acks are running totals.
 #[cfg(unix)]
 fn read_acking_until(
     handle: &SessionHandle,
     id: ClientId,
     rx: &Receiver<ClientEvent>,
     marker: &str,
+    mut taken: u64,
 ) -> u64 {
     let deadline = Instant::now() + SLOW_LIMIT;
-    let mut taken = 0;
     let mut end = Vec::new();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -124,7 +125,6 @@ fn read_acking_until(
     }
 }
 
-#[cfg(unix)]
 /// Leaves a program finished while its client is over the limit and its last output waits.
 #[cfg(unix)]
 fn held_back_past_exit(shell: &str) -> (SessionHandle, Receiver<ClientEvent>, ClientId, u64) {
@@ -139,6 +139,7 @@ fn held_back_past_exit(shell: &str) -> (SessionHandle, Receiver<ClientEvent>, Cl
     (handle, rx, id, sent)
 }
 
+#[cfg(unix)]
 fn assert_no_events(rx: &Receiver<ClientEvent>, wait: Duration) {
     assert_eq!(rx.recv_timeout(wait), Err(RecvTimeoutError::Timeout));
 }
@@ -158,6 +159,7 @@ mod fixtures {
         pub counting_flood: String,
         pub flood_then_tail: String,
         pub flood_then_background: String,
+        pub flood_until_interrupted: String,
         pub wide_history: String,
         pub root: PathBuf,
         pub home: String,
@@ -225,8 +227,9 @@ mod fixtures {
                         super::FLOOD_LIMIT + 1024
                     ),
                 ),
-                // The same, leaving a background program that holds the terminal open, so
-                // the end of output does not come and only the drain grace can end the wait.
+                // The same, leaving a background program with the terminal open. On Linux the
+                // end of output then never comes and only the drain grace ends the wait. macOS
+                // closes the terminal when the program exits, so there this path cannot run.
                 flood_then_background: script(
                     &root,
                     "flood-then-background",
@@ -234,6 +237,12 @@ mod fixtures {
                         "read -r _\nhead -c {} /dev/zero | tr '\\0' x\nread -r _\n(trap '' HUP; exec sleep 8) &\nprintf tail-marker\nexit 0",
                         super::FLOOD_LIMIT + 1024
                     ),
+                ),
+                // Floods until Ctrl+C, then says so and exits normally.
+                flood_until_interrupted: script(
+                    &root,
+                    "flood-until-interrupted",
+                    "trap 'printf interrupted-marker; exit 0' INT\nyes $(printf '%01000d' 0)\nsleep 30",
                 ),
                 // Enough long lines that the snapshot alone is over the limit.
                 wide_history: script(
@@ -617,6 +626,29 @@ fn exit_is_announced_when_a_hold_lifts_and_the_terminal_stays_open() {
 
 #[cfg(unix)]
 #[test]
+fn ctrl_c_stops_a_held_back_flood_within_a_second() {
+    let handle = Session::spawn_with_env(
+        spec(),
+        SIZE,
+        shell_env(&fixtures::get().flood_until_interrupted),
+    )
+    .unwrap();
+    let (tx, rx) = client();
+    let id = handle.attach(tx, SIZE);
+    let sent = read_past_limit(&rx);
+
+    let pressed = Instant::now();
+    handle.write(b"\x03").unwrap();
+    handle.ack(id, sent);
+    read_acking_until(&handle, id, &rx, "interrupted-marker", sent);
+    let took = pressed.elapsed();
+
+    assert!(took < Duration::from_secs(1), "took {took:?}");
+    assert_eq!(wait_for_exit(&rx, READ_LIMIT), (true, None));
+}
+
+#[cfg(unix)]
+#[test]
 fn kill_after_exit_ends_the_wait_for_a_held_back_client() {
     let (handle, rx, _id, _sent) = held_back_past_exit(&fixtures::get().flood_then_tail);
     handle.kill();
@@ -635,7 +667,7 @@ fn snapshot_over_the_limit_is_kept_if_acked() {
         Session::spawn_with_env(spec(), WIDE, shell_env(&fixtures::get().wide_history)).unwrap();
     let (tx, first) = client();
     let first_id = handle.attach(tx, WIDE);
-    read_acking_until(&handle, first_id, &first, "generated");
+    read_acking_until(&handle, first_id, &first, "generated", 0);
     handle.detach(first_id);
 
     let (tx, rx) = client();
