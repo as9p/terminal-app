@@ -148,7 +148,7 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 - [x] **Step 1:** Create the private repo `as9p/terminal-app` if it's missing, and push. If the permission check refuses, hand Alex the command.
 - [x] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
 - [ ] **Step 3:** Ask a PC session, by message starting `From session <name>:`, to clone the repo, run the tests, type in a real host session through a small test client, and try Mac to Windows chat resume. Save its reported results in `docs/windows-test.md`, marked as reported, not seen here.
-- [ ] **Step 4:** Commit: `ci(host): test on Windows and Mac`.
+- [x] **Step 4:** Commit: `ci(host): test on Windows and Mac`. Done as c1ec2e3 and the commits after it.
 
 ## Task 9: Tab and split review (waits on Alex)
 
@@ -210,6 +210,7 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 - Whether test runs may unset `CLAUDECODE` through a wrapper script. Something blocked `env -u` in Task 1 and the agent worked around it. The source of the block is unknown. Task 2 needs an answer.
 - Task 6 Step 3: Alex's hand check of the release app, including the stray 280x168 window and the small round bubble near the cursor.
 - Task 7 Steps 2 and 3: a go for `tools/speed/run-sitting.sh task-7`. It takes the keyboard for about 4 minutes. Tasks 9 and 10 wait on its result.
+- Task 8 Step 3: no session on the PC is reachable from this Mac (ListAgents shows only Mac sessions). Alex starts Claude Code on the PC with Remote Control on, or says to skip the PC hand test for now. CI already runs the host tests on Windows.
 
 ## Handoffs
 
@@ -249,3 +250,12 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 - AeroSpace tiles the window by default, so its size depends on the workspace. 1280x800 applies only when floated.
 - Open: an extra 280x168 window at layer 0 from the app's process, which AeroSpace does not list, and a small round bubble near the cursor. Probably macOS's text input indicator, not proven. Both are in Alex's hand check.
 - Task 10 and 11: exited sessions pile up in the host list, and `main.ts` start-up and bar code needs sharing out for tabs. Task 8: Windows detach flags in `start_host`, Windows origin.
+
+**Task 8 (c1ec2e3, 028dd70, 7341dec, d0f58a9, 5e6f1f1, 3eabd87), Step 3 waits on a PC session:** The host runs on Windows in CI. `host.yml` tests on windows-latest and macos-latest, and `app.yml` lints and tests the app's Rust side on Windows, because this Mac can't build the app for Windows (tauri-winres needs `llvm-rc`). Verified by CI runs 42527059403 (app), 42533187099 (host) and 42533611436 (host, with the crash exit test seen passing in the Windows log). Windows tests now cover echo, resize read-back (`get_size` reports 100x40 on ConPTY, so no extra resizes), the output hold, a stale client drop, the drain restart at exit, kill while held back, and crash exit codes.
+
+- Measured on the runner: ConPTY passes about 1.42 MB/s with no lines dropped, and a client that never acks goes over 4 MiB in about 3.2 s at 400 columns.
+- ConPTY sets a window title at program start, and cmd sets one per command, so Windows sends many more Title events than macOS. Tests skip them, and title events add bytes to a flood.
+- Ruling: on Windows an exit code of 0xC0000000 and up (a crash, Ctrl+C) is unclean, any other code clean, matching Unix where only a signal is unclean. A kill is unclean on both through `kill_sent`.
+- Fragile: the Windows drain test relies on about 4 KiB of output after the limit fitting in the host's buffers. A Windows build that sends output in much smaller pieces could make it flaky.
+- Still not run anywhere: real typing on Windows, the app window on Windows, an input thread stuck after a kill when a background child holds the terminal, and Mac to Windows chat resume. All are Step 3.
+- The app starts the host detached on Windows (no console window, home folder as working folder). `http://tauri.localhost` was already an allowed origin.
