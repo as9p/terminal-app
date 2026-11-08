@@ -26,10 +26,15 @@ export type TerminalViewEvents = {
   onTitle?(title: string): void;
 };
 
-/** Call before creating the first view, so its first fit measures the real font. */
+/**
+ * Call before creating the first view, so its first fit measures the real font. All four faces,
+ * because xterm caches each glyph once: bold text drawn before its face loads would stay wrong.
+ */
 export async function terminalFontReady(): Promise<void> {
+  const family = '"JetBrainsMono Nerd Font Mono"';
+  const styles = ["", "bold ", "italic ", "italic bold "];
   try {
-    await document.fonts.load(`${fontSize}px "JetBrainsMono Nerd Font Mono"`);
+    await Promise.all(styles.map((style) => document.fonts.load(`${style}${fontSize}px ${family}`)));
   } catch {
     // The font stack falls back to monospace.
   }
@@ -66,6 +71,8 @@ export class TerminalView {
       drawBoldTextInBrightColors: false,
       fontFamily,
       fontSize,
+      // xterm rounds a glyph's width down and kitty rounds it up. One device pixel matches kitty.
+      letterSpacing: 1,
       lineHeight,
       scrollback: 20000,
       theme,

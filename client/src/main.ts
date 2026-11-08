@@ -1,4 +1,5 @@
 import "@xterm/xterm/css/xterm.css";
+import "./fonts.css";
 
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -11,6 +12,7 @@ import { theme } from "./theme";
 type HostConnection = HostAddress & { home: string };
 
 const RETRY_MS = 1000;
+const RETRY_MAX_MS = 30_000;
 const NOTE_MS = 4000;
 const LOST_TEXT = "Lost the host, reconnecting";
 
@@ -148,6 +150,9 @@ async function main(): Promise<void> {
   async function bringUp(): Promise<void> {
     if (bringingUp) return;
     bringingUp = true;
+    // Finding the host starts it if it is gone, so a host that keeps crashing must not be
+    // started again every second.
+    let retry = RETRY_MS;
     for (;;) {
       connection?.close();
       let port: number | undefined;
@@ -177,7 +182,8 @@ async function main(): Promise<void> {
         return;
       } catch (error) {
         bar.show(describe(error, port));
-        await sleep(RETRY_MS);
+        await sleep(retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
       }
     }
   }
