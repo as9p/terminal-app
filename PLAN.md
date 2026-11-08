@@ -68,16 +68,16 @@ Mac to Windows resume waits for Task 8, when a PC session is involved.
 
 Each session has a reader thread feeding a bounded channel and one actor thread. The actor forwards bytes to attached clients first, then feeds the screen copy. Attach, detach and resize go through the actor, so attach happens at one exact point in the output.
 
-- [ ] **Step 1:** Write failing tests in `host/tests/session.rs`:
+- [x] **Step 1:** Write failing tests in `host/tests/session.rs`:
   - `echo_round_trip`: spawn `cat` (Windows: `cmd /c more`), write `hello\n`, read it back within 2 s.
   - `resize_reaches_program`: resize to 100x40, `stty size` prints `40 100` (Unix only).
   - `exit_reports_clean_or_signal`: `exit` reports clean; a `SIGHUP` kill reports a signal (Unix only).
   - `clean_env_strips`: `CLAUDECODE`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_*`, `KITTY_*`, `ORCA_*` removed; `TERM=xterm-256color`, `COLORTERM=truecolor` set.
   - `login_shell_finds_path`: a spawn with a bare environment still gets the PATH from the login shell (Unix only).
-- [ ] **Step 2:** Run `cargo test -p term-host --test session`. Expected: fails to compile.
-- [ ] **Step 3:** Implement. Shell: `$SHELL -l`, using `SHELL` from the host's environment so the speed tests can swap it. Windows: `COMSPEC`. Claude on Unix: `$SHELL -lic 'exec claude --session-id <uuid>'`, or `--resume <uuid>` when `resume` is true. Claude on Windows: `cmd /c claude ...`.
-- [ ] **Step 4:** Run the tests. Expected: pass.
-- [ ] **Step 5:** Commit: `feat(host): spawn and run terminal sessions`.
+- [x] **Step 2:** Run `cargo test -p term-host --test session`. Expected: fails to compile.
+- [x] **Step 3:** Implement. Shell: `$SHELL -l`, using `SHELL` from the host's environment so the speed tests can swap it. Windows: `COMSPEC`. Claude on Unix: `$SHELL -lic 'exec claude --session-id <uuid>'`, or `--resume <uuid>` when `resume` is true. Claude on Windows: `cmd /c claude ...`.
+- [x] **Step 4:** Run the tests. Expected: pass.
+- [x] **Step 5:** Commit: `feat(host): spawn and run terminal sessions`.
 
 ## Task 4: Screen copy and attach
 
@@ -214,3 +214,5 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 (One short note per finished task: what changed, what was verified and how, anything the next task should know.)
 
 **Task 1 (9e3ca5c):** Plain `claude --resume <id>` works from a moved folder on the Mac, and keeps writing to the original transcript. No command lists Remote Control sessions. `~/.claude/sessions/<pid>.json` has a `bridgeSessionId` field, and what fills it is unknown. Verified by reading the diff and report and checking that no test folders or processes remain. Mac to Windows resume is still open for Task 8. The test ran through a wrapper script after `env -u` was blocked (see open questions).
+
+**Task 3:** Host sessions work: spawn, write, resize, kill with escalation, attach, detach, exit events. Verified by 22 passing tests, clippy, fmt, and 200 repeat runs of the session tests with no failures. Two macOS flakes fixed in `host/src/pty.rs`: a bounded retry on the kernel's -6 open race, and running libnotify's run-once setup before any fork, because a fork child could die with SIGKILL in `_notify_fork_child`. Which parent thread held that gate is still unknown. Any new code that forks must call `prepare_for_fork` first. Task 4: attach only subscribes so far, snapshot and throttle are yours. Task 8: the Windows parts have never compiled; the startup cursor reply rests on memory of the ConPTY stall, and the Windows echo test runs `more` inside COMSPEC. Task 11: `SpawnSpec.uuid` is unused so far, Claude uses `chat`; any exit after `kill()` now reports not clean, including a shell that answers SIGHUP with a normal exit.
