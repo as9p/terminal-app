@@ -1,13 +1,29 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use bytes::Bytes;
+#[cfg(unix)]
+use crossbeam_channel::RecvTimeoutError;
 use crossbeam_channel::{Receiver, unbounded};
 use term_host::{ClientEvent, ClientTx, Kind, Session, SessionHandle, Size, SpawnSpec, clean_env};
+#[cfg(unix)]
+use term_host::{ClientId, Screen};
 use uuid::Uuid;
 
 const SIZE: Size = Size { cols: 80, rows: 24 };
 const READ_LIMIT: Duration = Duration::from_secs(2);
 const SLOW_LIMIT: Duration = Duration::from_secs(10);
+// Long enough to notice a program that is still going. Only ever used to check that
+// nothing happens, so a slow machine can't make a correct host fail on it.
+#[cfg(unix)]
+const QUIET: Duration = Duration::from_millis(300);
+#[cfg(unix)]
+const FLOOD_LIMIT: u64 = 4 * 1024 * 1024;
+#[cfg(unix)]
+const MAX_CHUNK: u64 = 64 * 1024;
+#[cfg(unix)]
+const STALE_LIMIT: Duration = Duration::from_secs(5);
 
 fn spec() -> SpawnSpec {
     SpawnSpec {
@@ -21,7 +37,8 @@ fn client() -> (ClientTx, Receiver<ClientEvent>) {
     unbounded()
 }
 
-/// Collects output until `done` accepts it, or panics with what arrived.
+/// Collects output until `done` accepts it, or panics with what arrived. Skips the
+/// snapshot, so `done` only ever sees bytes produced after the attach.
 fn read_until(rx: &Receiver<ClientEvent>, limit: Duration, done: impl Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + limit;
     let mut seen = Vec::new();
@@ -32,6 +49,7 @@ fn read_until(rx: &Receiver<ClientEvent>, limit: Duration, done: impl Fn(&str) -
         }
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
+            Ok(ClientEvent::Snapshot(_)) => {}
             Ok(ClientEvent::Output(bytes)) => seen.extend_from_slice(&bytes),
             other => panic!("stopped with {other:?}, output so far: {text:?}"),
         }
@@ -44,11 +62,71 @@ fn wait_for_exit(rx: &Receiver<ClientEvent>, limit: Duration) -> (bool, Option<i
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
-            Ok(ClientEvent::Output(_)) => {}
+            Ok(ClientEvent::Snapshot(_) | ClientEvent::Output(_)) => {}
             Ok(ClientEvent::Exited { clean, signal }) => return (clean, signal),
             Err(err) => panic!("no exit event: {err}"),
         }
     }
+}
+
+#[cfg(unix)]
+fn take_snapshot(rx: &Receiver<ClientEvent>) -> Bytes {
+    match rx.recv_timeout(READ_LIMIT) {
+        Ok(ClientEvent::Snapshot(bytes)) => bytes,
+        other => panic!("wanted the snapshot first, got {other:?}"),
+    }
+}
+
+/// Reads without acking until the client is over the limit, and returns how many bytes it
+/// has been sent. Assumes everything sent since the attach is still in `rx`.
+#[cfg(unix)]
+fn read_past_limit(rx: &Receiver<ClientEvent>) -> u64 {
+    let deadline = Instant::now() + SLOW_LIMIT;
+    let mut sent = 0;
+    while sent <= FLOOD_LIMIT {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(ClientEvent::Snapshot(bytes) | ClientEvent::Output(bytes)) => {
+                sent += bytes.len() as u64;
+            }
+            other => panic!("stopped at {sent} bytes with {other:?}"),
+        }
+    }
+    sent
+}
+
+/// Reads and acks the way a client that keeps up would, until `marker` shows up.
+#[cfg(unix)]
+fn read_acking_until(
+    handle: &SessionHandle,
+    id: ClientId,
+    rx: &Receiver<ClientEvent>,
+    marker: &str,
+) -> u64 {
+    let deadline = Instant::now() + SLOW_LIMIT;
+    let mut taken = 0;
+    let mut end = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(ClientEvent::Snapshot(bytes) | ClientEvent::Output(bytes)) => {
+                taken += bytes.len() as u64;
+                handle.ack(id, taken);
+                end.extend_from_slice(&bytes);
+                if String::from_utf8_lossy(&end).contains(marker) {
+                    return taken;
+                }
+                // Only the part that could be the start of a marker split across chunks.
+                end.drain(..end.len().saturating_sub(marker.len()));
+            }
+            other => panic!("stopped after {taken} bytes with {other:?}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn assert_no_events(rx: &Receiver<ClientEvent>, wait: Duration) {
+    assert_eq!(rx.recv_timeout(wait), Err(RecvTimeoutError::Timeout));
 }
 
 #[cfg(unix)]
@@ -61,6 +139,12 @@ mod fixtures {
         pub cat: String,
         pub hup_ignoring_cat: String,
         pub hup_exiting_shell: String,
+        pub numbered_lines: String,
+        pub flood: String,
+        pub counting_flood: String,
+        pub flood_then_tail: String,
+        pub wide_history: String,
+        pub root: PathBuf,
         pub home: String,
         pub login_home: String,
     }
@@ -96,6 +180,43 @@ mod fixtures {
                     "hup-exiting-shell",
                     "trap 'exit 0' HUP\nwhile read -r line; do echo \"got-$line\"; done",
                 ),
+                // Fewer lines than the scrollback holds, so an attach running late can't
+                // lose the start. The pauses leave plenty of time to attach mid-stream, and
+                // the blank lines at the end mean a late attach still sees later bytes.
+                numbered_lines: script(
+                    &root,
+                    "numbered-lines",
+                    "i=0\nwhile [ $i -lt 15000 ]; do\n  printf '\\033[3%dmn-%d\\033[m\\n' $((i % 7)) $i\n  i=$((i+1))\n  if [ $((i % 100)) = 0 ]; then sleep 0.01; fi\ndone\nyes '' | head -n 200\nexec cat",
+                ),
+                flood: script(&root, "flood", "exec yes $(printf '%01000d' 0)"),
+                // Writes down how far it got, named by pid, so a test can see the program
+                // itself stop and not only its output.
+                counting_flood: script(
+                    &root,
+                    "counting-flood",
+                    &format!(
+                        "line=$(printf '%01000d' 0)\ni=0\nwhile :; do\n  echo \"$line\"\n  i=$((i+1))\n  echo \"$i\" > \"{}/flood-$$\"\ndone",
+                        root.display()
+                    ),
+                ),
+                // Waits on input at both ends, so a test can have the program finish only
+                // once output is being held back. No newlines, so the terminal adds no
+                // bytes and the flood is sure to pass the limit by a little.
+                flood_then_tail: script(
+                    &root,
+                    "flood-then-tail",
+                    &format!(
+                        "read -r _\nhead -c {} /dev/zero | tr '\\0' x\nread -r _\nprintf tail-marker\nexit 0",
+                        super::FLOOD_LIMIT + 1024
+                    ),
+                ),
+                // Enough long lines that the snapshot alone is over the limit.
+                wide_history: script(
+                    &root,
+                    "wide-history",
+                    "yes $(printf '%0399d' 0) | head -n 12000\necho generated\nexec cat",
+                ),
+                root: root.clone(),
                 home: home.to_str().unwrap().to_string(),
                 login_home: login_home.to_str().unwrap().to_string(),
             }
@@ -192,6 +313,7 @@ fn spawn_and_echo_own_token(shell: &str, token: &str) -> Result<(), String> {
         }
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
+            Ok(ClientEvent::Snapshot(_)) => {}
             Ok(ClientEvent::Output(bytes)) => seen.extend_from_slice(&bytes),
             other => return Err(format!("{other:?}, output so far: {text:?}")),
         }
@@ -290,9 +412,211 @@ fn attach_starts_at_an_exact_point() {
 
     let (tx, second) = client();
     handle.attach(tx, SIZE);
+    // What came before arrives once, in the snapshot, and is not replayed as output.
+    let snapshot = take_snapshot(&second);
+    assert!(String::from_utf8_lossy(&snapshot).contains("before"));
     handle.write(b"after\n").unwrap();
     let out = read_until(&second, READ_LIMIT, |out| out.matches("after").count() >= 2);
     assert!(!out.contains("before"), "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn attach_mid_stream_no_loss_no_dup() {
+    let (handle, first) = spawn_shell(&fixtures::get().numbered_lines);
+    read_until(&first, SLOW_LIMIT, |out| out.contains("n-"));
+
+    let (tx, second) = client();
+    handle.attach(tx, SIZE);
+    let mut replay = Screen::new(SIZE, 20_000);
+    replay.feed(&take_snapshot(&second));
+    let mut later_lines = 0;
+    while later_lines < 200 {
+        match second.recv_timeout(SLOW_LIMIT) {
+            Ok(ClientEvent::Output(bytes)) => {
+                replay.feed(&bytes);
+                later_lines += bytes.iter().filter(|&&byte| byte == b'\n').count();
+            }
+            other => panic!("stopped after {later_lines} lines with {other:?}"),
+        }
+    }
+
+    let vt = replay.vt();
+    let cols = vt.size().1.get();
+    let mut rows = Vec::new();
+    for back in (1..=vt.scrollback_len()).rev() {
+        vt.set_scrollback(back);
+        rows.extend(vt.rows(0, cols).next());
+    }
+    vt.set_scrollback(0);
+    rows.extend(vt.rows(0, cols));
+    let mut numbers: Vec<usize> = rows
+        .iter()
+        .filter_map(|row| row.strip_prefix("n-")?.parse().ok())
+        .collect();
+    // The last line may still be arriving, which would read as a smaller number.
+    numbers.pop();
+    assert!(numbers.len() >= 100, "only {} lines", numbers.len());
+    let expected: Vec<usize> = (0..numbers.len()).collect();
+    assert_eq!(numbers, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn flood_stays_bounded() {
+    let (handle, rx) = spawn_shell(&fixtures::get().counting_flood);
+    let sent = read_past_limit(&rx);
+    assert!(sent <= FLOOD_LIMIT + MAX_CHUNK, "sent {sent}");
+    assert_no_events(&rx, QUIET);
+
+    // The program itself stops once the channel and terminal are full.
+    let progress = fixtures::get()
+        .root
+        .join(format!("flood-{}", handle.pid().unwrap()));
+    let deadline = Instant::now() + SLOW_LIMIT;
+    let mut last = None;
+    let lines: u64 = loop {
+        let now = std::fs::read_to_string(&progress)
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        if let (Some(lines), true) = (now, now == last) {
+            break lines;
+        }
+        assert!(Instant::now() < deadline, "still writing at {now:?}");
+        last = now;
+        std::thread::sleep(QUIET);
+    };
+    // 1000 digits and the end of line. The slack is the output channel and the terminal.
+    assert!(
+        lines * 1002 <= sent + 2 * 1024 * 1024,
+        "{lines} lines with {sent} sent"
+    );
+
+    let (other, other_rx) = spawn_shell(&fixtures::get().cat);
+    other.write(b"hello\n").unwrap();
+    read_until(&other_rx, READ_LIMIT, |out| {
+        out.matches("hello").count() >= 2
+    });
+
+    // Control messages still get through: this one only returns once the actor answers.
+    let (tx, late) = client();
+    handle.attach(tx, SIZE);
+    take_snapshot(&late);
+
+    // The next thing this client hears is the exit: it gets no more output, even though
+    // the kill makes the host read the program's last bytes.
+    handle.kill();
+    let exited = ClientEvent::Exited {
+        clean: false,
+        signal: Some(libc::SIGHUP),
+    };
+    assert_eq!(rx.recv_timeout(SLOW_LIMIT), Ok(exited));
+    assert_eq!(
+        wait_for_exit(&late, READ_LIMIT),
+        (false, Some(libc::SIGHUP))
+    );
+    let _ = std::fs::remove_file(progress);
+}
+
+#[cfg(unix)]
+#[test]
+fn dropping_the_handle_ends_a_held_back_program() {
+    let (handle, rx) = spawn_shell(&fixtures::get().flood);
+    read_past_limit(&rx);
+    let pid = handle.pid().unwrap() as i32;
+    drop(handle);
+    assert_eq!(wait_for_exit(&rx, SLOW_LIMIT), (false, Some(libc::SIGHUP)));
+    // Signal 0 only checks that the process exists.
+    assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "pid {pid} still running");
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_client_dropped() {
+    let handle = Session::spawn_with_env(spec(), SIZE, shell_env(&fixtures::get().flood)).unwrap();
+    // The live one first, so by the time the stale one has a chunk the live one has too.
+    let (tx, live) = client();
+    let live_id = handle.attach(tx, SIZE);
+    let (tx, stale) = client();
+    handle.attach(tx, SIZE);
+
+    read_past_limit(&stale);
+    let held_at = Instant::now();
+    let taken = live.try_iter().fold(0, |sum, event| match event {
+        ClientEvent::Snapshot(bytes) | ClientEvent::Output(bytes) => sum + bytes.len() as u64,
+        other => panic!("{other:?}"),
+    });
+    handle.ack(live_id, taken);
+    assert_no_events(&live, QUIET);
+
+    // Dropped, not merely quiet: the channel reports its sender has gone.
+    assert_eq!(
+        stale.recv_timeout(SLOW_LIMIT),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    assert!(held_at.elapsed() >= STALE_LIMIT - Duration::from_secs(2));
+
+    // The throttle has lifted for the client that is left.
+    assert!(matches!(
+        live.recv_timeout(SLOW_LIMIT),
+        Ok(ClientEvent::Output(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_client_under_the_limit_is_kept() {
+    let (handle, rx) = spawn_shell(&fixtures::get().cat);
+    std::thread::sleep(STALE_LIMIT + Duration::from_millis(500));
+    handle.write(b"hello\n").unwrap();
+    read_until(&rx, READ_LIMIT, |out| out.matches("hello").count() >= 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn output_tail_survives_a_held_back_client_at_exit() {
+    let handle =
+        Session::spawn_with_env(spec(), SIZE, shell_env(&fixtures::get().flood_then_tail)).unwrap();
+    let (tx, rx) = client();
+    let id = handle.attach(tx, SIZE);
+    handle.write(b"go\n").unwrap();
+    let sent = read_past_limit(&rx);
+    handle.write(b"go\n").unwrap();
+    // Well past the drain grace, with the program gone and its tail waiting.
+    assert_no_events(&rx, Duration::from_millis(1500));
+
+    handle.ack(id, sent);
+    read_until(&rx, READ_LIMIT, |out| out.contains("tail-marker"));
+    assert_eq!(wait_for_exit(&rx, READ_LIMIT), (true, None));
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_over_the_limit_is_kept_if_acked() {
+    const WIDE: Size = Size {
+        cols: 400,
+        rows: 24,
+    };
+    let handle =
+        Session::spawn_with_env(spec(), WIDE, shell_env(&fixtures::get().wide_history)).unwrap();
+    let (tx, first) = client();
+    let first_id = handle.attach(tx, WIDE);
+    read_acking_until(&handle, first_id, &first, "generated");
+    handle.detach(first_id);
+
+    let (tx, rx) = client();
+    let id = handle.attach(tx, WIDE);
+    let snapshot = take_snapshot(&rx).len() as u64;
+    assert!(snapshot > FLOOD_LIMIT, "snapshot is only {snapshot}");
+
+    // An ack that leaves it over the limit still restarts the clock, so this client
+    // outlives the limit from attaching. Over the limit means its output is held back.
+    handle.write(b"hello\n").unwrap();
+    assert_no_events(&rx, Duration::from_secs(3));
+    handle.ack(id, 1);
+    assert_no_events(&rx, Duration::from_secs(3));
+    handle.ack(id, snapshot);
+    read_until(&rx, READ_LIMIT, |out| out.matches("hello").count() >= 2);
 }
 
 #[cfg(unix)]
@@ -305,7 +629,8 @@ fn detach_stops_output() {
     handle.ack(id, 10);
     handle.write(b"hello\n").unwrap();
     read_until(&kept, READ_LIMIT, |out| out.matches("hello").count() >= 2);
-    // The actor dropped this client's sender, and it never saw any output.
+    // The actor dropped this client's sender, and it saw nothing after its snapshot.
+    take_snapshot(&gone);
     assert!(gone.recv_timeout(READ_LIMIT).is_err());
 }
 
@@ -360,12 +685,24 @@ fn kill_escalates_when_sighup_is_ignored() {
 #[test]
 fn attach_after_exit_reports_the_exit() {
     let (handle, rx) = spawn_shell("/bin/sh");
-    handle.write(b"exit\n").unwrap();
+    let long = "a".repeat(60);
+    handle
+        .write(format!("echo {long}; exit\n").as_bytes())
+        .unwrap();
     wait_for_exit(&rx, SLOW_LIMIT);
 
     let (tx, late) = client();
     handle.attach(tx, SIZE);
+    let snapshot = take_snapshot(&late);
+    assert!(String::from_utf8_lossy(&snapshot).contains(&long));
     assert_eq!(wait_for_exit(&late, READ_LIMIT), (true, None));
+
+    // The terminal has gone, but the screen copy still takes a new size.
+    let (tx, narrow) = client();
+    handle.attach(tx, Size { cols: 20, rows: 24 });
+    let snapshot = take_snapshot(&narrow);
+    assert!(!String::from_utf8_lossy(&snapshot).contains(&long));
+    assert_eq!(wait_for_exit(&narrow, READ_LIMIT), (true, None));
 }
 
 #[cfg(unix)]
