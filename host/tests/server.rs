@@ -1,8 +1,7 @@
 use std::net::{IpAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -107,15 +106,17 @@ fn token_path(dir: &Path) -> PathBuf {
     dir.join("host-token")
 }
 
-/// Asks the system for a free port. Parallel tests must not be handed the same one.
+/// A port no other test has, and that this one found free. Taken from below the range the
+/// system picks outgoing ports from: a port the system hands out as free can be taken by
+/// another test's outgoing connection before the host gets to bind it.
 fn free_port() -> u16 {
-    static HANDED_OUT: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    let mut handed_out = HANDED_OUT.lock().unwrap();
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 20_000 + (std::process::id() % 5_000) as u16 * 2;
     loop {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("find a free port");
-        let port = listener.local_addr().expect("read the free port").port();
-        if !handed_out.contains(&port) {
-            handed_out.push(port);
+        let port = base + NEXT.fetch_add(1, Ordering::Relaxed);
+        // Connecting, not binding: a listener open here for a moment would be copied into any
+        // child another test forks in that moment, and then the host could not bind the port.
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
             return port;
         }
     }
@@ -437,32 +438,85 @@ async fn bad_request_after_hello_stays_open() {
     }
 }
 
-/// Written out as raw JSON so a change to the wire format fails here.
+/// Written out as raw JSON so a change to the wire format fails here. None of these reach a
+/// shell, so this runs everywhere.
 #[tokio::test]
-async fn session_frames_are_understood_but_not_implemented() {
+async fn session_frames_get_named_errors() {
     let host = Host::start();
     let mut ws = signed_in(&host).await;
     let uuid = "7f1d9b3e-2a4c-4e8f-9a6b-0c1d2e3f4a5b";
-    for frame in [
-        json!({"type": "create", "uuid": uuid, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
-        json!({"type": "attach", "session": 1, "cols": 80, "rows": 24}),
-        json!({"type": "detach", "session": 1}),
-        json!({"type": "resize", "session": 1, "cols": 80, "rows": 24}),
-        json!({"type": "kill", "session": 1}),
-        json!({"type": "ack", "session": 1, "bytes": 4096}),
-        json!({"type": "list"}),
-        json!({"type": "layout_get"}),
-        json!({"type": "layout_set", "json": "{}"}),
+    for (frame, expected) in [
+        (
+            json!({"type": "create", "uuid": uuid, "kind": "fish", "cwd": "/", "cols": 80, "rows": 24}),
+            "bad_kind",
+        ),
+        (
+            json!({"type": "create", "uuid": "nope", "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+            "bad_request",
+        ),
+        (
+            json!({"type": "create", "uuid": uuid, "kind": "shell", "cwd": "/", "cols": 0, "rows": 24}),
+            "bad_size",
+        ),
+        (
+            json!({"type": "create", "uuid": uuid, "kind": "shell", "cwd": "/no/such/folder", "cols": 80, "rows": 24}),
+            "bad_cwd",
+        ),
+        (
+            json!({"type": "attach", "session": 9, "cols": 80, "rows": 0}),
+            "bad_size",
+        ),
+        (
+            json!({"type": "attach", "session": 9, "cols": 80, "rows": 24}),
+            "no_session",
+        ),
+        (json!({"type": "detach", "session": 9}), "no_session"),
+        (
+            json!({"type": "resize", "session": 9, "cols": 80, "rows": 24}),
+            "no_session",
+        ),
+        (json!({"type": "kill", "session": 9}), "no_session"),
     ] {
         say(&mut ws, frame.clone()).await;
         let reply = hear(&mut ws).await;
         assert_eq!(reply["type"], "error", "{frame}: {reply}");
-        assert_eq!(reply["code"], "not_implemented", "{frame}: {reply}");
+        assert_eq!(reply["code"], expected, "{frame}: {reply}");
     }
-    ws.send(Message::binary(vec![1, 0, 0, 0, b'x']))
+
+    ws.send(Message::binary(vec![9, 0, 0, 0, b'x']))
         .await
         .expect("send");
-    assert_eq!(hear(&mut ws).await["code"], "not_implemented");
+    assert_eq!(hear(&mut ws).await["code"], "no_session");
+    ws.send(Message::binary(vec![9, 0, 0])).await.expect("send");
+    assert_eq!(hear(&mut ws).await["code"], "bad_request");
+
+    // A late ack is not an error, so the next thing heard is the answer to `list`.
+    say(&mut ws, json!({"type": "ack", "session": 9, "bytes": 1})).await;
+    say(&mut ws, json!({"type": "list"})).await;
+    assert_eq!(
+        hear(&mut ws).await,
+        json!({"type": "sessions", "items": []})
+    );
+}
+
+#[tokio::test]
+async fn layout_is_held_as_an_opaque_string() {
+    let host = Host::start();
+    let mut ws = signed_in(&host).await;
+    say(&mut ws, json!({"type": "layout_get"})).await;
+    assert_eq!(hear(&mut ws).await, json!({"type": "layout", "json": null}));
+
+    say(
+        &mut ws,
+        json!({"type": "layout_set", "json": "not even json"}),
+    )
+    .await;
+    let mut other = signed_in(&host).await;
+    say(&mut other, json!({"type": "layout_get"})).await;
+    assert_eq!(
+        hear(&mut other).await,
+        json!({"type": "layout", "json": "not even json"})
+    );
 }
 
 #[tokio::test]
@@ -556,5 +610,471 @@ async fn partial_token_file_is_replaced() {
         .await;
         hear_close(&mut refused).await;
         signed_in(&host).await;
+    }
+}
+
+#[cfg(unix)]
+mod sessions {
+    use super::*;
+    use term_host::protocol::{decode_binary, encode_binary};
+
+    const FLOOD_LIMIT: usize = 4 * 1024 * 1024;
+    const LARGEST_CHUNK: usize = 64 * 1024;
+    const UUID: &str = "7f1d9b3e-2a4c-4e8f-9a6b-0c1d2e3f4a5b";
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    enum Heard {
+        Text(Value),
+        Bytes(u32, Vec<u8>),
+    }
+
+    async fn hear_any(ws: &mut Ws, wait: Duration) -> Option<Heard> {
+        loop {
+            let frame = timeout(wait, ws.next()).await.ok()?;
+            match frame.expect("the connection ended").expect("read a frame") {
+                Message::Text(text) => {
+                    let value = serde_json::from_str(text.as_str()).expect("parse a host frame");
+                    return Some(Heard::Text(value));
+                }
+                Message::Binary(frame) => {
+                    let (session, bytes) = decode_binary(&frame).expect("a session number");
+                    return Some(Heard::Bytes(session, bytes.to_vec()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The next text frame. Output on the way there is thrown away.
+    async fn hear_text(ws: &mut Ws) -> Value {
+        loop {
+            match hear_any(ws, PATIENCE).await.expect("no frame in time") {
+                Heard::Text(value) => return value,
+                Heard::Bytes(..) => {}
+            }
+        }
+    }
+
+    async fn create(ws: &mut Ws) -> u32 {
+        say(
+            ws,
+            json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        assert_eq!(reply["uuid"], UUID, "{reply}");
+        reply["session"].as_u64().expect("a session number") as u32
+    }
+
+    /// Returns the snapshot.
+    async fn attach_at(ws: &mut Ws, session: u32, cols: u16, rows: u16) -> Vec<u8> {
+        say(
+            ws,
+            json!({"type": "attach", "session": session, "cols": cols, "rows": rows}),
+        )
+        .await;
+        let reply = hear_text(ws).await;
+        assert_eq!(reply["type"], "attached", "{reply}");
+        assert_eq!(reply["session"], session, "{reply}");
+        match hear_any(ws, PATIENCE).await.expect("no snapshot in time") {
+            Heard::Bytes(from, bytes) => {
+                assert_eq!(from, session);
+                assert_eq!(reply["snapshot_bytes"], bytes.len(), "{reply}");
+                bytes
+            }
+            Heard::Text(other) => panic!("expected the snapshot, got {other}"),
+        }
+    }
+
+    async fn attach(ws: &mut Ws, session: u32) -> Vec<u8> {
+        attach_at(ws, session, 80, 24).await
+    }
+
+    async fn type_line(ws: &mut Ws, session: u32, line: &str) {
+        let bytes = format!("{line}\n");
+        ws.send(Message::binary(encode_binary(session, bytes.as_bytes())))
+            .await
+            .expect("send input");
+    }
+
+    async fn ack(ws: &mut Ws, session: u32, bytes: usize) {
+        say(
+            ws,
+            json!({"type": "ack", "session": session, "bytes": bytes}),
+        )
+        .await;
+    }
+
+    /// Everything the session printed up to and including `needle`.
+    async fn read_until(ws: &mut Ws, session: u32, needle: &str) -> String {
+        let deadline = Instant::now() + PATIENCE;
+        let mut seen = Vec::new();
+        loop {
+            let text = String::from_utf8_lossy(&seen);
+            if text.contains(needle) {
+                return text.into_owned();
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match hear_any(ws, left).await {
+                Some(Heard::Bytes(from, bytes)) if from == session => seen.extend(bytes),
+                Some(Heard::Bytes(..)) => {}
+                Some(Heard::Text(value)) => panic!("expected output, got {value}"),
+                None => panic!("never saw {needle:?} in {text:?}"),
+            }
+        }
+    }
+
+    /// Reads and acks a flood until `total` reaches `target`.
+    async fn read_acking(ws: &mut Ws, session: u32, total: &mut usize, target: usize) {
+        while *total < target {
+            match hear_any(ws, PATIENCE).await {
+                Some(Heard::Bytes(_, bytes)) => {
+                    *total += bytes.len();
+                    ack(ws, session, *total).await;
+                }
+                Some(Heard::Text(value)) => panic!("expected output, got {value}"),
+                None => panic!("the flood stopped at {total} bytes, wanted {target}"),
+            }
+        }
+    }
+
+    /// Reads a flood until it goes quiet, which only counts once `total` is past `at_least`.
+    async fn read_until_quiet(
+        ws: &mut Ws,
+        session: u32,
+        total: &mut usize,
+        at_least: usize,
+        acking: bool,
+    ) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match hear_any(ws, Duration::from_millis(300)).await {
+                Some(Heard::Bytes(_, bytes)) => {
+                    *total += bytes.len();
+                    if acking {
+                        ack(ws, session, *total).await;
+                    }
+                }
+                Some(Heard::Text(value)) => panic!("expected output, got {value}"),
+                None if *total >= at_least => return,
+                None => assert!(Instant::now() < deadline, "only {total} bytes arrived"),
+            }
+        }
+    }
+
+    async fn list(ws: &mut Ws) -> Vec<Value> {
+        say(ws, json!({"type": "list"})).await;
+        loop {
+            let reply = hear_text(ws).await;
+            if reply["type"] == "sessions" {
+                return reply["items"].as_array().expect("an item list").clone();
+            }
+        }
+    }
+
+    /// Waits for the session list to pass `check`, because a frame takes effect a moment
+    /// after it is sent.
+    async fn wait_for_list(ws: &mut Ws, check: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let items = list(ws).await;
+            if check(&items) {
+                return items;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the list never settled: {items:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn create_attach_type_echo() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        // Split so the terminal echoing the typed line cannot satisfy the wait.
+        type_line(&mut ws, session, "echo round''trip").await;
+        read_until(&mut ws, session, "roundtrip").await;
+
+        let items = list(&mut ws).await;
+        assert_eq!(
+            items,
+            [json!({
+                "session": session, "uuid": UUID, "kind": "shell", "title": null,
+                "exited": null, "cols": 80, "rows": 24,
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_survive_disconnect() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "echo pid=$$ mark''er").await;
+        let before = read_until(&mut ws, session, "marker").await;
+        drop(ws);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut ws = signed_in(&host).await;
+        assert_eq!(list(&mut ws).await[0]["exited"], Value::Null);
+        let snapshot = attach(&mut ws, session).await;
+        assert!(
+            String::from_utf8_lossy(&snapshot).contains("marker"),
+            "the screen did not survive: {:?}",
+            String::from_utf8_lossy(&snapshot)
+        );
+        type_line(&mut ws, session, "echo pid=$$ sec''ond").await;
+        let after = read_until(&mut ws, session, "second").await;
+        assert_eq!(pid_in(&before), pid_in(&after));
+    }
+
+    fn pid_in(text: &str) -> String {
+        text.match_indices("pid=")
+            .map(|(at, _)| {
+                text[at + 4..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .find(|digits| !digits.is_empty())
+            .unwrap_or_else(|| panic!("no pid in {text:?}"))
+    }
+
+    #[tokio::test]
+    async fn ack_lets_a_flood_continue() {
+        let host = Host::start();
+
+        let mut acking = signed_in(&host).await;
+        let session = create(&mut acking).await;
+        let mut total = attach(&mut acking, session).await.len();
+        type_line(&mut acking, session, "yes flood").await;
+        read_acking(&mut acking, session, &mut total, 3 * FLOOD_LIMIT).await;
+
+        let mut silent = signed_in(&host).await;
+        let session = create(&mut silent).await;
+        let mut total = attach(&mut silent, session).await.len();
+        type_line(&mut silent, session, "yes flood").await;
+        read_until_quiet(&mut silent, session, &mut total, FLOOD_LIMIT, false).await;
+        assert!(
+            total <= FLOOD_LIMIT + LARGEST_CHUNK,
+            "a client that never acks got {total} bytes"
+        );
+
+        // Catching up opens it again.
+        ack(&mut silent, session, total).await;
+        let target = total + FLOOD_LIMIT;
+        read_acking(&mut silent, session, &mut total, target).await;
+    }
+
+    #[tokio::test]
+    async fn stale_client_hears_detached() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "yes flood").await;
+
+        assert_eq!(
+            hear_text(&mut ws).await,
+            json!({"type": "detached", "session": session})
+        );
+        type_line(&mut ws, session, "echo late").await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+
+        let total = attach(&mut ws, session).await.len();
+        ack(&mut ws, session, total).await;
+    }
+
+    #[tokio::test]
+    async fn title_reaches_the_client() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        assert_eq!(list(&mut ws).await[0]["title"], Value::Null);
+
+        let set_title = r"printf '\033]2;%s\007' 'tab one'";
+        type_line(&mut ws, session, set_title).await;
+        let title = json!({"type": "title", "session": session, "title": "tab one"});
+        assert_eq!(hear_text(&mut ws).await, title);
+        assert_eq!(list(&mut ws).await[0]["title"], "tab one");
+
+        // The same title again is not a change, so the next text frame is the list.
+        type_line(&mut ws, session, set_title).await;
+        type_line(&mut ws, session, "echo sa''me").await;
+        read_until(&mut ws, session, "same").await;
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["title"], "tab one");
+
+        // A later attach hears it right after the snapshot.
+        let mut other = signed_in(&host).await;
+        attach(&mut other, session).await;
+        assert_eq!(hear_text(&mut other).await, title);
+    }
+
+    #[tokio::test]
+    async fn kill_removes_a_session() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+
+        // Running: the exit is announced, then it goes.
+        let running = create(&mut ws).await;
+        attach(&mut ws, running).await;
+        say(&mut ws, json!({"type": "kill", "session": running})).await;
+        assert_eq!(
+            hear_text(&mut ws).await,
+            json!({"type": "exited", "session": running, "clean": false})
+        );
+        wait_for_list(&mut ws, |items| items.is_empty()).await;
+        say(&mut ws, json!({"type": "kill", "session": running})).await;
+        assert_eq!(hear_text(&mut ws).await["code"], "no_session");
+
+        // Finished: it stays, with its screen and exit, until a kill removes it.
+        let finished = create(&mut ws).await;
+        assert!(finished > running, "session numbers must not be reused");
+        attach(&mut ws, finished).await;
+        type_line(&mut ws, finished, "echo last wor''ds; exit 0").await;
+        assert_eq!(
+            hear_text(&mut ws).await,
+            json!({"type": "exited", "session": finished, "clean": true})
+        );
+        type_line(&mut ws, finished, "too late").await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+        drop(ws);
+
+        let mut ws = signed_in(&host).await;
+        assert_eq!(list(&mut ws).await[0]["exited"], true);
+        let snapshot = attach(&mut ws, finished).await;
+        assert!(String::from_utf8_lossy(&snapshot).contains("last words"));
+        assert_eq!(
+            hear_text(&mut ws).await,
+            json!({"type": "exited", "session": finished, "clean": true})
+        );
+        say(&mut ws, json!({"type": "kill", "session": finished})).await;
+        wait_for_list(&mut ws, |items| items.is_empty()).await;
+    }
+
+    #[tokio::test]
+    async fn closing_the_socket_detaches() {
+        let host = Host::start();
+        let mut watching = signed_in(&host).await;
+        let session = create(&mut watching).await;
+        let mut total = attach(&mut watching, session).await.len();
+
+        // Never reads or acks, so the flood stops once this one is 4 MiB behind.
+        let mut holding = signed_in(&host).await;
+        say(
+            &mut holding,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        type_line(&mut watching, session, "yes flood").await;
+        read_until_quiet(&mut watching, session, &mut total, FLOOD_LIMIT / 2, true).await;
+        let held_at = total;
+
+        drop(holding);
+        let closed = Instant::now();
+        let target = held_at + 1;
+        timeout(
+            Duration::from_secs(1),
+            read_acking(&mut watching, session, &mut total, target),
+        )
+        .await
+        .expect("the flood was still held 1 s after the socket closed");
+        println!("flood resumed {:?} after the close", closed.elapsed());
+    }
+
+    #[tokio::test]
+    async fn input_needs_an_attachment() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+
+        type_line(&mut ws, session, "echo nope").await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+        say(
+            &mut ws,
+            json!({"type": "resize", "session": session, "cols": 90, "rows": 20}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+
+        attach(&mut ws, session).await;
+        // Attaching again replaces the first attachment, so one line prints once.
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "echo on''ce; echo do''ne").await;
+        let seen = read_until(&mut ws, session, "done").await;
+        assert_eq!(seen.matches("once").count(), 1, "{seen:?}");
+
+        say(&mut ws, json!({"type": "detach", "session": session})).await;
+        type_line(&mut ws, session, "echo nope").await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+
+        // Another connection's attachment does not count here.
+        let mut other = signed_in(&host).await;
+        attach(&mut other, session).await;
+        type_line(&mut ws, session, "echo nope").await;
+        assert_eq!(hear_text(&mut ws).await["code"], "not_attached");
+    }
+
+    #[tokio::test]
+    async fn last_resize_wins() {
+        let host = Host::start();
+        let mut first = signed_in(&host).await;
+        let session = create(&mut first).await;
+        attach(&mut first, session).await;
+
+        let mut second = signed_in(&host).await;
+        attach_at(&mut second, session, 100, 30).await;
+        type_line(&mut second, session, "stty size").await;
+        read_until(&mut second, session, "30 100").await;
+
+        say(
+            &mut first,
+            json!({"type": "resize", "session": session, "cols": 90, "rows": 20}),
+        )
+        .await;
+        wait_for_list(&mut first, |items| items[0]["cols"] == 90).await;
+        type_line(&mut first, session, "stty size").await;
+        read_until(&mut first, session, "20 90").await;
+
+        say(
+            &mut first,
+            json!({"type": "resize", "session": session, "cols": 0, "rows": 20}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut first).await["code"], "bad_size");
+    }
+
+    #[tokio::test]
+    async fn stuck_program_drops_input() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut other = signed_in(&host).await;
+        let free = create(&mut other).await;
+        attach(&mut other, free).await;
+        attach(&mut ws, session).await;
+
+        // Raw, because a full line buffer in canonical mode throws input away, not blocks.
+        type_line(&mut ws, session, "stty raw -echo; echo rea''dy; sleep 60").await;
+        read_until(&mut ws, session, "ready").await;
+
+        let chunk = encode_binary(session, &[b'x'; 1024 * 1024]);
+        for _ in 0..20 {
+            ws.send(Message::binary(chunk.clone())).await.expect("send");
+        }
+        assert_eq!(hear_text(&mut ws).await["code"], "input_dropped");
+
+        // Nothing else is held up, on this connection or by this session.
+        assert_eq!(list(&mut ws).await.len(), 2);
+        type_line(&mut other, free, "echo st''ill here").await;
+        read_until(&mut other, free, "still here").await;
     }
 }

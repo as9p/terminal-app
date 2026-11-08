@@ -9,13 +9,13 @@ pub const PROTO: u32 = 1;
 pub mod code {
     pub const PROTO_MISMATCH: &str = "proto_mismatch";
     pub const BAD_REQUEST: &str = "bad_request";
-    pub const NOT_IMPLEMENTED: &str = "not_implemented";
     pub const INPUT_DROPPED: &str = "input_dropped";
     pub const NOT_ATTACHED: &str = "not_attached";
     pub const NO_SESSION: &str = "no_session";
     pub const BAD_CWD: &str = "bad_cwd";
     pub const BAD_SIZE: &str = "bad_size";
     pub const BAD_KIND: &str = "bad_kind";
+    pub const SPAWN_FAILED: &str = "spawn_failed";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

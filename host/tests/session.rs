@@ -62,7 +62,7 @@ fn wait_for_exit(rx: &Receiver<ClientEvent>, limit: Duration) -> (bool, Option<i
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
-            Ok(ClientEvent::Snapshot(_) | ClientEvent::Output(_)) => {}
+            Ok(ClientEvent::Snapshot(_) | ClientEvent::Output(_) | ClientEvent::Title(_)) => {}
             Ok(ClientEvent::Exited { clean, signal }) => return (clean, signal),
             Err(err) => panic!("no exit event: {err}"),
         }

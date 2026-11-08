@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,8 @@ pub enum ClientEvent {
     /// Rebuilds the screen. Always the first event a client gets, once per attach.
     Snapshot(Bytes),
     Output(Bytes),
+    /// The window title changed. Also sent right after the snapshot when there is one.
+    Title(String),
     /// `clean` means a normal process exit, whatever the exit code.
     Exited {
         clean: bool,
@@ -58,6 +61,15 @@ pub enum ClientEvent {
 }
 
 pub type ClientTx = Sender<ClientEvent>;
+
+/// What a session looks like from outside, readable without waiting for its actor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub title: Option<String>,
+    /// None until the exit has been announced, then whether it was clean.
+    pub exited: Option<bool>,
+    pub size: Size,
+}
 
 pub struct Session;
 
@@ -84,6 +96,12 @@ impl Session {
         let (output_tx, output_rx) = bounded(OUTPUT_CHANNEL_CHUNKS);
         let (exit_tx, exit_rx) = bounded(1);
         let (control_tx, control_rx) = unbounded();
+        let (announced_tx, announced_rx) = bounded(0);
+        let status = Arc::new(Mutex::new(Status {
+            title: None,
+            exited: None,
+            size,
+        }));
 
         let filter = pty::output_filter(&writer);
         thread::Builder::new()
@@ -108,6 +126,8 @@ impl Session {
             kill_deadline: never(),
             exit: None,
             announced: None,
+            announced_signal: Some(announced_tx),
+            status: Arc::clone(&status),
         };
         thread::Builder::new()
             .name("session-actor".to_string())
@@ -118,6 +138,8 @@ impl Session {
             writer,
             pid,
             next_client: AtomicU64::new(0),
+            status,
+            announced: announced_rx,
         })
     }
 }
@@ -128,6 +150,8 @@ pub struct SessionHandle {
     writer: SharedWriter,
     pid: Option<u32>,
     next_client: AtomicU64,
+    status: Arc<Mutex<Status>>,
+    announced: Receiver<()>,
 }
 
 impl SessionHandle {
@@ -179,6 +203,18 @@ impl SessionHandle {
 
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    pub fn status(&self) -> Status {
+        self.status
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Nothing is ever sent on this. It disconnects once the exit has been announced.
+    pub fn announced(&self) -> Receiver<()> {
+        self.announced.clone()
     }
 }
 
@@ -272,6 +308,9 @@ struct Actor {
     // Set when the program ends. `announced` follows once the output has drained.
     exit: Option<Exit>,
     announced: Option<Exit>,
+    // Dropped when `announced` is set, which is what `SessionHandle::announced` waits for.
+    announced_signal: Option<Sender<()>>,
+    status: Arc<Mutex<Status>>,
 }
 
 impl Actor {
@@ -364,6 +403,16 @@ impl Actor {
         });
         // After the clients so parsing never delays the bytes they see.
         self.screen.feed(&chunk);
+        if let Some(title) = self.screen.take_new_title() {
+            self.update_status(|status| status.title = Some(title.clone()));
+            for client in &self.clients {
+                let _ = client.tx.try_send(ClientEvent::Title(title.clone()));
+            }
+        }
+    }
+
+    fn update_status(&self, change: impl FnOnce(&mut Status)) {
+        change(&mut self.status.lock().unwrap_or_else(|err| err.into_inner()));
     }
 
     // A kill ends the hold because macOS won't let a program finish exiting while its
@@ -408,6 +457,9 @@ impl Actor {
                 // A client with no room for the snapshot gets nothing more, since nothing
                 // else would make sense without it. It can attach again.
                 if tx.try_send(ClientEvent::Snapshot(snapshot)).is_ok() {
+                    if let Some(title) = self.screen.title() {
+                        let _ = tx.try_send(ClientEvent::Title(title.to_string()));
+                    }
                     match self.announced {
                         Some(exit) => {
                             let _ = tx.try_send(exit.into());
@@ -437,6 +489,7 @@ impl Actor {
             return;
         }
         self.size = size;
+        self.update_status(|status| status.size = size);
         self.screen.resize(size);
         if let Some(master) = &self.master {
             let _ = master.resize(size.into());
@@ -479,10 +532,12 @@ impl Actor {
     fn announce(&mut self) {
         self.announced = self.exit;
         if let Some(exit) = self.announced {
+            self.update_status(|status| status.exited = Some(exit.clean));
             for client in self.clients.drain(..) {
                 let _ = client.tx.try_send(exit.into());
             }
         }
+        self.announced_signal = None;
     }
 }
 

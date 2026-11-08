@@ -10,4 +10,6 @@ mod session;
 pub use env::clean_env;
 pub use pty::{Size, prepare_for_fork};
 pub use screen::Screen;
-pub use session::{ClientEvent, ClientId, ClientTx, Kind, Session, SessionHandle, SpawnSpec};
+pub use session::{
+    ClientEvent, ClientId, ClientTx, Kind, Session, SessionHandle, SpawnSpec, Status,
+};

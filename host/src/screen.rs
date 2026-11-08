@@ -15,7 +15,7 @@ const MAX_HELD: usize = 64 * 1024;
 /// A copy of a session's screen, so a window that attaches late can be given the current
 /// state.
 pub struct Screen {
-    parser: vt100::Parser,
+    parser: vt100::Parser<TitleWatch>,
     /// The start of a sequence or character still waiting for its other half. vt100 has
     /// no way to read or save its parser state, so these bytes stay out of the parser.
     /// That keeps it safe to feed it the grid switches in `snapshot`, and lets the
@@ -26,7 +26,12 @@ pub struct Screen {
 impl Screen {
     pub fn new(size: Size, scrollback: usize) -> Self {
         Self {
-            parser: vt100::Parser::new(dimension(size.rows), dimension(size.cols), scrollback),
+            parser: vt100::Parser::new_with_callbacks(
+                dimension(size.rows),
+                dimension(size.cols),
+                scrollback,
+                TitleWatch::default(),
+            ),
             held: Vec::new(),
         }
     }
@@ -43,6 +48,21 @@ impl Screen {
             self.parser.process(&joined[..ready]);
             joined.drain(..ready);
             self.held = joined;
+        }
+    }
+
+    /// The latest window title. The snapshot cannot carry it.
+    pub fn title(&self) -> Option<&str> {
+        self.parser.callbacks().title.as_deref()
+    }
+
+    /// The title, if it has changed since the last call.
+    pub fn take_new_title(&mut self) -> Option<String> {
+        let watch = self.parser.callbacks_mut();
+        if mem::take(&mut watch.changed) {
+            watch.title.clone()
+        } else {
+            None
         }
     }
 
@@ -125,6 +145,23 @@ impl Screen {
     #[doc(hidden)]
     pub fn vt(&mut self) -> &mut vt100::Screen {
         self.parser.screen_mut()
+    }
+}
+
+/// vt100 reports a new title but does not keep it.
+#[derive(Default)]
+struct TitleWatch {
+    title: Option<String>,
+    changed: bool,
+}
+
+impl vt100::Callbacks for TitleWatch {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        let title = String::from_utf8_lossy(title);
+        if self.title.as_deref() != Some(&*title) {
+            self.title = Some(title.into_owned());
+            self.changed = true;
+        }
     }
 }
 
