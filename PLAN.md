@@ -126,10 +126,10 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 
 Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono 14, line height 1.1, beam cursor with no blink, padding 8, scrollback 20000, copy on select, left Option as Alt, no bell sound, Shift+Enter sends `\x1b\r`, colors from `current-theme.conf`, hidden title bar.
 
-- [ ] **Step 1:** Build it with one shell session. Ack bytes from xterm's write callback.
-- [ ] **Step 2:** Run `pnpm -C client tsc --noEmit` and `pnpm -C client tauri build`. Expected: both succeed.
+- [x] **Step 1:** Build it with one shell session. Ack bytes from xterm's write callback.
+- [x] **Step 2:** Run `pnpm -C client tsc --noEmit` and `pnpm -C client tauri build`. Expected: both succeed.
 - [ ] **Step 3:** Check by hand on the release build: type, run `vim` and `claude`, Cmd+Q, reopen, and the same session returns with its screen. A foreign proto shows a clear message and kills nothing. Stop the host afterward.
-- [ ] **Step 4:** Commit: `feat(client): show a host session in a Tauri window`.
+- [x] **Step 4:** Commit: `feat(client): show a host session in a Tauri window`.
 
 ## Task 7: First speed check through the host
 
@@ -238,3 +238,12 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 - Task 8: compile on Windows, confirm `get_size` behaves on ConPTY, and test the drain restart and an input thread stuck after a kill with a background holder. Neither can run on macOS.
 - Task 10 and 12: `Connection::answer` handles frames one at a time and `create` and `attach` wait on blocking work, so a slow spawn, snapshot or folder check stalls other tabs on that connection. Measure before changing it.
 - Accepted: a client holding the token can grow the writer queue with `list`.
+
+**Task 6 (ab72c33, 975e63d, 3dfd3ca, d3fdf8d), Step 3 still waits on Alex's hand check:** The app shows a host session in a Tauri window. Verified on the release build, on test ports: the picture of the WebGL canvas shows JetBrains Mono in all four faces, color, box lines and icons. A host with another protocol shows the version message, and no host was started or killed. A 20038-line snapshot reached the page buffer within 100 ms between two reports, with the right first and last lines. Closing and reopening the app returned the same session with its buffer. Killing the host with the app open showed the lost message, then a new host and new session about 200 ms later. Retries against something that is not the host came 1.1, 2.1, 4.1, 8.1, 16.1 s apart. Not seen yet: typing with real keys, vim, a real `Kind::Claude` spawn, real Cmd+Q, copy on select, ack pacing under load.
+
+- Real bug found: WKWebView's canvas cannot see user-installed fonts, and xterm measures and draws through canvas, so the app drew Courier with no error. The app now ships four woff2 faces plus their license, about 4.3 MB. Windows and other users need no install because of it.
+- Cell size: 17 x 39 device pixels at ratio 2. `letterSpacing: 1` is in device pixels and matches kitty's rounding at 14 px, but not at a font size whose natural width is a whole number (15 px gives 18, plus 1). Task 10: work the spacing out from the measured width when font size keys arrive.
+- Behind another window or on another AeroSpace workspace, WebKit stops animation frames while the buffer keeps advancing. So acks do not stall, and pictures of a hidden window are stale. Task 12: confirm a hidden window paints at once when shown.
+- AeroSpace tiles the window by default, so its size depends on the workspace. 1280x800 applies only when floated.
+- Open: an extra 280x168 window at layer 0 from the app's process, which AeroSpace does not list, and a small round bubble near the cursor. Probably macOS's text input indicator, not proven. Both are in Alex's hand check.
+- Task 10 and 11: exited sessions pile up in the host list, and `main.ts` start-up and bar code needs sharing out for tabs. Task 8: Windows detach flags in `start_host`, Windows origin.
