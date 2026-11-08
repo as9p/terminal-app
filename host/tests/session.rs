@@ -812,6 +812,7 @@ fn dropping_the_handle_ends_the_program() {
 fn clean_env_strips() {
     let input = [
         ("PATH", "/usr/bin"),
+        ("LANG", "C"),
         ("CLAUDECODE", "1"),
         ("CLAUDE_CONFIG_DIR", "/x"),
         ("CLAUDE_CODE_ENTRYPOINT", "cli"),
@@ -829,6 +830,7 @@ fn clean_env_strips() {
     let expected = [
         ("CLAUDE_OTHER", "kept"),
         ("COLORTERM", "truecolor"),
+        ("LANG", "C"),
         ("PATH", "/usr/bin"),
         ("TERM", "xterm-256color"),
     ]
