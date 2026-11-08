@@ -106,7 +106,7 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 - Binary frames are a 4-byte little-endian session number, then bytes, in both directions.
 - Port 47211, or `TERM_HOST_PORT`. Data folder from the `dirs` crate plus `terminal-app`, or `TERM_APP_DATA`. Token file `host-token` holds 32 random bytes as hex, mode 0600.
 
-- [ ] **Step 1:** Write failing tests:
+- [x] **Step 1:** Write failing tests:
   - `refuses_foreign_origin`: `Origin: https://example.com` is refused before the upgrade.
   - `allows_app_origins`: `tauri://localhost` and `http://tauri.localhost` are accepted. `http://localhost:1420` is accepted only in debug builds.
   - `refuses_bad_token`: wrong token closes; no `hello` within 5 s closes; a wrong `proto` returns `error{code:"proto_mismatch"}` and closes.
@@ -114,9 +114,9 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
   - `sessions_survive_disconnect`: disconnect, reconnect, attach, and the screen and process are still there.
   - `binds_loopback_only`: connecting through a non-loopback address of this computer fails.
   - `second_host_exits`: a second host on the same port exits without touching the first.
-- [ ] **Step 2:** Run them. Expected: fail.
-- [ ] **Step 3:** Implement, with `TCP_NODELAY` set on every socket, since a delayed small packet would add typing latency.
-- [ ] **Step 4:** Run them. Expected: pass. Commit: `feat(host): serve sessions over a local WebSocket`.
+- [x] **Step 2:** Run them. Expected: fail.
+- [x] **Step 3:** Implement, with `TCP_NODELAY` set on every socket, since a delayed small packet would add typing latency.
+- [x] **Step 4:** Run them. Expected: pass. Commit: `feat(host): serve sessions over a local WebSocket`.
 
 ## Task 6: One terminal in a Tauri window
 
@@ -227,3 +227,14 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 - Task 6: snapshot replay has never run in xterm.js. Check it, with xterm scrollback at 20000 or more.
 - Task 8: on Windows the terminal has no end of output at exit, so the drain grace is the main path there, and the hold has never run against ConPTY. These tests are `cfg(unix)`. Give the hold and the drain restart a Windows test.
 - Known risk: endless small acks can hold a program indefinitely, following "resets on any ack". Only a local client with the token can do this.
+
+**Task 5 (1ab4c83, ed75a53, 9a9e752):** The host serves sessions over a WebSocket on 127.0.0.1 with origin and token checks. Verified by 63 debug tests, 23 server and 28 session tests in release, clippy, fmt, 40 clean repeat runs, 200 clean runs of `last_resize_wins`, and 7 of 7 break checks caught.
+
+- Added beyond the plan: host frame `detached{session}` (the app answers by attaching again), error code `spawn_failed`, and `SessionHandle::announced()`. `kill`, `detach` and `layout_set` send no reply on success. A stale ack is ignored. A duplicate uuid is allowed. `create`'s `uuid` is also the chat id; resume stays Task 11.
+- Readline finding: bash line editing reads the window size and writes it back as it returns to its prompt, so a resize landing between the two is lost with no error. On a bare terminal with no host code, 29 of 800 resizes were undone with line editing on, 0 of 800 with it off, 0 of 800 in zsh. The cause in readline's source is from memory, not checked; the experiment is what implicates line editing. Linux probably has it too, not tested. The host now reads the size back after 50 ms and sets it again, up to 3 times. `list` reports a size only once it has held, so it lags a resize by 50 ms.
+- A resize that a program undoes later than 50 ms after the host set it stays undone. That needs a shell stalled between its read and its write, accepted as unlikely.
+- Speed through the socket on release, acking client that does not parse: 84 MB/s `yes` short lines, 44 `tr | cat` unbroken, 35 `tr` direct unbroken. Bare terminal with no host: 184, 47, 39. So macOS's terminal driver limits unbroken lines and the host costs about 10% there; on short lines the host is the limit at 84. 84 is an upper bound, since no parsing or drawing is included.
+- Task 6: check a 20000-line snapshot through the webview. `Kind::Claude` has never been spawned; the first real one is the hand check.
+- Task 8: compile on Windows, confirm `get_size` behaves on ConPTY, and test the drain restart and an input thread stuck after a kill with a background holder. Neither can run on macOS.
+- Task 10 and 12: `Connection::answer` handles frames one at a time and `create` and `attach` wait on blocking work, so a slow spawn, snapshot or folder check stalls other tabs on that connection. Measure before changing it.
+- Accepted: a client holding the token can grow the writer queue with `list`.
