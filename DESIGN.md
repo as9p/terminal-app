@@ -32,6 +32,7 @@ This app should feel like kitty and do the useful things Orca does, with the ext
 - It ever creates a worktree without being asked. **(Alex)**
 - A floating icon can't be removed, or `[primary]` or `main` labels appear in the sidebar. **(Alex)**
 - Rename takes more than one simple action. **(Alex)**
+- Seeing your projects and sessions needs a pop-out panel the way Orca's workspaces do. Alex calls Orca's version bad. **(Alex)**
 - It feels like an Electron app that happens to contain a terminal.
 
 ## Devices and where things run
@@ -114,6 +115,18 @@ From onorca.dev on 2026-11-08, as Orca's own claims and not tested here:
 - It's free under the MIT license.
 - Its Relay needs a sign-in and the same account on both ends. LAN pairing doesn't, and `orca serve --pairing-address <ip>` works over Tailscale, with `--mobile-pairing` for a QR code.
 
+### Herdr
+
+Herdr (herdr.dev, github.com/herdrdev/herdr) is a free Rust tool under Apache 2.0 that runs inside a terminal like tmux, on Mac, Linux and Windows. Alex wants its features in this app **(Alex, 2026-11-08)**. From a video about it and its README, not tested here:
+
+- A background server owns the terminals, and closing the window keeps agents running. A reboot ends the programs and brings back the layout. Chats come back only for agents with its integration installed, and other panes come back as a fresh shell in the same folder.
+- The sidebar marks each agent as working, blocked, done or idle. Blocked rolls up: one blocked agent marks its tab and its workspace, and one click jumps to it.
+- You run `claude` in a normal pane and it notices. It knows 22 agent tools without a wrapper.
+- Status comes from reading the screen, so a new kind of prompt can show as idle. `herdr integration install` adds each tool's own signals. Its docs warn that idle is not a yes.
+- Agents drive it through a command line and a socket: split a pane, start another agent, send it a prompt, and `herdr agent prompt reviewer "..." --wait` blocks until that agent is done or blocked.
+- `herdr machine add <name>` adds another computer over SSH, and its agents show in the same sidebar.
+- Apache 2.0 allows copying its code, keeping its license and NOTICE file.
+
 ## Sessions, projects and the sidebar
 
 - A session starts in a default group with no project. **(Alex)**
@@ -123,6 +136,10 @@ From onorca.dev on 2026-11-08, as Orca's own claims and not tested here:
 - Sessions on an offline computer stay in the sidebar, greyed, with when they were last seen. Claude chats on them offer a manual reopen here, as long as the chat history is available on this computer. Plain terminals only show as offline. **(my call)**
 - Sidebar: no status clutter, removable repo icons, one-action inline rename, short right-click menus and useful view settings. **(Alex)** Exact look goes through a `ui-review-page` review before any UI code.
 - Top right stays nearly empty. **(Alex)**
+- Every project group and session sits in the always-visible sidebar, the way Herdr lists them, with no pop-out workspace panel. **(Alex)** Groups collapse in place. **(my call)**
+- Every agent session shows one of four states: working, blocked (waiting on Alex), done (finished its turn, not yet looked at) and idle. **(Alex, from Herdr)** It is one small marker, not text, so it fits "no status clutter". The marker's look goes through the same `ui-review-page` review. **(my call)**
+- Blocked rolls up: a blocked session marks its tab, its split, and its project group in the sidebar, even when collapsed, and one key or click jumps to the blocked session. With several blocked, the key goes through them oldest first. **(Alex asked for Herdr's rollup, the order is my call)**
+- Done clears when Alex looks at the session. **(my call)**
 - Top tabs must not collapse the way Orca's do, which Alex calls "kinda unnatural". The status marker on a tab must stay visible no matter how narrow the tab gets, because in Orca it disappears when tabs get small. **(Alex)** What tabs do when many are open goes through the same `ui-review-page` review. Compare Orca's and kitty's behavior there, using real screenshots.
 
 ## Claude across devices
@@ -178,6 +195,13 @@ Remote Control is Claude Code's own feature for opening a session on this comput
 - An agent tool is one small definition file: its start command, how to resume a chat, its permission flags, and any signals it gives. Adding a tool shouldn't need code changes. Launch presets use the same list.
 - Local models need no special support in the app. A preset starts an agent tool that is pointed at a local model server such as Ollama. Which tools work well this way is not tested.
 - Every tool works as a plain terminal session from day one. Extra features turn on per tool, depending on what its signals allow.
+- Typing `claude` (or any known tool) in a plain shell tab turns it into an agent session, with no wrapper. **(Alex, from Herdr)** The host already reads each terminal's foreground program for titles, so it matches that against the tool list. **(my call)** The app's own Claude hooks are added through the settings folder it starts Claude with, so status is exact for Claude even when typed by hand. **(my call)**
+- With no signals, status is a guess from the screen: a known prompt pattern means blocked, quiet output means idle. A guess never shows as a confident blocked or done, and nothing is ever approved because a session looks idle. **(my call, from Herdr's warning)**
+
+**Agents driving the app (Alex, from Herdr):**
+- A small command line, `ta` (name open), that talks to the host: list sessions and their states, open a tab or split, start an agent in it, send a prompt, read its screen, and `--wait` until it is done or blocked. The send, read and wait commands are the ones messaging uses below.
+- Example: a session splits a pane, starts a reviewer, sends it the diff, and waits for it, with no sleep loop.
+- It works from inside any session, and the host knows which session called, so the `From session <name>:` rule and the work-session guard below apply to it too.
 
 | Feature | Any tool | Needs signals from the tool |
 |---|---|---|
@@ -308,10 +332,10 @@ Keeping Claude settings and knowledge in step across devices is a separate proje
 
 1. Prove the risky parts: reopening a chat under another account, resuming under a different path, reading a list of Remote Control sessions, and two Remote Control servers under different accounts.
 2. Host process on Mac and Windows, plus the Mac client with tabs and restore. Measure against the speed targets with `tools/keylat` as soon as typing works through the host, then finish with the speed pass. Steps 1 and 2 are stage 1. The Windows client follows.
-3. Sidebar and projects with smart move, after a UI review.
+3. Sidebar and projects with smart move, the four session states with blocked rollup, and noticing `claude` typed in a shell, after a UI review.
 4. Accounts with automatic switching, since Alex ranks this highest.
 5. Tailscale attach from the PC and phone, then move session and cross-device Claude, then the Remote Control sidebar and silent host.
-6. Alerts, after a UI review, then presets, other agent tools with messaging between sessions, image viewer and search.
+6. Alerts, after a UI review, then presets, other agent tools with messaging between sessions and the command line agents drive the app with, image viewer and search.
 7. Plugin system and Uber Eats, then chat view, browser and computer control.
 
 ## Left to the builder

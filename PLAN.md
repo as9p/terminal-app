@@ -155,7 +155,7 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 **Files:** None in the repo. Publishes an artifact through `ui-review-page`.
 
 - [ ] **Step 1:** Take real screenshots of Orca and kitty with many tabs. Close test windows after.
-- [ ] **Step 2:** Publish the review: tab bar look, many-tab behavior (recommended: title shrinks first, status never hides, minimum width, then sideways scroll), the status marker, split dividers, a new Claude tab key, and a states strip.
+- [ ] **Step 2:** Publish the review: tab bar look, many-tab behavior (recommended: title shrinks first, status never hides, minimum width, then sideways scroll), the status marker in its four states (working, blocked, done, idle, from Herdr) with blocked rolling up to the tab and the jump-to-blocked key, split dividers, a new Claude tab key, and a states strip.
 - [ ] **Step 3:** Wait for Alex's go. Record the answers in `DESIGN.md`.
 
 ## Task 10: Tabs, splits and kitty keys
