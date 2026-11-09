@@ -20,4 +20,6 @@ Set the same two variables in the client's shell, or pass `--port` and `--token-
     printf 'ls\npwd\n' | python3 host_client.py type 1   # each line plus Enter
     python3 host_client.py kill 1
 
+On Windows in PowerShell, set variables with `$env:TERM_HOST_PORT = "47388"`, use `py` in place of `python3`, and pipe lines with `"dir", "cd" | py host_client.py type 1`.
+
 Output is the raw terminal bytes, so colors and cursor codes show up as escape sequences. `send` hides the screen snapshot unless you add `--snapshot`. `type` ends on Ctrl+D or end of input.
