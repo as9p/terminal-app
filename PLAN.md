@@ -212,7 +212,7 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 - Whether test runs may unset `CLAUDECODE` through a wrapper script. Something blocked `env -u` in Task 1 and the agent worked around it. The source of the block is unknown. Task 2 needs an answer.
 - Task 6 Step 3: Alex's hand check of the release app, including the stray 280x168 window and the small round bubble near the cursor.
 - Task 7 Steps 2 and 3: a go for `tools/speed/run-sitting.sh task-7`. It takes the keyboard for about 4 minutes. Tasks 9 and 10 wait on its result.
-- Task 8 Step 3: no session on the PC is reachable from this Mac (ListAgents shows only Mac sessions). Alex starts Claude Code on the PC with Remote Control on, or says to skip the PC hand test for now. CI already runs the host tests on Windows.
+- Task 8 Step 3: on hold (Alex, 2026-11-09: the PC session has nothing set up for this yet, wait). Alex says when a PC session is ready. The message to send is drafted; `tools/host-client` is the test client. CI already runs the host tests on Windows.
 
 ## Handoffs
 
