@@ -166,6 +166,8 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 
 Keys, from Alex's kitty config: Cmd+T new tab in current folder, Cmd+W close pane, Cmd+Shift+W close tab, Cmd+Shift+] and [ next and previous tab, Cmd+1 to 9 go to a tab, Cmd+Shift+T rename tab, Cmd+D vertical split in current folder, Cmd+Shift+D horizontal split, Cmd+Alt+arrows move between panes, Cmd+Shift+Enter zoom pane, Cmd+C and Cmd+V copy and paste. New Claude tab uses the key from the review.
 
+Text zoom (DESIGN.md "Text zoom"): Cmd+= and Cmd+plus up 1 px, Cmd+minus down 1 px, Cmd+0 back to 14, applied to every terminal at once and to new ones, saved across restarts, clamped to 8 to 40 px. No popup, toast or readout for this or any other key. Work `letterSpacing` out from the measured cell width at each size (see the cell size note under handoffs). Add tests `zoom_applies_to_every_terminal`, `zoom_clamps_to_limits`, `zoom_survives_restart` to Step 1.
+
 - [ ] **Step 1:** Write failing tests for the layout logic: `close_last_pane_closes_tab`, `close_tab_kills_every_session`, `layout_round_trips_json`, `unknown_session_in_saved_layout_is_dropped`, `resize_rounds_to_whole_cells`.
 - [ ] **Step 2:** Run `pnpm -C client vitest run`. Expected: fail.
 - [ ] **Step 3:** Implement to match the review. Attach to a session the first time its tab is shown. A tab's title comes from the host's `title` event, and rename overrides it.

@@ -34,6 +34,7 @@ This app should feel like kitty and do the useful things Orca does, with the ext
 - Rename takes more than one simple action. **(Alex)**
 - Seeing your projects and sessions needs a pop-out panel the way Orca's workspaces do. Alex calls Orca's version bad. **(Alex)**
 - It feels like an Electron app that happens to contain a terminal.
+- A keyboard shortcut puts up a popup, toast or overlay, the way Orca shows one for zoom. Alex finds these very annoying. A shortcut just does its job. **(Alex)**
 
 ## Devices and where things run
 
@@ -305,6 +306,13 @@ Alex likes Orca's features **(Alex)**, so all stay in, out of sight until asked 
 - **Computer control:** Alex asked for the same as Orca. Needs native helpers and OS permissions. **(Alex)**
 - **Session search, send/read/wait commands, keep awake while agents run, quick commands.** **(my call)**
 - **Worktrees:** only by explicit request. **(Alex)**
+
+## Text zoom
+
+- Zoom is universal, like Alex's kitty config (`change_font_size all`): Cmd+= and Cmd+plus make the text 1 px bigger, Cmd+minus 1 px smaller, Cmd+0 goes back to 14 px. Every terminal in every tab, split and window changes together, and new ones open at the current size. **(Alex)**
+- No popup or size readout appears while zooming; the text changes and that is all. **(Alex)**
+- The size is saved and survives a restart. It stays between 8 and 40 px. The sidebar and tabs keep their own size, so zooming never reflows them. **(my call)**
+- This is text zoom. Cmd+Shift+Enter, which makes one pane fill the tab, is a separate thing and keeps its kitty meaning.
 
 ## Plugins
 
