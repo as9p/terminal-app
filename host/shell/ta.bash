@@ -45,7 +45,9 @@ _ta_claude_subcommands=(agents attach auth auto-mode doctor gateway import insta
 
 # Runs the real claude with the app's hooks file, then each line of the app's flags file that
 # was not typed already, then the typed arguments. Both files are read at each call, so a
-# changed setting applies in open tabs. `function` keeps a user alias from breaking this.
+# changed setting applies in open tabs. When claude returns, however it ended, the host is told
+# through `$TA_HOST`, since a crash sends no `SessionEnd`; claude's status is kept. `function`
+# keeps a user alias from breaking this.
 function claude {
   local added=() line typed
   for line in "${_ta_claude_subcommands[@]}"; do
@@ -70,5 +72,10 @@ function claude {
       added+=("$line")
     done < "$TA_DATA/claude-args"
   fi
-  command claude ${added[@]+"${added[@]}"} "$@"
+  local code=0
+  command claude ${added[@]+"${added[@]}"} "$@" || code=$?
+  if [ -n "$TA_HOST" ]; then
+    "$TA_HOST" hook ClaudeExit </dev/null >/dev/null 2>&1
+  fi
+  return $code
 }

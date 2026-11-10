@@ -606,6 +606,60 @@ async fn hand_typed_claude_restores_with_resume() {
     host.stop();
 }
 
+/// The saved kind of the first session once `state.json` shows `kind`, waiting for it.
+#[cfg(unix)]
+async fn wait_for_saved_kind(dirs: &Dirs, kind: &str) -> SavedSession {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let saved = std::fs::read_to_string(dirs.state_file())
+            .ok()
+            .and_then(|text| serde_json::from_str::<State>(&text).ok())
+            .and_then(|state| state.sessions.into_iter().next());
+        if let Some(saved) = saved.filter(|saved| saved.kind == kind) {
+            return saved;
+        }
+        assert!(Instant::now() < deadline, "the tab was not saved as {kind}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A typed `claude` that ends without `SessionEnd`, as a crash does, is reported by the shell
+/// hook's `claude` through `$TA_HOST`. The tab is a shell again and its state is gone.
+#[cfg(unix)]
+#[tokio::test]
+async fn typed_claude_exit_makes_the_tab_a_shell_again() {
+    let dirs = Dirs::new();
+    let mut host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    say(&mut ws, json!({"type": "tree_get"})).await;
+    let session = create(&mut ws, FIRST, "shell", &dirs.work()).await;
+    attach(&mut ws, session).await;
+    type_in(
+        &mut ws,
+        session,
+        &format!(
+            "echo '{{\"session_id\":\"{SECOND}\"}}' | \"$TA_HOST\" hook SessionStart; \
+             echo '{{}}' | \"$TA_HOST\" hook UserPromptSubmit\n"
+        ),
+    )
+    .await;
+    hear(&mut ws, |frame| {
+        frame["type"] == "states" && frame["items"][0]["state"] == "working"
+    })
+    .await;
+    wait_for_saved_kind(&dirs, "claude").await;
+
+    type_in(&mut ws, session, "\"$TA_HOST\" hook ClaudeExit\n").await;
+    hear(&mut ws, |frame| {
+        frame["type"] == "states" && frame["items"] == json!([])
+    })
+    .await;
+    let saved = wait_for_saved_kind(&dirs, "shell").await;
+    assert_eq!(saved.uuid, FIRST);
+    assert_eq!(saved.chat, None);
+    host.stop();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_restore_is_lazy() {

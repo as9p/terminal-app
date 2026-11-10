@@ -804,7 +804,18 @@ impl Registry {
         let Some(event) = states::parse(&request.event, &request.payload) else {
             return;
         };
+        // A shut down kills the shell before its `claude` returns, and the tab must still
+        // come back as the chat.
+        if request.event.eq_ignore_ascii_case(states::CLAUDE_EXIT)
+            && self.shutting_down.load(Ordering::Relaxed)
+        {
+            return;
+        }
         let session = request.session.as_str();
+        // A call sent just before its session ended must not bring its state back.
+        let Some((_, served)) = self.find(session) else {
+            return;
+        };
         let ended = event == HookEvent::End;
         let change = lock(&self.states).on_event(session, event, std::time::Instant::now());
         if change.changed {
@@ -822,9 +833,6 @@ impl Registry {
                 self.push_tree();
             }
         }
-        let Some((_, served)) = self.find(session) else {
-            return;
-        };
         if let Some(chat) = change.chat.and_then(|chat| Uuid::parse_str(&chat).ok()) {
             *lock(&served.typed_chat) = Some(chat);
         } else if ended {
@@ -1281,16 +1289,23 @@ impl Served {
 }
 
 /// Starts the program and its input thread, with a new `TA_TOKEN` that only this program
-/// gets, so a hook call proves which tab it came from. Blocks.
+/// gets, so a hook call proves which tab it came from, and `TA_HOST`, this program's path,
+/// which the shell hook's `claude` runs to say a typed `claude` returned. Blocks.
 fn start_program(spec: SpawnSpec, size: Size, tokens: &Tokens) -> Result<Running, HostFrame> {
     let spawn_failed = |error: String| HostFrame::error(code::SPAWN_FAILED, &error);
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| start_failed())?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let uuid = spec.uuid.to_string();
+    let host_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.into_os_string().into_string().ok());
     let env = host_env()
-        .filter(|(key, _)| !key.eq_ignore_ascii_case("TA_TOKEN"))
-        .chain([("TA_TOKEN".to_string(), token.clone())]);
+        .filter(|(key, _)| {
+            !key.eq_ignore_ascii_case("TA_TOKEN") && !key.eq_ignore_ascii_case("TA_HOST")
+        })
+        .chain([("TA_TOKEN".to_string(), token.clone())])
+        .chain(host_exe.map(|exe| ("TA_HOST".to_string(), exe)));
     // In place before the program starts, so its first hook call cannot beat it.
     tokens.insert(&uuid, &token);
     let started = Session::spawn_with_env(spec, size, env)

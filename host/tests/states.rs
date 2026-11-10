@@ -371,6 +371,14 @@ fn parse_reads_edit_path() {
 }
 
 #[test]
+fn claude_exit_ends_the_session() {
+    assert_eq!(
+        parse("ClaudeExit", &serde_json::json!({})),
+        Some(HookEvent::End)
+    );
+}
+
+#[test]
 fn parse_reads_notification_kinds() {
     assert_eq!(
         parse("Notification", &fixture("notification_permission.json")),

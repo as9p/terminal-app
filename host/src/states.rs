@@ -17,6 +17,10 @@ pub const DONE_DELAY: Duration = Duration::from_secs(2);
 /// The name Claude Code gives the tool that starts a helper.
 const HELPER_TOOL: &str = "Agent";
 
+/// Not a Claude hook: the shell hook's `claude` sends it once a typed `claude` has returned,
+/// however it ended, so one that died without `SessionEnd` does not stay working.
+pub const CLAUDE_EXIT: &str = "ClaudeExit";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentState {
     Working,
@@ -92,6 +96,7 @@ pub fn parse(event: &str, payload: &Value) -> Option<HookEvent> {
             helper_running: helper_running(payload),
         }),
         "sessionend" => Some(HookEvent::End),
+        name if name.eq_ignore_ascii_case(CLAUDE_EXIT) => Some(HookEvent::End),
         _ => None,
     }
 }

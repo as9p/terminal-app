@@ -43,7 +43,8 @@ $global:__TaClaudeSubcommands = @(
 
 # Runs the real claude with the app's hooks file, then each line of the app's flags file that
 # was not typed already, then the typed arguments. Both files are read at each call, so a
-# changed setting applies in open tabs.
+# changed setting applies in open tabs. When claude returns, however it ended, the host is told
+# through `$env:TA_HOST`, since a crash sends no `SessionEnd`; claude's exit code is kept.
 function global:claude {
     $real = Get-Command -Name claude -CommandType Application, ExternalScript `
         -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -69,5 +70,13 @@ function global:claude {
             }
         }
     }
-    & $real @added @args
+    try {
+        & $real @added @args
+    } finally {
+        $code = $global:LASTEXITCODE
+        if ($env:TA_HOST) {
+            & $env:TA_HOST hook ClaudeExit *> $null
+        }
+        $global:LASTEXITCODE = $code
+    }
 }

@@ -314,7 +314,7 @@ const SHELLS: [&str; 2] = ["/bin/zsh", "/bin/bash"];
 /// A shell with the fake `claude` first on its PATH, the hooks file in place, and `flags` as
 /// the flags file.
 #[cfg(unix)]
-fn claude_shell(sandbox: &Sandbox, shell: &str, flags: &str) -> Watch {
+fn claude_shell(sandbox: &Sandbox, shell: &str, flags: &str, extra: &[(&str, String)]) -> Watch {
     use std::os::unix::fs::PermissionsExt;
     let bin = sandbox.0.join("bin");
     fs::create_dir_all(&bin).expect("make the bin folder");
@@ -323,7 +323,7 @@ fn claude_shell(sandbox: &Sandbox, shell: &str, flags: &str) -> Watch {
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("make it runnable");
     fs::write(sandbox.data().join("claude-hooks.json"), "{}").expect("write the hooks file");
     fs::write(sandbox.data().join("claude-args"), flags).expect("write the flags file");
-    let mut watch = sandbox.start(shell, &[]);
+    let mut watch = sandbox.start(shell, extra);
     watch.until_cwd(&sandbox.home());
     // Typed rather than passed in, since a login shell's startup files can reorder PATH.
     watch.type_line(&format!("PATH='{}':\"$PATH\"", bin.display()));
@@ -363,7 +363,7 @@ fn settings_args(sandbox: &Sandbox) -> String {
 fn claude_gets_settings_and_flags() {
     for shell in SHELLS {
         let sandbox = Sandbox::new();
-        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n", &[]);
         let got = call_claude(&mut watch, "claude --model haiku");
         let settings = settings_args(&sandbox);
         assert_eq!(
@@ -379,7 +379,7 @@ fn claude_gets_settings_and_flags() {
 fn claude_subcommand_gets_nothing() {
     for shell in SHELLS {
         let sandbox = Sandbox::new();
-        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n", &[]);
         assert_eq!(
             call_claude(&mut watch, "claude mcp list"),
             "[mcp][list]",
@@ -393,7 +393,7 @@ fn claude_subcommand_gets_nothing() {
 fn claude_flag_not_repeated() {
     for shell in SHELLS {
         let sandbox = Sandbox::new();
-        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n", &[]);
         let got = call_claude(&mut watch, "claude -p hi --dangerously-skip-permissions");
         let settings = settings_args(&sandbox);
         assert_eq!(
@@ -409,9 +409,42 @@ fn claude_flag_not_repeated() {
 fn claude_flags_off_still_gets_settings() {
     for shell in SHELLS {
         let sandbox = Sandbox::new();
-        let mut watch = claude_shell(&sandbox, shell, "");
+        let mut watch = claude_shell(&sandbox, shell, "", &[]);
         let got = call_claude(&mut watch, "claude");
         assert_eq!(got, settings_args(&sandbox), "{shell}");
+    }
+}
+
+/// When a typed `claude` returns, even with an error, the function tells the host through
+/// `$TA_HOST` and hands back claude's status.
+#[cfg(unix)]
+#[test]
+fn claude_exit_is_reported_and_status_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let bin = sandbox.0.join("bin");
+        let log = sandbox.0.join("calls.log");
+        fs::create_dir_all(&bin).expect("make the bin folder");
+        // The function hides the host's output, so both programs write to a log instead.
+        let fake_host = bin.join("fake-host");
+        let host_script = format!("#!/bin/sh\necho \"host $*\" >> '{}'\n", log.display());
+        fs::write(&fake_host, host_script).expect("write the fake host");
+        fs::set_permissions(&fake_host, fs::Permissions::from_mode(0o755))
+            .expect("make it runnable");
+        let failing = format!("#!/bin/sh\necho claude >> '{}'\nexit 3\n", log.display());
+        let host = [("TA_HOST", fake_host.display().to_string())];
+        let mut watch = claude_shell(&sandbox, shell, "", &host);
+        fs::write(bin.join("claude"), failing).expect("make claude fail");
+        watch.type_line("claude; echo \"st\"\"atus:${?}:end\"");
+        watch.until_output("status:3:end");
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(calls, "claude\nhost hook ClaudeExit\n", "{shell}");
+        // A subcommand starts no chat, so nothing is reported for it.
+        watch.type_line("claude mcp list; echo \"do\"\"ne:end\"");
+        watch.until_output("done:end");
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(calls, "claude\nhost hook ClaudeExit\nclaude\n", "{shell}");
     }
 }
 
@@ -420,7 +453,7 @@ fn claude_flags_off_still_gets_settings() {
 fn changed_flags_apply_in_an_open_shell() {
     for shell in SHELLS {
         let sandbox = Sandbox::new();
-        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n", &[]);
         let settings = settings_args(&sandbox);
         let first = call_claude(&mut watch, "claude");
         assert_eq!(

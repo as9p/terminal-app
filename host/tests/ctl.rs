@@ -191,6 +191,8 @@ fn hook_exits_zero_fast_with_no_host() {
 #[test]
 fn hook_exits_zero_fast_when_host_never_answers() {
     let root = Root::new();
+    #[cfg(unix)]
+    fs::create_dir_all(root.0.join("ctl")).expect("make the socket folder");
     let listener = ListenerOptions::new()
         .name(ctl::socket_name(&root.0).expect("socket name"))
         .create_sync()
@@ -277,6 +279,24 @@ fn claude_settings_file_has_every_hook() {
     if cfg!(unix) {
         assert_eq!(command, r#"'/opt/it'\''s here/term-host' hook Stop"#);
     }
+}
+
+/// The socket sits in a folder only its owner can enter, made that way before the socket is
+/// bound, so no other user can reach it even before its own mode is set.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn socket_folder_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = Root::new();
+    // A folder left open by an older host is closed again.
+    fs::create_dir_all(root.0.join("ctl")).expect("make an open folder");
+    fs::set_permissions(root.0.join("ctl"), fs::Permissions::from_mode(0o755))
+        .expect("open the folder");
+    ctl::serve(&root.0, Tokens::default(), |_| {}).expect("serve the socket");
+    let folder = fs::metadata(root.0.join("ctl")).expect("the socket folder");
+    assert_eq!(folder.permissions().mode() & 0o777, 0o700);
+    let socket = fs::metadata(root.0.join("ctl").join("ctl.sock")).expect("the socket");
+    assert_eq!(socket.permissions().mode() & 0o777, 0o600);
 }
 
 #[tokio::test(flavor = "multi_thread")]

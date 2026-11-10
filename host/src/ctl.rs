@@ -1,5 +1,5 @@
-//! The local socket that hook calls reach the host through: `<data_dir>/ctl.sock`, or a named
-//! pipe on Windows. A request is one JSON line. The host never replies, so a hook call never
+//! The local socket that hook calls reach the host through: `<data_dir>/ctl/ctl.sock`, or a
+//! named pipe on Windows. A request is one JSON line. The host never replies, so a hook call never
 //! waits on it, and a request whose token is not its session's is dropped.
 
 use std::collections::HashMap;
@@ -58,12 +58,35 @@ impl Tokens {
     }
 }
 
+/// The folder the socket sits in. Only its owner can enter it, so no other user can reach the
+/// socket, not even between its bind and its own mode change.
+#[cfg(not(windows))]
+fn socket_dir(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("ctl")
+}
+
 /// The socket's name for a data folder.
 #[cfg(not(windows))]
 pub fn socket_name(data_dir: &Path) -> io::Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
 
-    data_dir.join("ctl.sock").to_fs_name::<GenericFilePath>()
+    socket_dir(data_dir)
+        .join("ctl.sock")
+        .to_fs_name::<GenericFilePath>()
+}
+
+/// Makes the socket's folder, or closes an existing one, to its owner alone. A folder is used
+/// rather than a umask around the bind, since the umask is shared by every thread.
+#[cfg(unix)]
+fn make_socket_dir(data_dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let dir = socket_dir(data_dir);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
 }
 
 /// The pipe's name for a data folder: `\\.\pipe\terminal-app-ctl-<user>-<hash>`. Pipes are
@@ -100,6 +123,8 @@ pub fn serve(
 ) -> io::Result<()> {
     let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
     let _entered = runtime.enter();
+    #[cfg(unix)]
+    make_socket_dir(data_dir)?;
     // A socket file left by a host that died is replaced. Only the host holding the port gets
     // here, so no live host is pushed off it.
     let listener = ListenerOptions::new()
@@ -111,7 +136,7 @@ pub fn serve(
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(
-            data_dir.join("ctl.sock"),
+            socket_dir(data_dir).join("ctl.sock"),
             std::fs::Permissions::from_mode(0o600),
         )?;
     }
