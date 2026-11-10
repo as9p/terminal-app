@@ -17,6 +17,7 @@ import {
 } from "./connection";
 import { installFocusRule, refocus } from "./focus";
 import { DEFAULT_KEYS, type Action, installKeys, runAction } from "./keys";
+import { type MarkerChange, resyncTicks, setMarkerStates } from "./marker";
 import { Panes } from "./panes";
 import { loadSettings, saveSettings } from "./settings";
 import { Sidebar, clampWidth } from "./sidebar";
@@ -285,19 +286,25 @@ async function main(): Promise<void> {
   });
   installFocusRule(document.body, panes);
   // States change only markers, in place: no row is built again and no terminal is touched.
+  // Every marker that changes, in the sidebar and the panes, goes through one pass: all the
+  // reads first, then all the writes.
   store.subscribeStates(() => {
-    sidebar.updateStates();
-    panes.updateStates();
+    const changes: MarkerChange[] = [];
+    sidebar.updateStates(changes);
+    panes.updateStates(changes);
+    setMarkerStates(changes);
     sendSeen();
   });
 
   // Nobody is looking at a done tab while the window is behind another app, and the working
-  // tick rests meanwhile (`.win-unfocused` in styles.css).
+  // tick rests meanwhile (`.win-unfocused` in styles.css). Back in front, every flake restarts
+  // in step with the clock, so flakes paused and flakes made later turn together.
   let windowFocused = document.hasFocus();
   document.body.classList.toggle("win-unfocused", !windowFocused);
   window.addEventListener("focus", () => {
     windowFocused = true;
     document.body.classList.remove("win-unfocused");
+    resyncTicks(document);
     sendSeen();
   });
   window.addEventListener("blur", () => {
@@ -305,10 +312,14 @@ async function main(): Promise<void> {
     document.body.classList.add("win-unfocused");
   });
 
-  /** Tells the host the done sessions on screen have been seen, which turns them idle. */
+  /**
+   * Tells the host the done sessions on screen have been seen, which turns them idle. A frame the
+   * closed socket did not take goes again next time.
+   */
   function sendSeen(): void {
-    if (!connection) return;
-    for (const session of store.seenToSend(windowFocused)) connection.seen(session);
+    const live = connection;
+    if (!live) return;
+    store.sendSeen(windowFocused, (session) => live.seen(session));
   }
 
   function save(patch: Parameters<typeof saveSettings>[0]): void {
@@ -393,6 +404,8 @@ async function main(): Promise<void> {
         });
         connection = next;
         numbers.clear();
+        // The old host may never have read a `seen`, so each done tab is told again.
+        store.forgetSeen();
         await next.open(host);
         await refreshSessions(next);
         // A new window goes back to the tab it showed last time. Set before the first tree, so
@@ -412,6 +425,7 @@ async function main(): Promise<void> {
         }
         settled = true;
         bar.clear();
+        sendSeen();
         bringingUp = false;
         return;
       } catch (error) {

@@ -100,7 +100,8 @@ const NAMED = new Map([
   ["ArrowDown", "Down"],
 ]);
 
-// Only for a dead or unidentified key, whose `e.key` names no character.
+// Only for a dead or unidentified key, whose `e.key` names no character, or a key whose `e.key`
+// is a letter outside ASCII (a Cyrillic or Greek layout), which no spec names.
 const CHAR_CODES = new Map([
   ["BracketLeft", "["],
   ["BracketRight", "]"],
@@ -113,7 +114,8 @@ const SPEC_NAMES = new Set([...CHARS, "Enter", "Left", "Right", "Up", "Down"]);
 /**
  * The key name an event stands for, as written in a spec. Letters and characters come from
  * `e.key`, case-folded, so they follow the layout. `e.code` stands in only where `e.key` cannot
- * work: a digit row that needs Shift (French), arrows and Enter, and a dead or unidentified key.
+ * work: a digit row that needs Shift (French), arrows and Enter, a dead or unidentified key, and a
+ * character outside ASCII, so Cmd+T is still Cmd+T on a Russian layout.
  */
 function nameOf(e: KeyboardEvent): string | undefined {
   const { key, code } = e;
@@ -125,7 +127,7 @@ function nameOf(e: KeyboardEvent): string | undefined {
     if (named !== undefined) return named;
   }
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  if (key === "Dead" || key === "Unidentified") {
+  if (key === "Dead" || key === "Unidentified" || (key.length === 1 && key.charCodeAt(0) > 0x7f)) {
     if (/^Key[A-Z]$/.test(code)) return code.slice(3);
     const char = CHAR_CODES.get(code);
     if (char !== undefined) return char;

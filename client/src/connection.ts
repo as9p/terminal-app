@@ -337,9 +337,9 @@ export class Connection {
     this.sendText({ type: "ack", session, bytes });
   }
 
-  /** The user has seen the session's tab, which turns a done session idle. */
-  seen(session: string): void {
-    this.sendText({ type: "seen", session });
+  /** The user has seen the session's tab, which turns a done session idle. False if not sent. */
+  seen(session: string): boolean {
+    return this.sendText({ type: "seen", session });
   }
 
   /** Sends typed text as UTF-8, synchronously. Dropped if the socket is not open. */
@@ -374,10 +374,13 @@ export class Connection {
     return frame;
   }
 
-  private sendText(frame: object): void {
+  // False when the socket is not open and the frame is dropped.
+  private sendText(frame: object): boolean {
     if (this.ready && this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame));
+      return true;
     }
+    return false;
   }
 
   private request<T>(

@@ -313,19 +313,29 @@ describe("session states", () => {
     expect(store.nextBlocked(null)).toBeNull();
   });
 
+  // The sessions one `sendSeen` call sends, every frame written unless `written` says no.
+  function sent(store: Store, focused: boolean, written = true): string[] {
+    const out: string[] = [];
+    store.sendSeen(focused, (session) => {
+      out.push(session);
+      return written;
+    });
+    return out;
+  }
+
   it("seen_sent_when_done_tab_becomes_current", () => {
     const store = new Store();
     store.setTree(tree([], [tab("a"), tab("b")]));
     store.setStates([{ session: "s-b", state: "done", since_ms: 7 }]);
     expect(store.current).toBe("a");
-    expect(store.seenToSend(true)).toEqual([]);
+    expect(sent(store, true)).toEqual([]);
     store.select("b");
-    expect(store.seenToSend(true)).toEqual(["s-b"]);
+    expect(sent(store, true)).toEqual(["s-b"]);
     // Once per done: the host's answer is on its way.
-    expect(store.seenToSend(true)).toEqual([]);
+    expect(sent(store, true)).toEqual([]);
     // A later done of the same session counts again.
     store.setStates([{ session: "s-b", state: "done", since_ms: 9 }]);
-    expect(store.seenToSend(true)).toEqual(["s-b"]);
+    expect(sent(store, true)).toEqual(["s-b"]);
   });
 
   it("seen_not_sent_while_window_is_unfocused", () => {
@@ -333,8 +343,47 @@ describe("session states", () => {
     store.setTree(tree([], [tab("a"), tab("b")]));
     store.setStates([{ session: "s-b", state: "done", since_ms: 7 }]);
     store.select("b");
-    expect(store.seenToSend(false)).toEqual([]);
-    expect(store.seenToSend(true)).toEqual(["s-b"]);
+    expect(sent(store, false)).toEqual([]);
+    expect(sent(store, true)).toEqual(["s-b"]);
+  });
+
+  it("done_tab_viewed_while_unfocused_gets_seen_when_focus_returns", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a"), tab("b")]));
+    // The window is behind another app when the done arrives and when the tab is picked.
+    store.setStates([{ session: "s-b", state: "done", since_ms: 7 }]);
+    expect(sent(store, false)).toEqual([]);
+    store.select("b");
+    expect(sent(store, false)).toEqual([]);
+    // Back in front: the focus handler's call sends it, once.
+    expect(sent(store, true)).toEqual(["s-b"]);
+    expect(sent(store, true)).toEqual([]);
+  });
+
+  it("seen_not_written_is_sent_again", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    store.setStates([{ session: "s-a", state: "done", since_ms: 7 }]);
+    // The socket was closed: the frame never went out.
+    expect(sent(store, true, false)).toEqual(["s-a"]);
+    expect(sent(store, true)).toEqual(["s-a"]);
+    expect(sent(store, true)).toEqual([]);
+  });
+
+  it("seen_sent_again_after_a_reconnect_for_a_tab_still_done", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    store.setStates([{ session: "s-a", state: "done", since_ms: 7 }]);
+    expect(sent(store, true)).toEqual(["s-a"]);
+    // A new connection: the old host may never have read it.
+    store.forgetSeen();
+    store.setStates([{ session: "s-a", state: "done", since_ms: 7 }]);
+    expect(sent(store, true)).toEqual(["s-a"]);
+    expect(sent(store, true)).toEqual([]);
+    // Not focused after the reconnect: nothing until focus comes back.
+    store.forgetSeen();
+    expect(sent(store, false)).toEqual([]);
+    expect(sent(store, true)).toEqual(["s-a"]);
   });
 
   it("states_tell_their_own_listeners_not_the_tree_listeners", () => {

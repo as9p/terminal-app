@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Group, Tab, Tree } from "./connection";
-import { MORPH_RUN_MS, createMarker, markerState, setMarkerState } from "./marker";
+import {
+  MORPH_RUN_MS,
+  createMarker,
+  markerState,
+  resyncTicks,
+  setMarkerState,
+  setMarkerStates,
+  tickPhase,
+  tickTurn,
+} from "./marker";
 import { Sidebar } from "./sidebar";
 import { Store } from "./store";
 import css from "./styles.css?raw";
@@ -112,6 +121,118 @@ describe("marker rig", () => {
     expect(css).toContain("--mo-ms: 320ms; --mo-step: 18ms; --mo-ease: cubic-bezier(0.34, 1.4, 0.64, 1);");
     expect(css).toContain("animation: fl-tick 4s linear infinite");
   });
+
+  it("tick_phase_comes_from_one_shared_clock", () => {
+    expect(tickPhase(0)).toBe(0);
+    expect(tickPhase(9_250)).toBe(1_250);
+    expect(tickPhase(4_000)).toBe(0);
+    expect(tickPhase(3_999.6)).toBe(0);
+    expect(tickPhase(123_456.4)).toBe(3_456);
+    // Two flakes started at different moments land on the same phase at the same clock time.
+    const late = 70_000 + 1_234;
+    expect((tickPhase(late) - (late - 70_000)) % 4_000).toBe(tickPhase(70_000));
+  });
+
+  it("tick_turn_follows_the_keyframes", () => {
+    expect(tickTurn(0)).toBe(0);
+    expect(tickTurn(40)).toBeCloseTo(1.86);
+    expect(tickTurn(1_000)).toBeCloseTo(15);
+    expect(tickTurn(1_040)).toBeCloseTo(16.86);
+    expect(tickTurn(2_000)).toBeCloseTo(30);
+    expect(tickTurn(3_000)).toBeCloseTo(45);
+    expect(tickTurn(3_999.99)).toBeCloseTo(60, 1);
+    expect(tickTurn(4_000)).toBe(0);
+  });
+
+  it("many_markers_read_everything_before_the_first_write", () => {
+    vi.useFakeTimers();
+    reduceMotion(false);
+    const a = createMarker("working");
+    const b = createMarker("blocked");
+    const c = createMarker("done");
+    document.body.append(a, b, c);
+    const log: string[] = [];
+    const style = globalThis.getComputedStyle;
+    const read = vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      log.push("read");
+      return style(el, pseudo);
+    });
+    const add = DOMTokenList.prototype.add;
+    const remove = DOMTokenList.prototype.remove;
+    vi.spyOn(DOMTokenList.prototype, "add").mockImplementation(function (this: DOMTokenList, ...tokens) {
+      log.push("write");
+      add.apply(this, tokens);
+    });
+    vi.spyOn(DOMTokenList.prototype, "remove").mockImplementation(function (this: DOMTokenList, ...tokens) {
+      log.push("write");
+      remove.apply(this, tokens);
+    });
+    const rect = Element.prototype.getBoundingClientRect;
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      log.push("reflow");
+      return rect.call(this);
+    });
+
+    setMarkerStates([
+      [a, "blocked"],
+      [b, "working"],
+      [c, "idle"],
+    ]);
+    expect(log.filter((entry) => entry === "read").length).toBeGreaterThanOrEqual(6);
+    expect(log.lastIndexOf("read")).toBeLessThan(log.indexOf("write"));
+    expect(log.filter((entry) => entry === "reflow")).toHaveLength(1);
+    // Only the flake that was working has a tick turn to read.
+    const spins = read.mock.calls.filter(([el]) => el.classList.contains("fspin")).map(([el]) => el);
+    expect(spins).toEqual([a.querySelector(".fspin")]);
+    for (const mk of [a, b, c]) expect(mk.classList.contains("mo-run")).toBe(true);
+
+    // The settle step: one timer for the batch, no reads, one reflow.
+    log.length = 0;
+    vi.advanceTimersByTime(MORPH_RUN_MS);
+    expect(log).not.toContain("read");
+    expect(log.filter((entry) => entry === "reflow")).toHaveLength(1);
+    for (const mk of [a, b, c]) {
+      expect(mk.classList.contains("mo-run")).toBe(false);
+      expect(mk.classList.contains("mo-snap")).toBe(false);
+    }
+  });
+
+  it("a_later_change_keeps_its_marker_from_the_earlier_settle", () => {
+    vi.useFakeTimers();
+    reduceMotion(false);
+    const mk = createMarker("working");
+    document.body.append(mk);
+    setMarkerState(mk, "blocked");
+    vi.advanceTimersByTime(100);
+    setMarkerState(mk, "done");
+    vi.advanceTimersByTime(MORPH_RUN_MS - 100);
+    expect(mk.classList.contains("mo-run")).toBe(true);
+    vi.advanceTimersByTime(100);
+    expect(mk.classList.contains("mo-run")).toBe(false);
+    expect(mk.querySelector(".mrig")?.classList.contains("p-done")).toBe(true);
+  });
+
+  it("window_focus_restarts_every_tick_in_step", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const a = createMarker("working");
+    now.mockReturnValue(2_500);
+    const b = createMarker("working");
+    const idle = createMarker("idle");
+    document.body.append(a, b, idle);
+    now.mockReturnValue(10_100);
+    resyncTicks(document);
+    for (const mk of [a, b]) {
+      const spin = mk.querySelector<HTMLElement>(".fspin");
+      expect(spin?.style.animationDelay).toBe("-2100ms");
+      expect(spin?.style.animationName).toBe("");
+    }
+    expect(idle.querySelector<HTMLElement>(".fspin")?.style.animationDelay).toBe("");
+  });
+
+  it("only_a_ticking_flake_gets_a_layer_of_its_own", () => {
+    expect(css).not.toMatch(/\.mk\.a \.fspin \{[^}]*will-change: transform/);
+    expect(css).toContain(".mk.a.s-working:not(.off) .fspin { will-change: transform; }");
+  });
 });
 
 describe("markers in the sidebar", () => {
@@ -168,5 +289,44 @@ describe("markers in the sidebar", () => {
     expect(element.querySelector('.row[data-tab="b"] .sub')).toBeNull();
     store.setStates([{ session: "s-a", state: "idle", since_ms: 2 }]);
     expect(element.querySelector('.row[data-tab="a"] .sub')).toBeNull();
+  });
+
+  it("an_unnamed_tab_shows_the_dim_line_even_when_it_repeats_the_name", () => {
+    const { element, store } = mount(tree([], [tab("a"), tab("b")]), { "s-a": "Fix the login" });
+    expect(element.querySelector('.row[data-tab="a"] .name')?.textContent).toBe("Fix the login");
+    store.setStates([
+      { session: "s-a", state: "blocked", since_ms: 1 },
+      { session: "s-b", state: "done", since_ms: 1 },
+    ]);
+    expect(element.querySelector('.row[data-tab="a"] .sub')?.textContent).toBe("Fix the login");
+    expect(element.querySelector('.row[data-tab="a"]')?.classList.contains("has-sub")).toBe(true);
+    // No title at all: the line still shows, with the name the row shows.
+    expect(element.querySelector('.row[data-tab="b"] .sub')?.textContent).toBe("Shell");
+    expect(element.querySelector('.row[data-tab="b"]')?.classList.contains("has-sub")).toBe(true);
+  });
+
+  it("a_removed_marker_is_no_longer_watched", () => {
+    const watched = new Set<Element>();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe(el: Element) {
+          watched.add(el);
+        }
+        unobserve(el: Element) {
+          watched.delete(el);
+        }
+        disconnect() {
+          watched.clear();
+        }
+      },
+    );
+    const { element, store } = mount(tree([], [tab("a")]));
+    store.setStates([{ session: "s-a", state: "working", since_ms: 1 }]);
+    const mk = rowMarker(element, "a");
+    expect(mk && watched.has(mk)).toBe(true);
+    store.setStates([]);
+    expect(rowMarker(element, "a")).toBeNull();
+    expect(watched.size).toBe(0);
   });
 });

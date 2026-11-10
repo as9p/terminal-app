@@ -3,7 +3,7 @@
 
 import type { Split, Tab } from "./connection";
 import { MIN_PANE_COLS, MIN_PANE_ROWS, clampPair, leaves, neighborOf, paneFloor, roundToCells, withSizesAt } from "./store";
-import { type MarkerState, showMarker } from "./marker";
+import { type MarkerChange, type MarkerState, setMarkerStates, showMarker } from "./marker";
 import { renaming } from "./rename";
 import type { TerminalView } from "./terminal";
 
@@ -219,9 +219,11 @@ export class Panes {
   /**
    * Puts each shown pane's state in its top right corner, in place, so it morphs as the sidebar's
    * does. Only a split shows them, as only a split lists its panes in the sidebar. No terminal
-   * is touched.
+   * is touched. With `into`, the markers that change are added to it for the caller to make with
+   * the sidebar's in one `setMarkerStates`.
    */
-  updateStates(): void {
+  updateStates(into?: MarkerChange[]): void {
+    const changes = into ?? [];
     const split = this.layout?.classList.contains("split") === true;
     for (const [session, entry] of this.entries) {
       const corner = entry.element.querySelector<HTMLElement>(":scope > .pane-mk");
@@ -231,7 +233,7 @@ export class Panes {
         continue;
       }
       if (corner) {
-        showMarker(corner, state);
+        showMarker(corner, state, changes);
         continue;
       }
       const made = document.createElement("span");
@@ -239,6 +241,7 @@ export class Panes {
       showMarker(made, state);
       entry.element.append(made);
     }
+    if (!into) setMarkerStates(changes);
   }
 
   viewFor(session: string): TerminalView | undefined {

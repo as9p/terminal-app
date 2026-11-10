@@ -203,6 +203,22 @@ describe("keyboard layouts", () => {
     expect(matchKey(keyEvent("]", "BracketRight", { meta: true }), DEFAULT_KEYS)).toBeNull();
   });
 
+  it("non_latin_layouts_fall_back_to_the_key_place", () => {
+    // Russian: Cmd+T types "е" (Cyrillic), the key is still KeyT.
+    expect(matchKey(keyEvent("е", "KeyT", { meta: true }), DEFAULT_KEYS)).toBe("newTab");
+    expect(matchKey(keyEvent("Е", "KeyT", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("reopenTab");
+    // Russian has "ъ" where US has "]".
+    expect(matchKey(keyEvent("Ъ", "BracketRight", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("nextTab");
+    // Greek: Cmd+W types "ς".
+    expect(matchKey(keyEvent("ς", "KeyW", { meta: true }), DEFAULT_KEYS)).toBe("closePane");
+  });
+
+  it("non_latin_plain_keys_still_leave_at_once", () => {
+    expect(matchKey(keyEvent("е", "KeyT"), DEFAULT_KEYS)).toBeNull();
+    expect(matchKey(keyEvent("Е", "KeyT", { shift: true }), DEFAULT_KEYS)).toBeNull();
+    expect(matchKey(keyEvent("е", "KeyT", { alt: true }), DEFAULT_KEYS)).toBeNull();
+  });
+
   it("dvorak_letters_follow_the_label_not_the_place", () => {
     // On Dvorak the key labeled W sits where US has the comma, and US W types a comma.
     expect(matchKey(keyEvent("w", "Comma", { meta: true }), DEFAULT_KEYS)).toBe("closePane");

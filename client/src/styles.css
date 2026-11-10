@@ -703,7 +703,8 @@ button.slot {
 .mk.a .fset > .fspin { margin-right: 0; }
 
 /* Tick: a 15 degree nudge every second with a soft spring settle; the star repeats every 60
-   degrees, so the 4 s loop is seamless. The script starts it from the clock so all turn in step. */
+   degrees, so the 4 s loop is seamless. The script starts it from the clock so all turn in step,
+   and restarts every one from the clock when the window comes back. */
 @keyframes fl-tick {
   0.000% { transform: rotate(0.00deg); }
   1.000% { transform: rotate(1.86deg); }
@@ -760,7 +761,9 @@ button.slot {
   100.000% { transform: rotate(60.00deg); }
 }
 
-.mk.a .fspin { animation: fl-tick 4s linear infinite; will-change: transform; }
+.mk.a .fspin { animation: fl-tick 4s linear infinite; }
+/* A compositor layer only for a flake that ticks, not one per marker. */
+.mk.a.s-working:not(.off) .fspin { will-change: transform; }
 .mk.a.mo:not(.s-working) .fspin { animation: none; }
 /* Scrolled out of the list: no tick (the sidebar's IntersectionObserver sets .off). */
 .mk.a.off .fspin { animation: none; }
@@ -783,7 +786,7 @@ button.slot {
 .mo-snap, .mo-snap * { transition: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .mk.a .fspin { animation: none !important; }
+  .mk.a .fspin { animation: none !important; will-change: auto !important; }
   .mk.a .fset, .mk.a.mo, .mrig * { transition: none !important; }
 }
 

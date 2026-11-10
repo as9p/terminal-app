@@ -222,20 +222,23 @@ export class Store {
   }
 
   /**
-   * The done sessions of the current tab to send `seen` for, each once per done. Nothing while
-   * the window does not have focus, since nobody is looking.
+   * Sends `seen` for the done sessions of the current tab, each once per done. `send` says whether
+   * the frame was written; one that was not is tried again next time. Nothing while the window
+   * does not have focus, since nobody is looking.
    */
-  seenToSend(windowFocused: boolean): string[] {
+  sendSeen(windowFocused: boolean, send: (session: string) => boolean): void {
     const tab = this.currentTab();
-    if (!windowFocused || !tab) return [];
-    const out: string[] = [];
+    if (!windowFocused || !tab) return;
     for (const session of leaves(tab.split)) {
       const entry = this.states.get(session);
       if (entry?.state !== "done" || this.seenSent.get(session) === entry.since) continue;
-      this.seenSent.set(session, entry.since);
-      out.push(session);
+      if (send(session)) this.seenSent.set(session, entry.since);
     }
-    return out;
+  }
+
+  /** Forgets every `seen` sent, for a new connection: the old host may not have read them. */
+  forgetSeen(): void {
+    this.seenSent.clear();
   }
 
   subscribeStates(fn: () => void): () => void {

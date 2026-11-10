@@ -3,7 +3,7 @@
 
 import type { AgentState, Group, Op, Tab } from "./connection";
 import { refocus } from "./focus";
-import { createMarker, markerState, showMarker, syncTick } from "./marker";
+import { type MarkerChange, createMarker, markerState, setMarkerStates, showMarker, syncTick } from "./marker";
 import { RENAME_END, renaming, startRename } from "./rename";
 import { type Row, type Store, findTab, leaves } from "./store";
 
@@ -238,29 +238,38 @@ export class Sidebar {
 
   /**
    * Shows new session states on the markers already in the list, in place, so each one morphs.
-   * Builds no row and reads no layout.
+   * Builds no row. The markers that change go through one `setMarkerStates`, so the list is
+   * styled and laid out once for all of them; with `into` they are added to it instead, for the
+   * caller to make together with the panes' corner markers.
    */
-  updateStates(): void {
+  updateStates(into?: MarkerChange[]): void {
+    const changes = into ?? [];
     for (const row of this.list.querySelectorAll<HTMLElement>(".row[data-tab]")) {
       const tab = findTab(this.store.tree, row.dataset.tab ?? "");
       const slot = row.querySelector<HTMLElement>(":scope > .slot");
       if (!tab || !slot) continue;
       const state = this.store.tabState(tab);
-      this.watch(showMarker(slot, state));
+      this.place(slot, state, changes);
       this.applySub(row, tab, state);
     }
     for (const row of this.list.querySelectorAll<HTMLElement>(".pane-row")) {
       const slot = row.querySelector<HTMLElement>(":scope > .slot");
-      if (slot) this.watch(showMarker(slot, this.store.stateOf(row.dataset.session ?? "")));
+      if (slot) this.place(slot, this.store.stateOf(row.dataset.session ?? ""), changes);
     }
     for (const head of this.list.querySelectorAll<HTMLElement>(".ghead")) {
       const group = this.store.tree.groups.find((g) => g.key === head.dataset.group);
       if (group) this.applyRoll(head, group);
     }
+    if (!into) setMarkerStates(changes);
   }
 
-  private watch(mk: HTMLElement | null): void {
-    if (mk) this.ticks?.observe(mk);
+  // Shows `state` in a row's slot. The tick observer follows a marker made and lets go of one
+  // taken away.
+  private place(slot: HTMLElement, state: AgentState | null, changes: MarkerChange[]): void {
+    const old = slot.querySelector<HTMLElement>(":scope > .mk");
+    const mk = showMarker(slot, state, changes);
+    if (old && old !== mk) this.ticks?.unobserve(old);
+    if (mk && mk !== old) this.ticks?.observe(mk);
   }
 
   // A collapsed group with a blocked session shows the blocked marker after its count (mock
@@ -275,20 +284,24 @@ export class Sidebar {
       made.append(createMarker("blocked"));
       head.append(made);
     } else if (!want && roll) {
+      const mk = roll.querySelector<HTMLElement>(".mk");
+      if (mk) this.ticks?.unobserve(mk);
       roll.remove();
     }
   }
 
-  // A blocked or done row gets a dim second line with the title of the session in that state.
-  // It is left out when it would only repeat the row's name.
+  // A blocked or done row gets a dim second line with the title of the session in that state,
+  // even when that is also the row's name (an unnamed tab), so every such row reads the same.
   private applySub(row: HTMLElement, tab: Tab, state: AgentState | null): void {
     const body = row.querySelector<HTMLElement>(":scope > .body");
     if (!body) return;
     let text = "";
     if (state === "blocked" || state === "done") {
       const session = leaves(tab.split).find((s) => this.store.stateOf(s) === state);
-      text = (session !== undefined ? this.events.title(session) : undefined) ?? "";
-      if (text === body.querySelector(".name")?.textContent) text = "";
+      text =
+        (session !== undefined ? this.events.title(session) : undefined) ??
+        body.querySelector(".name")?.textContent ??
+        "";
     }
     let sub = body.querySelector<HTMLElement>(":scope > .sub");
     if (text === "") {
