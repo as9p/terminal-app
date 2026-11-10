@@ -1110,6 +1110,57 @@ mod sessions {
     }
 
     #[tokio::test]
+    async fn flood_arrives_whole_in_large_frames() {
+        let scratch = DataDir::fresh();
+        std::fs::create_dir_all(&scratch.0).expect("make a scratch folder");
+        let file = scratch.0.join("flood.txt");
+        let text: String = (0..100_000)
+            .map(|i| format!("line {i:08} abcdefghijklmnopqrstuvwxyz0123456789\n"))
+            .collect();
+        std::fs::write(&file, &text).expect("write the file");
+
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut total = attach(&mut ws, session).await.len();
+        let line = format!("cat '{}'; echo END$((1+1))", file.display());
+        type_line(&mut ws, session, &line).await;
+        let mut seen = Vec::new();
+        let mut frames = 0;
+        // Only the tail is searched, since searching all of it after every frame takes long.
+        while !String::from_utf8_lossy(&seen[seen.len().saturating_sub(256)..]).contains("END2") {
+            match hear_any(&mut ws, PATIENCE).await {
+                Some(Heard::Bytes(from, bytes)) => {
+                    assert_eq!(from, session);
+                    assert!(
+                        bytes.len() <= LARGEST_CHUNK,
+                        "a frame of {} bytes",
+                        bytes.len()
+                    );
+                    frames += 1;
+                    total += bytes.len();
+                    seen.extend(bytes);
+                    ack(&mut ws, session, total).await;
+                }
+                Some(Heard::Text(_)) => {}
+                None => panic!("the output stopped at {total} bytes"),
+            }
+        }
+        assert!(
+            without_returns(&seen).contains(&text),
+            "the file arrived out of order or with gaps"
+        );
+        // One frame per terminal read would be about 1000 bytes on macOS. Gathering the reads
+        // of a flood makes them far larger.
+        let bytes = seen.len();
+        assert!(
+            bytes / frames > 8 * 1024,
+            "{frames} frames for {bytes} bytes, {} bytes a frame",
+            bytes / frames
+        );
+    }
+
+    #[tokio::test]
     async fn two_sessions_on_one_connection_never_share_a_frame() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
