@@ -1,7 +1,9 @@
 # Sidebar review: settled design
 
 Exact values for the sidebar, group headers, state markers and keys, recorded after Alex said go on the review page, 2026-11-10. Source of truth for every look value is the final mock (`mock.html`, line numbers as `(mock N)`).
-Review pages: new https://claude.ai/artifact/GJuwmG4PKSc2HZCr5G4iAx (version 5), old and frozen https://claude.ai/artifact/QYH9TCDXyNSeUmqFGCVScY (version 11). Mock params that match the answers: `spin=tick`, `ghead=rule`, `theme=mac`, `rows=compact`, `sep=both`, `markers=a`, `work=blue`, `glint=off`, `devglyph=icon`, `dim=0`.
+Review pages: new https://claude.ai/artifact/GJuwmG4PKSc2HZCr5G4iAx (version 6), old and frozen https://claude.ai/artifact/QYH9TCDXyNSeUmqFGCVScY (version 11). Mock params that match the answers: `spin=tick`, `ghead=rule`, `theme=mac`, `rows=compact`, `sep=both`, `markers=a`, `work=blue`, `glint=off`, `devglyph=icon`, `dim=0`.
+
+Line numbers past mock 520 were re-found against the mock with the morph rig on 2026-11-10; numbers taken before that were 110 to 180 lines off.
 
 Glyphs are written as code points where a font could draw them as emoji. Never use an emoji glyph. Motion is transform and opacity only. Never orange.
 
@@ -24,6 +26,7 @@ Glyphs are written as code points where a font could draw them as emoji. Never u
 | failed-state (new) | yes, keep a red Failed state (R54) | Claude (Alex left it blank: "no clue") |
 | sounds (new) | per state: sound, banner, dock badge or nothing (R56). Later plan, recorded only | Alex (chat) |
 | mac-theme (new) | Mac is the default sidebar theme, Terminal is the other (R55) | Alex |
+| morph-look (new) | morph: markers reshape into each other | Alex (comment on the page) |
 
 Other rulings that shape the values:
 
@@ -38,7 +41,7 @@ Other rulings that shape the values:
 | R33 | Selected row and hover use kitty's selection color #F5E0DC at 16 and 6 percent | Alex (reading is Claude's) |
 | R34 | Group arrow was theme foreground. Superseded by the folder icon (R53) | Alex |
 | R37 | App is named snowflake. The rename is its own task after this plan | Alex |
-| R57 | Markers morph into each other on a state change. Pending, look not final (see "Pending") | Alex |
+| R57 | Markers morph into each other on a state change. Approved 2026-11-10 (see "Marker morph", R60) | Alex |
 
 ## Colors
 
@@ -76,8 +79,8 @@ All from `client/src/theme.ts`, copied into the mock `:root` (mock 14-33). Roles
 | Item | Value |
 |---|---|
 | Width default | 240 px (`--sb-w`, mock 49) (Claude's call) |
-| Width minimum | 168 px (`MIN_WIDTH`, mock 690; fits the 22 px slot plus about 15 characters; 40 tabs must still show every marker) (Claude's call) |
-| Width maximum | 480 px (Claude's call; the mock only clamps its URL param to 120 to 600, mock 915, which is not a design value) |
+| Width minimum | 168 px (`MIN_WIDTH`, mock 802; fits the 22 px slot plus about 15 characters; 40 tabs must still show every marker) (Claude's call) |
+| Width maximum | 480 px (Claude's call; the mock only clamps its URL param to 120 to 600, mock 1039, which is not a design value) |
 | Drag behavior | drag the sidebar's right edge to resize, saved as `sidebarWidth` (plan Task 5). The handle is a 6 px wide invisible hit area on the sidebar's right edge with `cursor: col-resize`, no snapping, width saved in settings (Claude's call) |
 | Top gap | `#sidebar` padding-top 10 px, the window drag strip (mock 65) |
 | Marker slot | 22 px wide (`--slot`), as tall as the row, never shrinks (mock 53, 84) |
@@ -121,10 +124,10 @@ Spacing between groups (terminal theme, `sep=both`, `ghead=rule`):
 | Name `.gname` | `flex: 0 1 auto; margin-left: 4px; color: var(--text-strong); font-weight: 600`, ellipsis (mock 432). Terminal theme 13 px. Mac theme 12 px, 600, `--text-strong` (mock 434) |
 | Branch `.branch` | `flex: 0 100000 auto` (mock 433), `margin-left: 1.2ch`, `--text-dim`, ellipsis. Mac theme 11 px, `margin-left: 6px` (mock 406). The mock comment says the name shrinks first; the CSS makes the branch shrink first. Follow the CSS and confirm at 168 px |
 | Count `.gcount` | `margin-left: auto; padding-left: 8px`, mono, 11 px, `--text-dim`, no wrap. Shows the number of sessions (mock 430) |
-| Roll-up `.roll` | after the count, `margin-left: 0`, `width: calc(var(--slot) + 6px)` = 28 px, `padding-left: 6px`, centered. Holds a blocked marker when the group is collapsed and any session in it is blocked (mock 81, 431, 1099) |
+| Roll-up `.roll` | after the count, `margin-left: 0`, `width: calc(var(--slot) + 6px)` = 28 px, `padding-left: 6px`, centered. Holds a blocked marker when the group is collapsed and any session in it is blocked (mock 81, 431, 1224) |
 | Arrow | none. Group `plain` mode keeps an arrow in the mock but is not chosen |
 
-Folder icon (`FOLDER_SVG`, mock 699 and 423-429):
+Folder icon (`FOLDER_SVG`, mock 817 and 423-429):
 
 ```
 <svg class="gfold" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round">
@@ -141,15 +144,15 @@ Folder icon (`FOLDER_SVG`, mock 699 and 423-429):
 | Flap, group collapsed | `.collapsed .gfold .ff { transform: none }` (mock 427): a flat, closed folder |
 | Timing | `transition: transform 180ms cubic-bezier(0.2, 0, 0, 1)`, the same as the row slide |
 | Reduced motion | `.gfold .ff { transition: none }` (mock 429) |
-| Control | the 22 px slot is a `<button>` with `aria-expanded` and the label "Collapse name" or "Expand name" (mock 1111) |
+| Control | the 22 px slot is a `<button>` with `aria-expanded` and the label "Collapse name" or "Expand name" (mock 1236) |
 
 ## Collapse motion (rows slide, FLIP)
 
-Only on a user click on a folder (mock 520-524, 1364-1470). Transform and opacity only.
+Only on a user click on a folder (mock 631-635, 1487-1597). Transform and opacity only.
 
 | Step | Value |
 |---|---|
-| Duration and easing | `FLIP_MS = 180`; `transition: transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms cubic-bezier(0.2, 0, 0, 1)` on `.flip-run` (mock 522) |
+| Duration and easing | `FLIP_MS = 180`; `transition: transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms cubic-bezier(0.2, 0, 0, 1)` on `.flip-run` (mock 633) |
 | First | measure every visible header, row, pane row and the drag insert line; also copy the rows of a group being closed |
 | Last | render the new list, measure again |
 | Invert | each moved element gets `translateY(old top - new top)` with no transition. Rows that enter ride with their header: `translateY(-headerShift - 4px)` and `opacity: 0` |
@@ -157,37 +160,77 @@ Only on a user click on a folder (mock 520-524, 1364-1470). Transform and opacit
 | Closing | copies of the closing rows sit in a `.flip-out` layer clipped to the list (`position: absolute; overflow: hidden; pointer-events: none; z-index: 1`), fade to opacity 0 and move with the header (`translateY(headerShift)`) |
 | Folder flap | animates from its old transform with the same timing |
 | Cleanup | after `FLIP_MS + 80` ms, and before every render, so an interrupted run never leaves a transform behind |
-| Reduced motion | skip the whole move and change instantly (mock 1368, 1402) |
+| Reduced motion | skip the whole move and change instantly (mock 1528) |
 
 ## State markers (set a)
 
-Markers sit in the 22 px slot. `.mk` is `inline-flex`, centered, `line-height: 1`, `font-style: normal` (mock 116). Set a: `font-size: 15px; width: 14px` (mock 118). Every marker has `role="img"`, an `aria-label` and a `title` (labels at mock 701-702). Sets b and c are not chosen and are not recorded here.
+Markers sit in the 22 px slot. `.mk` is `inline-flex`, centered, `line-height: 1`, `font-style: normal` (mock 116). Set a: `font-size: 15px; width: 14px` (mock 118). Every marker has `role="img"`, an `aria-label` and a `title` (labels at mock 819-820). Sets b and c are not chosen and are not recorded here.
 
-This plan builds working, blocked, done and idle; failed and handoff requested are recorded looks for a later plan (R58).
+This plan builds working, blocked, done and idle; failed and handoff requested are recorded looks for a later plan (R58). All six are poses of one rig, so the rig and its six poses are recorded here together.
 
-| State | Shape | Size | Color | Motion |
+Since 2026-11-10 (mock `morph=on`, the default) every set a marker is drawn from one shared rig, not from font glyphs. The old glyph markers (snowflake, U+25C6, U+2713, rounded diamond, U+21A9, U+00D7) remain in the mock under `morph=off` for comparison only and are not built.
+
+| Part | Value |
+|---|---|
+| Markup | `.mk.a.mo.s-<state>` > `span.fset` > `span.fspin` > `svg.mrig.p-<state>` (mock 840-845, 813-815) |
+| SVG | `class="mrig p-<state>"`, 13 by 13 px, `viewBox="-8 -8 16 16"` (16 units = 13 px, y down), `fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`, `overflow: visible`, `display: block` (mock 815, 533) |
+| Layers | two copies of the same rig inside the SVG: `g.ly.ly0` (underneath) and `g.ly.ly1` (on top). Both always hold the same pose (mock 815) |
+| Stroke | six groups `g.sk.k0` to `g.sk.k5`, each with `style="--i:k"`. A stroke is two `line` halves `.sa` and `.sb`, each `x1="-2.3" x2="2.3"` (4.6 units long), so a stroke is 4.6 units at rest and slides its halves apart by translateX to grow longer. Each group also has a flake twig `path.tw`, `d="M0 0L1.8-1.9M0 0L1.8 1.9"` (mock 813-814) |
+| Twig | hidden in every pose but working: `.mrig .tw { transform: translate(0.85px, 0px) scale(0); opacity: 0 }` and `.mrig.p-working .tw { transform: translate(0.85px, 0px) scale(1); opacity: 1 }` (mock 537-538) |
+| Fill piece | `rect.fl`, `x="-4.308" y="-4.308" width="8.615" height="8.615" rx="2.462" fill="currentColor" stroke="none"` (mock 813). It is drawn first, under the strokes. At scale 1 it is the old 7 px idle square; scale 0.84 is the blocked diamond |
+| Transform box | `.mrig .sk, .sa, .sb, .tw, .fl { transform-box: view-box; transform-origin: 0 0 }` (mock 534) |
+| Color | the rig uses `currentColor`; the `.mk.a.s-<state>` class sets it (mock 119-140). Blocked `--red` #F38BA8, done `--green` #A6E3A1, idle `--bright-black` #585B70, handoff `--yellow` #F9E2AF, failed `--red` #F38BA8. Working is `--bright-white` by default and `--blue` #89B4FA with `work=blue` (`.work-loud`, mock 173, 1178). On a change the old color stays in `.ly0` (class `.mo-hold` shows it) while `.ly1` fades from opacity 0 to 1 in the new color, 320 ms ease (mock 539-542) |
+| Turn wrapper | `.mk.a .fset`: `display: block; flex: none; width: 13px; height: 13px; margin-right: 1px; transform-origin: 50% 50%`, transition `transform 320ms` in the morph ease (mock 529-530). `.fspin` inside it has `margin-right: 0` (mock 531). The `margin-right: 1px` keeps the vertical stroke on a half pixel so it stays crisp |
+| Rolled up on a collapsed group | the Blocked pose, in `.roll` at the right of the header, same size and color. Only blocked rolls up (mock 1224) |
+
+Poses, copied verbatim from the mock CSS (mock 552-629). A pose class on the SVG (`p-working`, `p-blocked`, `p-idle`, `p-done`, `p-failed`, `p-handoff`) selects it. Rows are per state: strokes `.k0` to `.k5` (group transform, plus the translateX of its two halves) and the fill `.fl`. Stroke groups set no opacity, so it stays 1. Spare strokes lie on another stroke or inside the filled diamond (mock 549-551).
+
+| State | Piece | Transform | Halves `.sa` and `.sb` (translateX) | Opacity |
 |---|---|---|---|---|
-| Working | drawn snowflake, six arms (SVG below) | 13 by 13 px SVG in a 13 px `.fspin` wrapper, `margin-right: 1px`, stroke 1.4 | `--blue` #89B4FA, full brightness (`.work-loud`, mock 173) | the tick turn below |
-| Blocked | glyph U+25C6 (black diamond) | `font-size: 16px` (mock 120) | `--red` #F38BA8 | none. Still. Loudest marker |
-| Done | glyph U+2713 (check mark) | 15 px, bold (mock 121) | `--green` #A6E3A1 | none |
-| Idle | rounded diamond: a `span.dia`, 7 by 7 px, `border-radius: 2px`, `background: currentColor`, `transform: rotate(45deg)` (mock 149) | 7 px | `--bright-black` #585B70 | none |
-| Handoff requested | glyph U+21A9 (leftwards arrow with hook), bold | 14 px (mock 136) | `--yellow` #F9E2AF, never the blocked red | none |
-| Failed | glyph U+00D7 (multiplication sign), bold | 15 px (mock 140) | `--red` #F38BA8, quieter than blocked and never the blocked shape | none |
-| Rolled up on a collapsed group | the Blocked marker, in `.roll` at the right of the header | as Blocked | `--red` | none. Only blocked rolls up (mock 1099) |
+| working | `.k0` | `translate(0px, -3.25px) rotate(-90deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.k1` | `translate(2.815px, -1.625px) rotate(-30deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.k2` | `translate(2.815px, 1.625px) rotate(30deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.k3` | `translate(0px, 3.25px) rotate(90deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.k4` | `translate(-2.815px, 1.625px) rotate(150deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.k5` | `translate(-2.815px, -1.625px) rotate(210deg)` | `-0.95px` and `0.95px` | not set (1) |
+| working | `.fl` fill | `translate(0px, 0px) rotate(45deg) scale(0)` | n/a | 0 |
+| blocked | `.k0` | `translate(0.615px, 0px) rotate(-90deg)` | `0px` and `0px` | not set (1) |
+| blocked | `.k1` | `translate(3.173px, -2.557px) rotate(45deg)` | `-1.317px` and `1.317px` | not set (1) |
+| blocked | `.k2` | `translate(3.173px, 2.557px) rotate(-45deg)` | `-1.317px` and `1.317px` | not set (1) |
+| blocked | `.k3` | `translate(0.615px, 0px) rotate(90deg)` | `0px` and `0px` | not set (1) |
+| blocked | `.k4` | `translate(-1.942px, 2.557px) rotate(225deg)` | `-1.317px` and `1.317px` | not set (1) |
+| blocked | `.k5` | `translate(-1.942px, -2.557px) rotate(135deg)` | `-1.317px` and `1.317px` | not set (1) |
+| blocked | `.fl` fill | `translate(0.615px, 0px) rotate(45deg) scale(0.84)` | n/a | 1 |
+| idle | `.k0` | `translate(0.615px, 0px) rotate(-90deg)` | `0px` and `0px` | not set (1) |
+| idle | `.k1` | `translate(2.215px, -1.6px) rotate(45deg)` | `0px` and `0px` | not set (1) |
+| idle | `.k2` | `translate(2.215px, 1.6px) rotate(-45deg)` | `0px` and `0px` | not set (1) |
+| idle | `.k3` | `translate(0.615px, 0px) rotate(90deg)` | `0px` and `0px` | not set (1) |
+| idle | `.k4` | `translate(-0.985px, 1.6px) rotate(225deg)` | `0px` and `0px` | not set (1) |
+| idle | `.k5` | `translate(-0.985px, -1.6px) rotate(135deg)` | `0px` and `0px` | not set (1) |
+| idle | `.fl` fill | `translate(0.615px, 0px) rotate(45deg) scale(1)` | n/a | 1 |
+| done | `.k0` | `translate(1.834px, -0.843px) rotate(-55.864deg)` | `-1.833px` and `1.833px` | not set (1) |
+| done | `.k1` | `translate(2.244px, 0px) rotate(-55.864deg)` | `-2.3px` and `2.3px` | not set (1) |
+| done | `.k2` | `translate(0.954px, 1.903px) rotate(-55.864deg)` | `0px` and `0px` | not set (1) |
+| done | `.k3` | `translate(0.806px, 0.674px) rotate(124.136deg)` | `0px` and `0px` | not set (1) |
+| done | `.k4` | `translate(-2.067px, 2.155px) rotate(224.692deg)` | `-0.099px` and `0.099px` | not set (1) |
+| done | `.k5` | `translate(-1.566px, 1.508px) rotate(224.692deg)` | `0px` and `0px` | not set (1) |
+| done | `.fl` fill | `translate(0.615px, 0px) rotate(45deg) scale(0)` | n/a | 0 |
+| failed | `.k0` | `translate(0.615px, 0.628px) rotate(-45deg)` | `0px` and `0px` | not set (1) |
+| failed | `.k1` | `translate(0.354px, 0.367px) rotate(-45deg)` | `-1.651px` and `1.651px` | not set (1) |
+| failed | `.k2` | `translate(0.354px, 0.889px) rotate(45deg)` | `-1.651px` and `1.651px` | not set (1) |
+| failed | `.k3` | `translate(0.615px, 0.628px) rotate(45deg)` | `0px` and `0px` | not set (1) |
+| failed | `.k4` | `translate(0.876px, 0.889px) rotate(135deg)` | `-1.651px` and `1.651px` | not set (1) |
+| failed | `.k5` | `translate(0.876px, 0.367px) rotate(225deg)` | `-1.651px` and `1.651px` | not set (1) |
+| failed | `.fl` fill | `translate(0.615px, 0px) rotate(45deg) scale(0)` | n/a | 0 |
+| handoff | `.k0` | `translate(2.862px, -3.902px) rotate(-136.827deg)` | `-0.02px` and `0.02px` | not set (1) |
+| handoff | `.k1` | `translate(2.862px, -3.902px) rotate(43.173deg)` | `-0.02px` and `0.02px` | not set (1) |
+| handoff | `.k2` | `translate(2.862px, -0.726px) rotate(-43.173deg)` | `-0.02px` and `0.02px` | not set (1) |
+| handoff | `.k3` | `translate(-1.131px, 0.862px) rotate(0deg)` | `0px` and `0px` | not set (1) |
+| handoff | `.k4` | `translate(-1.954px, 2.653px) rotate(231.147deg)` | `0px` and `0px` | not set (1) |
+| handoff | `.k5` | `translate(-1.954px, -0.93px) rotate(128.853deg)` | `0px` and `0px` | not set (1) |
+| handoff | `.fl` fill | `translate(0.615px, 0px) rotate(45deg) scale(0)` | n/a | 0 |
 
-Working snowflake SVG (mock 694-696):
-
-```
-<svg class="flake-mk" width="13" height="13" viewBox="-8 -8 16 16" fill="none" stroke="currentColor"
-     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-  six times, a = 0, 60, 120, 180, 240, 300:
-  <g transform="rotate(a)"><g class="arm" style="--i:i"><path d="M0 0V-6.5M0-4.1L-1.9-5.9M0-4.1L1.9-5.9"/></g></g>
-</svg>
-```
-
-`.flake-mk` has `overflow: visible`; `.flake-mk .arm` has `transform-box: view-box; transform-origin: 0 0` (mock 150-151). The `margin-right: 1px` on the flake puts its vertical arm on a half pixel so it stays crisp.
-
-Working motion, tick (`spin-tick`, mock 513-518): `.mk.a .fspin { animation: fl-tick 4s linear infinite; will-change: transform; transform-origin: 50% 50% }`. The marker, the slot and the row never move; the star repeats every 60 degrees so the loop is seamless. `fl-tick` is four equal steps of 15 degrees (mock 458-512). Quarter 1 is written in absolute degrees; quarters 2 to 4 repeat it with 15, 30 and 45 added (0%+25%, 50%, 75% blocks):
+Working motion, tick (`spin-tick`, mock 513-518): the continuous turn lives on `.fspin`: `.spin-tick .mk.a .fspin { animation: fl-tick 4s linear infinite; will-change: transform }` (mock 514) with `transform-origin: 50% 50%` (mock 455). The marker, the slot and the row never move; the star repeats every 60 degrees so the loop is seamless. On a state change the turn is handed to `.fset` (see the morph section below), which settles to 0, or to the nearest 60 degrees when the new state is working. `fl-tick` is four equal steps of 15 degrees (`@keyframes fl-tick`, mock 458-512). Quarter 1 is written in absolute degrees; quarters 2 to 4 repeat it with 15, 30 and 45 added (0%+25%, 50%, 75% blocks):
 
 | Keyframe % in quarter 1 | rotate (deg) | | Keyframe % in quarter 1 | rotate (deg) |
 |---|---|---|---|---|
@@ -203,7 +246,8 @@ Absolute stops for the other quarters: 26/27/28/29/30/31.25/32.5/34/35.75/37.75/
 - Window not focused: `animation-play-state: paused` (mock 515), so 40 tabs do not animate behind other apps.
 - `prefers-reduced-motion: reduce`: `animation: none` (mock 516-518).
 - No sparkles, no sheen, no scale, no fade on the working marker (glint is off, R50). Do not build the `spk` and `shn` code.
-- The mock's script derives the start offset from the clock with `SPIN_MS.tick = 7200` (mock 718), left over from an older 1.2 s step. The built value is a 4000 ms loop, so the modulus is 4000.
+- The script derives the start offset from the clock with `SPIN_MS = { slow: 8000, tick: 4000 }` (mock 836): `animation-delay: -(performance.now() mod 4000)` ms, so every flake stays in step. The older 7200 value is gone from the mock.
+- In the rig the tick runs only in the working state: `.mk.a.mo:not(.s-working) .fspin, body:not(.work-loud) .mk.a.mo .fspin { animation: none }` (mock 532).
 
 ## Selection, hover, focus, rename
 
@@ -213,7 +257,7 @@ Absolute stops for the other quarters: 26/27/28/29/30/31.25/32.5/34/35.75/37.75/
 | Selected | background `--selected` rgba(245, 224, 220, 0.16), name `--text-strong`. No blue block, no left bar (mock 88) | same rect, `--mac-sel` rgba(205, 214, 244, 0.16), no left bar (mock 398) |
 | Keyboard focus | `outline: 1px solid var(--accent); outline-offset: -1px` on the row (mock 89) | same outline on the `::before` rect (mock 400) |
 | Menu open | `.row.menu-open` background `--hover` (mock 240) | `--mac-hover` (mock 397) |
-| Row arrow keys | Up and Down move focus between visible rows, Enter or Space selects (mock 1647-1656) | same |
+| Row arrow keys | Up and Down move focus between visible rows, Enter or Space selects (mock 1844-1853) | same |
 
 Rename field (mock 228-233):
 - `.rename`: flex, `height: 20px; margin: 3px 0; margin-left: -5px; padding: 0 5px; border-radius: 4px`, `background: rgba(205, 214, 244, 0.06)`, `outline: 1px solid var(--accent); outline-offset: -1px`, text `--text-strong`. The 3 px above and below keep the row at 26 px; the -5 and +5 px keep the name's left edge in place.
@@ -226,7 +270,7 @@ Rename field (mock 228-233):
 
 | Item | Value |
 |---|---|
-| Focus rule | pointing at a pane, or at its sidebar pane row, moves typing focus there. It stays after the pointer leaves (mock 1670-1679) |
+| Focus rule | pointing at a pane, or at its sidebar pane row, moves typing focus there. It stays after the pointer leaves (mock 1854-1861) |
 | Focused pane | full brightness; its sidebar pane row gets `.focused`: name color `--text-name` |
 | Unfocused pane | full brightness by default. Hollow cursor: `background: none; color: inherit; outline: 1px solid var(--cursor); outline-offset: -1px` (mock 304) |
 | Dim setting `dim` | off by default. When on: `.dim-panes .pane.dim .screen { opacity: .58 }` (mock 303), `transition: opacity 120ms ease-out` (mock 282) |
@@ -245,7 +289,7 @@ Shown under the selected split tab (mock 108-113):
 
 ## Right-click menu
 
-Four items only (mock 1127, 236-240):
+Four items only (mock 1252, 236-240):
 
 | Item | Key hint shown |
 |---|---|
@@ -272,9 +316,9 @@ Style, terminal theme: `width: 200px; padding: 4px 0; background: #1E1E2E (--cur
 | Item | Value |
 |---|---|
 | Picker `#devpick` | borderless, flex, `height: 30px`, `padding: 0 var(--pad-r) 0 var(--pad-l)`, below the 10 px drag strip, outside the scrolling list. Hover or open: `--hover` (Mac: inset rect) (mock 244-247). Hidden with one computer |
-| Parts | mark in the 22 px slot (slot 30 px high), name `margin-left: 4px` ellipsis, chevron U+F0140 at the right: 12 px, `--text-dim`, 20 px wide (mock 249, 1082) |
-| Menu | same style as the right-click menu, 200 px wide, items All devices, MacBook Pro, PC, Linux box (offline: dim, "offline" hint, no hover fill). Current device gets the hot fill. `left: 3px` (Mac theme 5 px), top 2 px under the picker (mock 250-254, 1131-1141) |
-| Mark style | icon (Nerd Font glyphs, mock 852-857): Mac U+F0322, PC U+F01C5, Linux U+F048B, all U+F037A. 15 px in the picker and menu |
+| Parts | mark in the 22 px slot (slot 30 px high), name `margin-left: 4px` ellipsis, chevron U+F0140 at the right: 12 px, `--text-dim`, 20 px wide (mock 249, 1207) |
+| Menu | same style as the right-click menu, 200 px wide, items All devices, MacBook Pro, PC, Linux box (offline: dim, "offline" hint, no hover fill). Current device gets the hot fill. `left: 3px` (Mac theme 5 px), top 2 px under the picker (mock 250-254, 1256-1266) |
+| Mark style | icon (Nerd Font glyphs, mock 977-980): Mac U+F0322, PC U+F01C5, Linux U+F048B, all U+F037A. 15 px in the picker and menu |
 | Mark on rows | combined view only: `.dev`, 14 px wide, `height: var(--row-h)`, `margin-left: 6px`, at the right edge after the name, `--text-dim`, glyph 12 px, so the marker slot never moves (mock 266-267) |
 
 ## Usage line
@@ -327,22 +371,39 @@ Final. Answers: keys = ok, pane-keys = keep Cmd+Option+arrows. This is the table
 | Board | Cmd+Shift+B | later plan |
 | New tab on the other computer | Cmd+Shift+N | later plan |
 
-## Pending, look not final
+## Marker morph (approved by Alex, 2026-11-10, R60)
 
-Markers morphing into each other on a state change (R57): every marker built from one shared set of strokes, moved by transform and opacity only. Not final. Until Alex has seen it, build this fallback (mock 526-590). Easing `--tx-ease: cubic-bezier(0.2, 0, 0, 1)`, overshoot `--tx-over: cubic-bezier(0.34, 1.56, 0.64, 1)`. The old marker sits in a layer over the new one in the same 22 px slot, each pair plays its move, then the layer and classes are removed. The `--tx-m` Slow multiplier (4) is the demo only.
+Alex saw it on the review page and approved it ("looks phenomenal", then "go"). On a state change the marker reshapes into the next one: every stroke of the rig travels to its pose in the new state. Transform and opacity only (mock 520-548, 1618-1676).
 
-| Pair | Total | Old marker out | New marker in |
-|---|---|---|---|
-| Any pair not listed, and anything to handoff | 280 ms | `tx-out` 200 ms: opacity 1 to 0, scale 1 to .8 | `tx-in` 240 ms, delay 40 ms: opacity 0 to 1, scale .8 to 1 |
-| Idle to working | 350 ms | `tx-turn-out` 200 ms: rotate 0 to 90 deg, scale 1 to .3, fades | marker `tx-show` 120 ms, delay 60 ms; arms `tx-arm` 180 ms, scale 0 to 1, delay `60 + i * 22` ms per arm |
-| Working to done | 320 ms | `tx-fold` 200 ms: rotate 0 to -45 deg, scale 1 to .25, fades | check uncovered left to right: a clip window `tx-reveal` translateX(-100%) to 0 while its content `tx-reveal-in` slides 100% to 0, 220 ms, delay 100 ms |
-| Anything to blocked | 340 ms | `tx-snap` 120 ms: scale 1 to .4, fades | `tx-pop` 280 ms, delay 60 ms, `--tx-over`: scale .3 to 1, opacity 1 by 40 percent |
-| Blocked to working | 340 ms | `tx-calm-out` 200 ms: scale 1 to .7, fades | `tx-calm-in` 280 ms, delay 60 ms: scale .7 to 1, no overshoot |
-| Done to idle | 360 ms | `tx-sink` 240 ms: translateY 0 to 2 px, fades | `tx-show` 280 ms, delay 80 ms: fades up |
-| Anything to failed | 350 ms | `tx-collapse` 150 ms: scale 1 to 0, fades | two bars (9 by 2 px, radius 1 px) cross into the x: `tx-bar-a` 140 ms delay 100 ms (rotate 45 deg, scaleX 0 to 1), `tx-bar-b` 140 ms delay 170 ms (rotate -45 deg); then the glyph shows in the last 60 ms (`tx-hold-show` 350 ms linear, 83 percent hold) |
-| Second line appears | 320 ms | old line copy `tx-sub-out` 180 ms: translateY 0 to -4 px, fades | `tx-sub-in` 260 ms, delay 60 ms: translateY -4 to 0 px, fades in |
+| Part | Value |
+|---|---|
+| Variables | `:root { --mo-ms: 320ms; --mo-step: 18ms; --mo-ease: cubic-bezier(0.34, 1.4, 0.64, 1) }` (mock 528). The script uses the same numbers: `MO_MS = 320, MO_STEP = 18` (mock 1622) |
+| Transform | `transform 320ms cubic-bezier(0.34, 1.4, 0.64, 1)` on `.sk, .sa, .sb, .tw, .fl` and on `.fset` (mock 529-530, 534-536) |
+| Opacity | `opacity 320ms ease`, same delay as the transform, on the same parts (mock 535-536) |
+| Stagger | 18 ms per stroke: delay `calc(var(--i, 0) * var(--mo-step))`, `--i` is 0 to 5 on `.k0` to `.k5` and is inherited by the halves and the twig. The fill `.fl` has no `--i`, so it starts at once. The last stroke starts 90 ms in |
+| Color | the new color fades in on `.ly1` over 320 ms ease while the old color stays underneath on `.ly0` (mock 539-542) |
+| Slow multiplier | every duration and delay is also multiplied by `--tx-m` (default 1). It is 4 only for the mock's Slow button, not a design value |
+| Run length | the script clears its classes after `(MO_MS + 5 * MO_STEP + 80)` ms = 490 ms (mock 1666-1675) |
+| Reduced motion | `.mk.a .fset, .mk.a.mo, .mrig * { transition: none !important }` (mock 546-548). A reduced-motion change renders the new pose at once (`setRowState`, mock 1687) |
+| Old swap | the earlier scale and fade swap (mock 637 onward) is still in the mock as `morph=off`, with the glyph markers. It is for comparison only and is not built |
+| Scope | set a only. Only a state changed in the running app morphs. First render and a tree push render instantly |
 
-Only a state changed in the running app animates. First render and a tree push render instantly. Reduced motion: no animation.
+How the morph runs (mock 1618-1676):
+
+1. The render puts a fresh rig in the row already in its new pose.
+2. With `.mo-snap` (all transitions off) it is put back in the old pose, then let go: `.mo-snap` and `.mo-from` are removed, `.mo-run` is added, the pose class changes, and every stroke, the fill, the new color and the turn travel to the new pose.
+3. When the timer ends, `.mo-snap` hands back to the plain marker (the bottom copy hides, the turn left on `.fset` clears).
+
+Interrupted morph: a new change before the timer ends clears the timer (`moTimers`, mock 1686). `morphSnap` (mock 1630-1643) has read the computed transform and opacity of every part (`.sk, .sa, .sb, .tw, .fl`), the colors of both layers and the whole turn, so the next morph starts from the exact place every stroke had reached, not from the last finished pose. The turn is handled so there is no jump:
+
+| Case | Start turn on `.fset` | End turn on `.fset` |
+|---|---|---|
+| Flake was still (old state working, not running) | the current turn, reduced to within 30 degrees (`nearTurn(turn, 60)`, any 60 degree step of the flake looks the same) | nearest multiple of 60 if the new state is working, else 0 |
+| Anything else | the current turn, reduced to within 180 degrees (`nearTurn(turn, 360)`) | nearest multiple of 60 if the new state is working, else 0 |
+
+The flake's own tick (`fl-tick`) runs on `.fspin` only in the working state, and not at all when the new state is not working (`.mk.a.mo:not(.s-working) .fspin { animation: none }`, mock 532).
+
+Known roughness: handoff is an angular bent arrow (the curve became two straight pieces), and check and x use doubled strokes for thickness.
 
 ## Look only, not built in this plan
 
@@ -350,10 +411,10 @@ The plan's "Not in this plan" paragraph: a second computer (device filter, offli
 
 | Mock item | Status | Mock lines |
 |---|---|---|
-| Settings window (General, Appearance, Sounds pages; 760 by 540, radius 10, `#1F1D2A`, shadow `0 18px 48px rgba(0,0,0,0.42)`) | later plan | 601-641 |
-| Sounds per state: sound, banner, dock badge or nothing; none for working and idle | later plan (R36, R56) | 1275-1362 |
-| Device picker, device menu, per-row device marks, the combined view | later plan (needs a second computer) | 242-268, 852-897 |
-| Master session row and helper rows (helpers one slot in, a "master" tag that hides them, `+N` when collapsed) | later plan | 215-222, 827-883 |
+| Settings window (General, Appearance, Sounds pages; 760 by 540, radius 10, `#1F1D2A`, shadow `0 18px 48px rgba(0,0,0,0.42)`) | later plan | 712-752 |
+| Sounds per state: sound, banner, dock badge or nothing; none for working and idle | later plan (R36, R56) | 1397-1485 |
+| Device picker, device menu, per-row device marks, the combined view | later plan (needs a second computer) | 242-268, 975-1009 |
+| Master session row and helper rows (helpers one slot in, a "master" tag that hides them, `+N` when collapsed) | later plan | 215-222, 949-973, 1102-1131 |
 | Snow backdrop (`bg=still or snow`, layer opacity 5, 8 or 12 percent) | look only, off by default | 317-342 |
 | See-through window (`glass`, wallpapers) | look only, off by default | 344-372 |
 | Mac-style terminal look | later idea (R55), vault Inbox | none |
@@ -361,7 +422,7 @@ The plan's "Not in this plan" paragraph: a second computer (device filter, offli
 | Failed marker | look only until a hook-signal check shows Claude exposes it (R42). Plan Tasks 8 and 9 build four states. Controller to decide whether Task 9 adds it | 139-145 |
 | `cmux` three-line rows | dropped (R24) | 100-105 |
 | Marker sets b and c, `work=name` and `work=quiet`, `glint`, `spin=slow` and `spin=off` | not chosen, do not build | 123-213 |
-| Transitions demo strip (Play, Slow buttons) | mock only | 592-599 |
+| Transitions demo strip (Play, Slow buttons) | mock only | 703-710 |
 
 ## Where DESIGN.md disagrees
 
