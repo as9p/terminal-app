@@ -1,18 +1,22 @@
 use std::future::Future;
 use std::process::ExitCode;
 
-use term_host::{auth, hookcmd, paths, server};
+use term_host::{auth, hookcmd, paths, server, service};
 
 fn main() -> ExitCode {
-    // Claude runs `term-host hook <event>` for each hook. Checked before the runtime starts,
-    // so the call stays quick, and it always exits 0 so Claude never shows an error.
     let mut args = std::env::args_os().skip(1);
-    if args.next().is_some_and(|arg| arg == "hook") {
-        let event = args.next().unwrap_or_default();
-        hookcmd::run(&event.to_string_lossy());
-        std::process::exit(0);
+    match args.next() {
+        // Claude runs `term-host hook <event>` for each hook. Checked before the runtime
+        // starts, so the call stays quick, and it always exits 0 so Claude never shows an error.
+        Some(arg) if arg == "hook" => {
+            let event = args.next().unwrap_or_default();
+            hookcmd::run(&event.to_string_lossy());
+            std::process::exit(0);
+        }
+        // `term-host service install|uninstall|status`, which needs no runtime either.
+        Some(arg) if arg == "service" => service::main(args.next()),
+        _ => host_main(),
     }
-    host_main()
 }
 
 #[tokio::main]

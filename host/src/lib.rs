@@ -10,6 +10,7 @@ pub mod protocol;
 mod pty;
 mod screen;
 pub mod server;
+pub mod service;
 mod session;
 pub mod shellinit;
 pub mod state;

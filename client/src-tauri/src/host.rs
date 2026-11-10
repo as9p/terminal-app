@@ -1,4 +1,5 @@
-//! Finds the host on its port, or starts it so that it outlives this app.
+//! Finds the host on its port, or starts it so that it outlives this app. A release build on
+//! macOS installs the host as a launchd service instead, and launchd starts it.
 
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -17,6 +18,8 @@ const TOKEN_FILE: &str = "host-token";
 const TOKEN_HEX_LEN: usize = 64;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// launchd waits up to 10 s before it starts a host that exited soon after starting.
+const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -41,12 +44,26 @@ pub fn find_or_start() -> Result<HostConnection, String> {
     let data_dir = data_dir_from(std::env::var_os("TERM_APP_DATA"), dirs::data_dir())?;
     let token_path = data_dir.join(TOKEN_FILE);
 
-    let mut started = if answers(port) {
+    // With the service installed, launchd starts the host and this app never does.
+    let use_service = service_wanted()
+        && match service::ensure_installed(answers(port)) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("{error}. Starting the host without the service.");
+                false
+            }
+        };
+    let mut started = if use_service || answers(port) {
         None
     } else {
         Some(start_host()?)
     };
-    let token = wait_until_ready(port, &token_path, started.as_mut());
+    let timeout = if use_service {
+        SERVICE_START_TIMEOUT
+    } else {
+        START_TIMEOUT
+    };
+    let token = wait_until_ready(port, &token_path, started.as_mut(), timeout);
     if let Some(mut host) = started {
         // Collects its exit status if it ends while the app runs. The app quitting does not
         // touch it: nothing here ever signals the host.
@@ -102,6 +119,111 @@ fn host_binary() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The service is for the installed app with the default port and data folder. A debug build
+/// would rewrite the installed app's plist, and launchd's host would not see a custom
+/// TERM_HOST_PORT or TERM_APP_DATA, so those keep the detached start.
+fn service_wanted() -> bool {
+    cfg!(target_os = "macos")
+        && !cfg!(debug_assertions)
+        && std::env::var_os("TERM_HOST_PORT").is_none()
+        && std::env::var_os("TERM_APP_DATA").is_none_or(|dir| dir.is_empty())
+}
+
+// Source of truth for the plist's name and text: host/src/service.rs.
+#[cfg(target_os = "macos")]
+mod service {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const LABEL: &str = "app.terminal.host";
+
+    /// Runs `term-host service install` when the plist is missing or runs another program, or
+    /// when the host is silent, since the install also loads a plist launchd has lost. An
+    /// install that finds nothing to change leaves a running host alone.
+    pub fn ensure_installed(host_answers: bool) -> Result<(), String> {
+        let binary = super::host_binary()?;
+        let binary = std::fs::canonicalize(&binary)
+            .map_err(|error| format!("Cannot resolve {}: {error}", binary.display()))?;
+        // A plist pointing into that copy would break once macOS removes it.
+        if binary.to_string_lossy().contains("/AppTranslocation/") {
+            return Err(
+                "macOS runs this app from a temporary copy, so the host cannot be a service. Move the app to Applications"
+                    .to_string(),
+            );
+        }
+        let home = dirs::home_dir().ok_or("This computer has no home folder")?;
+        let installed = std::fs::read_to_string(plist_path(&home)).ok();
+        if host_answers && !needs_install(installed.as_deref(), &binary) {
+            return Ok(());
+        }
+        let output = Command::new(&binary)
+            .args(["service", "install"])
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("Cannot run {}: {error}", binary.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "term-host service install failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    fn plist_path(home: &Path) -> PathBuf {
+        home.join("Library/LaunchAgents")
+            .join(format!("{LABEL}.plist"))
+    }
+
+    fn needs_install(plist: Option<&str>, binary: &Path) -> bool {
+        let wanted = format!("<string>{}</string>", xml_escape(&binary.to_string_lossy()));
+        !plist.is_some_and(|text| text.contains(&wanted))
+    }
+
+    fn xml_escape(text: &str) -> String {
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '&' => escaped.push_str("&amp;"),
+                '<' => escaped.push_str("&lt;"),
+                '>' => escaped.push_str("&gt;"),
+                '"' => escaped.push_str("&quot;"),
+                '\'' => escaped.push_str("&apos;"),
+                c => escaped.push(c),
+            }
+        }
+        escaped
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn installs_when_the_plist_is_missing_or_runs_another_program() {
+            let binary = Path::new("/Applications/Tom & Jerry.app/Contents/MacOS/term-host");
+            let ours = "<array>\n\t\t<string>/Applications/Tom &amp; Jerry.app/Contents/MacOS/term-host</string>\n\t</array>";
+            let other = "<array>\n\t\t<string>/Users/me/Downloads/Terminal.app/Contents/MacOS/term-host</string>\n\t</array>";
+            assert!(needs_install(None, binary));
+            assert!(needs_install(Some(other), binary));
+            assert!(!needs_install(Some(ours), binary));
+            assert_eq!(
+                plist_path(Path::new("/Users/me")),
+                PathBuf::from("/Users/me/Library/LaunchAgents/app.terminal.host.plist")
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod service {
+    /// Never called: `service_wanted` is false off macOS.
+    pub fn ensure_installed(_host_answers: bool) -> Result<(), String> {
+        Err("The host runs as a service only on macOS for now".to_string())
+    }
+}
+
 fn start_host() -> Result<Child, String> {
     let binary = host_binary()?;
     let mut command = Command::new(&binary);
@@ -139,8 +261,9 @@ fn wait_until_ready(
     port: u16,
     token_path: &Path,
     mut started: Option<&mut Child>,
+    timeout: Duration,
 ) -> Result<String, String> {
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         let port_answers = answers(port);
         if port_answers && let Some(token) = read_token(token_path) {
@@ -156,7 +279,7 @@ fn wait_until_ready(
             ));
         }
         if Instant::now() >= deadline {
-            return Err(timeout_message(port, port_answers, token_path));
+            return Err(timeout_message(port, port_answers, token_path, timeout));
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -170,8 +293,8 @@ fn read_token(path: &Path) -> Option<String> {
     whole.then_some(token)
 }
 
-fn timeout_message(port: u16, port_answers: bool, token_path: &Path) -> String {
-    let seconds = START_TIMEOUT.as_secs();
+fn timeout_message(port: u16, port_answers: bool, token_path: &Path, timeout: Duration) -> String {
+    let seconds = timeout.as_secs();
     if port_answers {
         format!(
             "Something answers on 127.0.0.1:{port}, but after {seconds} s there is no usable token at {}. Another program may be using the port.",
