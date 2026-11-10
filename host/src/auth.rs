@@ -395,16 +395,66 @@ mod tests {
     fn assert_user_only(path: &Path, inherit: &str) {
         let text = dacl_text(path);
         let sid = windows_acl::current_user_sid().unwrap();
-        let (flags, aces) = text
+        // Windows writes well-known accounts by alias (the built-in Administrator is `LA`), so
+        // the expected entry goes through the same conversion before comparing.
+        let expected = canonical_sddl(&format!("D:P(A;{inherit};FA;;;{sid})"));
+        assert!(flags_of(&text).contains('P'), "not protected: {text}");
+        assert_eq!(aces_of(&text), aces_of(&expected), "in {text}");
+    }
+
+    #[cfg(windows)]
+    fn flags_of(sddl: &str) -> &str {
+        let rest = sddl
             .strip_prefix("D:")
-            .and_then(|rest| rest.split_once('('))
-            .unwrap_or_else(|| panic!("unexpected access list {text}"));
-        assert!(flags.contains('P'), "not protected: {text}");
-        assert_eq!(
-            format!("({aces}"),
-            format!("(A;{inherit};FA;;;{sid})"),
-            "in {text}"
-        );
+            .unwrap_or_else(|| panic!("no DACL in {sddl}"));
+        rest.split_once('(').map_or(rest, |(flags, _)| flags)
+    }
+
+    #[cfg(windows)]
+    fn aces_of(sddl: &str) -> &str {
+        sddl.find('(').map_or("", |at| &sddl[at..])
+    }
+
+    /// Parses SDDL text into a descriptor and writes it back out, the way Windows spells it.
+    #[cfg(windows)]
+    fn canonical_sddl(sddl: &str) -> String {
+        use std::ffi::OsStr;
+        use std::ptr;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        let input = windows_acl::wide(OsStr::new(sddl));
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                input.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "cannot parse {sddl}");
+        let mut text = ptr::null_mut();
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0);
+        let result = windows_acl::from_wide(text);
+        unsafe {
+            LocalFree(text.cast());
+            LocalFree(descriptor);
+        }
+        result
     }
 
     #[cfg(windows)]
