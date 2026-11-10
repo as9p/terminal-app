@@ -33,6 +33,7 @@ fn spec() -> SpawnSpec {
         uuid: Uuid::nil(),
         // No hook is installed here, so every shell starts as it did before the hook.
         data_dir: PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no-hook"),
+        known_cwd: false,
     }
 }
 

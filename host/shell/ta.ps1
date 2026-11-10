@@ -16,7 +16,10 @@ function global:prompt {
     }
     $location = $executionContext.SessionState.Path.CurrentLocation
     if ($location.Provider.Name -eq 'FileSystem') {
-        $path = '/' + ($location.ProviderPath -replace '\\', '/')
+        # Only a Windows path needs the leading / and forward slashes. On macOS and Linux a
+        # path already starts with / and a backslash is part of a folder's name.
+        $path = $location.ProviderPath
+        if ($path -match '^[A-Za-z]:') { $path = '/' + ($path -replace '\\', '/') }
         $encoded = New-Object System.Text.StringBuilder
         foreach ($byte in [System.Text.Encoding]::UTF8.GetBytes($path)) {
             $char = [char]$byte

@@ -87,6 +87,7 @@ impl Sandbox {
             cwd: self.home(),
             uuid: Uuid::from_u128(1),
             data_dir: self.data(),
+            known_cwd: false,
         };
         let handle = Session::spawn_with_env(spec, SIZE, env.into_iter()).expect("spawn");
         let (tx, rx) = unbounded();
@@ -149,14 +150,26 @@ impl Watch {
     fn until_cwd(&mut self, wanted: &Path) {
         let wanted = real(wanted);
         self.until(&wanted.display().to_string(), |watch| {
-            watch.cwds.iter().any(|cwd| real(cwd) == wanted)
+            watch.cwds.contains(&wanted)
         });
     }
 }
 
+/// Resolved the way the host resolves a reported folder, without the `\\?\` Windows adds.
 fn real(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .unwrap_or_else(|error| panic!("resolve {}: {error}", path.display()))
+    let real = path
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("resolve {}: {error}", path.display()));
+    if cfg!(windows) {
+        let text = real.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    real
 }
 
 /// Startup file text that appends `name` to `$HOME/order`.
@@ -173,7 +186,21 @@ fn zsh_reports_folder_at_prompt() {
     let mut shell = sandbox.start("/bin/zsh", &[]);
     shell.until_cwd(&sandbox.home());
     shell.type_line("cd /tmp");
-    shell.until_cwd(Path::new("/tmp"));
+    shell.until_cwd(&std::fs::canonicalize("/tmp").expect("resolve /tmp"));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_folder_reports_its_real_path() {
+    let sandbox = Sandbox::new();
+    sandbox.write(".zshrc", "PS1='%# '\n");
+    let target = sandbox.home().join("target");
+    std::fs::create_dir(&target).expect("make the target");
+    std::os::unix::fs::symlink(&target, sandbox.home().join("link")).expect("make the link");
+    let mut shell = sandbox.start("/bin/zsh", &[]);
+    shell.until_cwd(&sandbox.home());
+    shell.type_line("cd link");
+    shell.until_cwd(&target);
 }
 
 #[cfg(unix)]

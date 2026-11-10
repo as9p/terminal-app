@@ -829,7 +829,7 @@ mod sessions {
             if frame["type"] == "cwd" {
                 assert_eq!(
                     frame,
-                    json!({"type": "cwd", "session": session, "cwd": "/tmp"})
+                    json!({"type": "cwd", "session": session, "cwd": real_tmp()})
                 );
                 break;
             }
@@ -845,7 +845,36 @@ mod sessions {
         assert_eq!(items[0]["cwd"], Value::Null, "{items:?}");
         attach(&mut ws, session).await;
         type_line(&mut ws, session, REPORT_TMP).await;
-        wait_for_list(&mut ws, |items| items[0]["cwd"] == "/tmp").await;
+        wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
+    }
+
+    #[tokio::test]
+    async fn late_attach_gets_current_cwd() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
+
+        let mut late = signed_in(&host).await;
+        attach(&mut late, session).await;
+        loop {
+            let frame = hear_text(&mut late).await;
+            if frame["type"] == "cwd" {
+                assert_eq!(
+                    frame,
+                    json!({"type": "cwd", "session": session, "cwd": real_tmp()})
+                );
+                break;
+            }
+        }
+    }
+
+    /// `/tmp` is a link on macOS, and reported folders arrive resolved.
+    fn real_tmp() -> String {
+        let tmp = std::fs::canonicalize("/tmp").expect("resolve /tmp");
+        tmp.to_str().expect("a UTF-8 folder").to_string()
     }
 
     #[tokio::test]

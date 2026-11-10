@@ -383,6 +383,7 @@ impl Connection {
             cwd: PathBuf::from(cwd),
             uuid: parsed,
             data_dir: self.registry.data_dir.clone(),
+            known_cwd: false,
         };
         let cwd = spec.cwd.clone();
 
@@ -797,6 +798,7 @@ impl Served {
         };
         *lock(&self.cwd) = cwd.clone();
         let spec = SpawnSpec {
+            known_cwd: kind == Kind::Shell,
             kind,
             cwd,
             uuid: self.id,

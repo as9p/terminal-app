@@ -479,6 +479,34 @@ async fn restart_restores_shell_in_folder() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn restored_shell_lists_its_saved_folder() {
+    let dirs = Dirs::new();
+    let folder = dirs.work().join("saved");
+    std::fs::create_dir_all(&folder).expect("make the folder");
+    dirs.write_state(&State {
+        sessions: vec![SavedSession {
+            uuid: FIRST.to_string(),
+            kind: "shell".to_string(),
+            cwd: folder.clone(),
+            title: None,
+            chat: None,
+        }],
+        ..State::default()
+    });
+
+    let mut host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    let items = list(&mut ws).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(
+        items[0]["cwd"],
+        real(&folder).to_str().expect("a UTF-8 folder")
+    );
+    host.stop();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn claude_restore_uses_resume() {
     let dirs = Dirs::new();
     let transcripts = dirs.config().join("projects").join("-some-project");
