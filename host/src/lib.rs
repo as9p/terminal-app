@@ -1,5 +1,8 @@
 pub mod auth;
+pub mod claudecfg;
+pub mod ctl;
 mod env;
+pub mod hookcmd;
 mod osc;
 pub mod paths;
 pub mod project;
