@@ -1,9 +1,9 @@
-//! Protocol version 1. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
+//! Protocol version 2. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
 //! little-endian session number, then bytes, in both directions.
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTO: u32 = 1;
+pub const PROTO: u32 = 2;
 
 /// Values of `code` in `HostFrame::Error`.
 pub mod code {
@@ -83,6 +83,11 @@ pub enum HostFrame {
         session: u32,
         title: String,
     },
+    /// The folder the session's shell reported at its prompt.
+    Cwd {
+        session: u32,
+        cwd: String,
+    },
     Exited {
         session: u32,
         clean: bool,
@@ -115,6 +120,9 @@ pub struct SessionItem {
     pub uuid: String,
     pub kind: String,
     pub title: Option<String>,
+    /// The folder the shell last reported. Null until it reports one, and always for a
+    /// program with no shell hook.
+    pub cwd: Option<String>,
     /// Null while running, otherwise whether it exited cleanly.
     pub exited: Option<bool>,
     pub cols: u16,
@@ -144,10 +152,10 @@ mod tests {
         let cases = [
             (
                 HostFrame::HelloOk {
-                    proto: 1,
+                    proto: 2,
                     host_version: "0.1.0".to_string(),
                 },
-                json!({"type": "hello_ok", "proto": 1, "host_version": "0.1.0"}),
+                json!({"type": "hello_ok", "proto": 2, "host_version": "0.1.0"}),
             ),
             (
                 HostFrame::Sessions {
@@ -156,6 +164,7 @@ mod tests {
                         uuid: "u".to_string(),
                         kind: "shell".to_string(),
                         title: None,
+                        cwd: Some("/tmp".to_string()),
                         exited: Some(true),
                         cols: 80,
                         rows: 24,
@@ -163,7 +172,7 @@ mod tests {
                 },
                 json!({"type": "sessions", "items": [{
                     "session": 1, "uuid": "u", "kind": "shell", "title": null,
-                    "exited": true, "cols": 80, "rows": 24,
+                    "cwd": "/tmp", "exited": true, "cols": 80, "rows": 24,
                 }]}),
             ),
             (
@@ -186,6 +195,13 @@ mod tests {
                     title: "t".to_string(),
                 },
                 json!({"type": "title", "session": 1, "title": "t"}),
+            ),
+            (
+                HostFrame::Cwd {
+                    session: 1,
+                    cwd: "/tmp".to_string(),
+                },
+                json!({"type": "cwd", "session": 1, "cwd": "/tmp"}),
             ),
             (
                 HostFrame::Exited {

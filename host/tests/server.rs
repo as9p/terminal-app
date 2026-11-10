@@ -58,6 +58,8 @@ impl Host {
             .env("TERM_HOST_PORT", port.to_string())
             // So a test can never start the real login shell, which is slow and varies.
             .env("SHELL", "/bin/sh")
+            // So a login shell never reads the real startup files.
+            .env("HOME", &dir.0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr)
@@ -172,10 +174,10 @@ async fn hear_close(ws: &mut Ws) {
 }
 
 async fn expect_hello_ok(port: u16, ws: &mut Ws, token: &str) {
-    say(ws, json!({"type": "hello", "token": token, "proto": 1})).await;
+    say(ws, json!({"type": "hello", "token": token, "proto": 2})).await;
     let reply = hear(ws).await;
     assert_eq!(reply["type"], "hello_ok", "port {port}: {reply}");
-    assert_eq!(reply["proto"], 1, "{reply}");
+    assert_eq!(reply["proto"], 2, "{reply}");
     assert!(reply["host_version"].is_string(), "{reply}");
 }
 
@@ -270,7 +272,7 @@ async fn refuses_bad_token() {
         let mut ws = open(host.port).await;
         say(
             &mut ws,
-            json!({"type": "hello", "token": wrong, "proto": 1}),
+            json!({"type": "hello", "token": wrong, "proto": 2}),
         )
         .await;
         hear_close(&mut ws).await;
@@ -280,7 +282,7 @@ async fn refuses_bad_token() {
     let mut ws = open(host.port).await;
     say(
         &mut ws,
-        json!({"type": "hello", "token": "wrong", "proto": 2}),
+        json!({"type": "hello", "token": "wrong", "proto": 3}),
     )
     .await;
     hear_close(&mut ws).await;
@@ -289,9 +291,9 @@ async fn refuses_bad_token() {
     for first in [
         Message::text(r#"{"type":"list"}"#),
         Message::text("not json"),
-        Message::text(json!({"type": "hello", "proto": 1}).to_string()),
+        Message::text(json!({"type": "hello", "proto": 2}).to_string()),
         Message::binary(
-            json!({"type": "hello", "token": token, "proto": 1})
+            json!({"type": "hello", "token": token, "proto": 2})
                 .to_string()
                 .into_bytes(),
         ),
@@ -306,7 +308,7 @@ async fn refuses_bad_token() {
     let mut ws = open(host.port).await;
     say(
         &mut ws,
-        json!({"type": "hello", "token": token, "proto": 2}),
+        json!({"type": "hello", "token": token, "proto": 3}),
     )
     .await;
     let reply = hear(&mut ws).await;
@@ -344,6 +346,25 @@ async fn refuses_bad_token() {
         closed,
         "the host sent bytes to a client that never upgraded"
     );
+}
+
+#[tokio::test]
+async fn proto_1_client_is_refused() {
+    let host = Host::start();
+    let mut ws = open(host.port).await;
+    say(
+        &mut ws,
+        json!({"type": "hello", "token": host.token(), "proto": 1}),
+    )
+    .await;
+    let reply = hear(&mut ws).await;
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["code"], "proto_mismatch", "{reply}");
+    assert!(
+        reply["message"].as_str().is_some_and(|m| m.contains('2')),
+        "{reply}"
+    );
+    hear_close(&mut ws).await;
 }
 
 #[tokio::test]
@@ -429,7 +450,7 @@ async fn bad_request_after_hello_stays_open() {
         "not json".to_string(),
         json!({"type": "no_such_frame"}).to_string(),
         json!({"type": "attach", "session": "one"}).to_string(),
-        json!({"type": "hello", "token": host.token(), "proto": 1}).to_string(),
+        json!({"type": "hello", "token": host.token(), "proto": 2}).to_string(),
     ] {
         ws.send(Message::text(bad.clone())).await.expect("send");
         let reply = hear(&mut ws).await;
@@ -549,9 +570,11 @@ async fn token_file_is_private() {
     };
     assert_eq!(mode(&host.dir.0), 0o700);
     assert_eq!(mode(&host.token_path()), 0o600);
+    // `shell` holds the shell hook, and may not be written yet.
     let names: Vec<_> = std::fs::read_dir(&host.dir.0)
         .expect("list the folder")
         .map(|entry| entry.expect("read an entry").file_name())
+        .filter(|name| name != "shell")
         .collect();
     assert_eq!(names, ["host-token"], "the temp file must not stay behind");
 
@@ -605,7 +628,7 @@ async fn partial_token_file_is_replaced() {
         let mut refused = open(host.port).await;
         say(
             &mut refused,
-            json!({"type": "hello", "token": partial, "proto": 1}),
+            json!({"type": "hello", "token": partial, "proto": 2}),
         )
         .await;
         hear_close(&mut refused).await;
@@ -790,6 +813,41 @@ mod sessions {
         }
     }
 
+    /// A report as the hook prints it, typed by hand because the test host's shell is
+    /// `/bin/sh`, which gets no hook.
+    const REPORT_TMP: &str = r#"printf '\033]7;file://%s/tmp\007' "$(hostname)""#;
+
+    #[tokio::test]
+    async fn cwd_frame_reaches_client() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        loop {
+            let frame = hear_text(&mut ws).await;
+            if frame["type"] == "cwd" {
+                assert_eq!(
+                    frame,
+                    json!({"type": "cwd", "session": session, "cwd": "/tmp"})
+                );
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_carries_cwd() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cwd"], Value::Null, "{items:?}");
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        wait_for_list(&mut ws, |items| items[0]["cwd"] == "/tmp").await;
+    }
+
     #[tokio::test]
     async fn create_attach_type_echo() {
         let host = Host::start();
@@ -805,7 +863,7 @@ mod sessions {
             items,
             [json!({
                 "session": session, "uuid": UUID, "kind": "shell", "title": null,
-                "exited": null, "cols": 80, "rows": 24,
+                "cwd": null, "exited": null, "cols": 80, "rows": 24,
             })]
         );
     }

@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use portable_pty::{
 };
 
 use crate::session::{Kind, SpawnSpec};
+use crate::shellinit::{self, set_env};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
@@ -88,25 +90,30 @@ pub fn prepare_for_fork() {
 #[cfg(not(target_os = "macos"))]
 pub fn prepare_for_fork() {}
 
-pub(crate) fn spawn(spec: &SpawnSpec, size: Size, env: Vec<(String, String)>) -> Result<Pty> {
+pub(crate) fn spawn(spec: &SpawnSpec, size: Size, mut env: Vec<(String, String)>) -> Result<Pty> {
     prepare_for_fork();
     let pair = open_pty(size)?;
     let reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
 
+    set_env(&mut env, "TA_SESSION", spec.uuid.to_string());
+    let data_dir = spec.data_dir.to_string_lossy().into_owned();
+    set_env(&mut env, "TA_DATA", data_dir);
     let mut command = CommandBuilder::new_default_prog();
     command.env_clear();
-    for (key, value) in env {
+    for (key, value) in &env {
         command.env(key, value);
     }
     command.cwd(&spec.cwd);
     // get_shell reads SHELL or COMSPEC from the environment set above, and on Unix
     // falls back to the account's shell when a bare environment has no SHELL.
     let shell = command.get_shell();
-    *command.get_argv_mut() = argv(&spec.kind, &shell, cfg!(windows))
-        .into_iter()
-        .map(OsString::from)
-        .collect();
+    *command.get_argv_mut() = argv(&spec.kind, &shell, cfg!(windows), &spec.data_dir, &mut env);
+    // Set again, since loading the hook can add to it.
+    command.env_clear();
+    for (key, value) in env {
+        command.env(key, value);
+    }
 
     let child = pair.slave.spawn_command(command)?;
     let killer = child.clone_killer();
@@ -122,10 +129,15 @@ pub(crate) fn spawn(spec: &SpawnSpec, size: Size, env: Vec<(String, String)>) ->
     })
 }
 
-fn argv(kind: &Kind, shell: &str, windows: bool) -> Vec<String> {
+fn argv(
+    kind: &Kind,
+    shell: &str,
+    windows: bool,
+    data_dir: &Path,
+    env: &mut Vec<(String, String)>,
+) -> Vec<OsString> {
     let (flag, id) = match kind {
-        Kind::Shell if windows => return vec![shell.to_string()],
-        Kind::Shell => return vec![shell.to_string(), "-l".to_string()],
+        Kind::Shell => return shellinit::wrap_for(Path::new(shell), data_dir, env, windows),
         Kind::Claude { chat, resume: true } => ("--resume", chat),
         Kind::Claude {
             chat,
@@ -134,13 +146,13 @@ fn argv(kind: &Kind, shell: &str, windows: bool) -> Vec<String> {
     };
     if windows {
         ["cmd", "/c", "claude", flag, &id.to_string()]
-            .map(String::from)
+            .map(OsString::from)
             .to_vec()
     } else {
         vec![
-            shell.to_string(),
-            "-lic".to_string(),
-            format!("exec claude {flag} {id}"),
+            shell.into(),
+            "-lic".into(),
+            format!("exec claude {flag} {id}").into(),
         ]
     }
 }
@@ -244,6 +256,12 @@ mod tests {
 
     fn claude(resume: bool) -> Kind {
         Kind::Claude { chat: CHAT, resume }
+    }
+
+    /// With no hook files in the data folder, as stage 1 had.
+    fn argv(kind: &Kind, shell: &str, windows: bool) -> Vec<OsString> {
+        let no_hook = std::env::temp_dir().join("term-host-no-hook");
+        super::argv(kind, shell, windows, &no_hook, &mut Vec::new())
     }
 
     #[test]

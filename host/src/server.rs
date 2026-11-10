@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io;
 use std::mem;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -24,12 +24,12 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 use uuid::Uuid;
 
-use crate::auth;
 use crate::protocol::{
     ClientFrame, HostFrame, PROTO, SessionItem, code, decode_binary, encode_binary,
 };
 use crate::state::{self, SavedSession, State};
 use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec, Status};
+use crate::{auth, shellinit};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -63,7 +63,14 @@ pub async fn serve(
     let registry = Arc::new(Registry::new(data_dir));
     let restoring = Arc::clone(&registry);
     // Starting shells forks, and looking at folders can stall on a network mount.
-    let _ = spawn_blocking(move || restoring.restore()).await;
+    let _ = spawn_blocking(move || {
+        // Before any shell starts, since each one loads the hook from there.
+        if let Err(error) = shellinit::install(&restoring.data_dir) {
+            eprintln!("term-host: shells will not report their folder: {error}");
+        }
+        restoring.restore();
+    })
+    .await;
     Arc::clone(&registry).start_saving();
     tokio::select! {
         () = accept(listener, token, Arc::clone(&registry)) => {}
@@ -375,6 +382,7 @@ impl Connection {
             kind,
             cwd: PathBuf::from(cwd),
             uuid: parsed,
+            data_dir: self.registry.data_dir.clone(),
         };
         let cwd = spec.cwd.clone();
 
@@ -402,7 +410,8 @@ impl Connection {
             // A restored Claude session starts here, so a reboot does not start every chat at
             // once.
             let starting = Arc::clone(&served);
-            let started = spawn_blocking(move || starting.start(size)).await;
+            let data_dir = self.registry.data_dir.clone();
+            let started = spawn_blocking(move || starting.start(size, &data_dir)).await;
             started.unwrap_or_else(|_| Err(start_failed()))?;
         }
         let running = served.running()?;
@@ -486,6 +495,13 @@ fn pump_events(session: u32, events: Receiver<ClientEvent>, out: Out, wanted: Ar
             Ok(ClientEvent::Title(title)) => {
                 hand_text(&out, &HostFrame::Title { session, title });
             }
+            // A folder whose name is not UTF-8 cannot go in a text frame.
+            Ok(ClientEvent::Cwd(path)) => {
+                if let Some(cwd) = path.to_str() {
+                    let cwd = cwd.to_string();
+                    hand_text(&out, &HostFrame::Cwd { session, cwd });
+                }
+            }
             Ok(ClientEvent::Exited { clean, .. }) => {
                 *wanted = false;
                 hand_text(&out, &HostFrame::Exited { session, clean });
@@ -557,6 +573,9 @@ impl Registry {
                     uuid: served.uuid.clone(),
                     kind: served.kind.to_string(),
                     title: served.title(status.as_ref()),
+                    cwd: status
+                        .as_ref()
+                        .and_then(|status| status.cwd.as_ref()?.to_str().map(String::from)),
                     exited: status.and_then(|status| status.exited),
                     cols: size.cols,
                     rows: size.rows,
@@ -610,7 +629,8 @@ impl Registry {
             let session = self.add(served);
             if shell
                 && let Some(served) = self.get(session)
-                && let Err(HostFrame::Error { message, .. }) = served.start(RESTORE_SIZE)
+                && let Err(HostFrame::Error { message, .. }) =
+                    served.start(RESTORE_SIZE, &self.data_dir)
             {
                 // Stays listed, and its first attach tries again.
                 eprintln!("term-host: could not restore a shell: {message}");
@@ -757,7 +777,7 @@ impl Served {
     /// Starts a restored session, in its saved folder or the home folder if that is gone. A
     /// Claude chat resumes only if it has a transcript, since one that never got a first
     /// message cannot be resumed and starts fresh with the same id. Blocks.
-    fn start(&self, size: Size) -> Result<(), HostFrame> {
+    fn start(&self, size: Size, data_dir: &Path) -> Result<(), HostFrame> {
         let _gate = lock(&self.starting);
         if self.running.get().is_some() {
             return Ok(());
@@ -780,6 +800,7 @@ impl Served {
             kind,
             cwd,
             uuid: self.id,
+            data_dir: data_dir.to_path_buf(),
         };
         let _ = self.running.set(start_program(spec, size)?);
         Ok(())
@@ -798,8 +819,12 @@ impl Served {
         if exited == Some(true) {
             return None;
         }
-        // Once it has exited its pid may belong to something else.
-        if exited.is_none()
+        // The shell hook's report first, since it holds even once the program has exited.
+        // Without one, ask the system, but only while running: once it has exited its pid
+        // may belong to something else.
+        if let Some(dir) = status.as_ref().and_then(|status| status.cwd.clone()) {
+            *lock(&self.cwd) = dir;
+        } else if exited.is_none()
             && let Some(pid) = running.and_then(|running| running.handle.pid())
             && let Some(dir) = state::current_dir(pid)
         {

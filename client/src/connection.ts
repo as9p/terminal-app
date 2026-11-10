@@ -1,6 +1,6 @@
 // One WebSocket to the host. It knows nothing about xterm or how many sessions are on screen.
 
-const PROTO = 1;
+const PROTO = 2;
 const HEADER_BYTES = 4;
 // Long enough for a busy host, short enough that a silent port does not look like a frozen app.
 const HELLO_TIMEOUT_MS = 5000;
@@ -14,6 +14,8 @@ export type SessionItem = {
   uuid: string;
   kind: string;
   title: string | null;
+  /** The folder the shell last reported. Null until it reports one, and for a program with no hook. */
+  cwd: string | null;
   exited: boolean | null;
   cols: number;
   rows: number;
@@ -56,6 +58,8 @@ export type ConnectionEvents = {
   onLost(): void;
   /** An `error` frame that answers no waiting request. */
   onError(code: string, message: string): void;
+  /** The shell of a session attached on this connection reported a new folder. */
+  onCwd?(session: number, cwd: string): void;
 };
 
 type HostFrame =
@@ -64,6 +68,7 @@ type HostFrame =
   | { type: "created"; session: number; uuid: string }
   | { type: "attached"; session: number; snapshot_bytes: number }
   | { type: "title"; session: number; title: string }
+  | { type: "cwd"; session: number; cwd: string }
   | { type: "exited"; session: number; clean: boolean }
   | { type: "detached"; session: number }
   | { type: "layout"; json: string | null }
@@ -326,6 +331,9 @@ export class Connection {
         break;
       case "title":
         this.listeners.get(frame.session)?.onTitle(frame.title);
+        break;
+      case "cwd":
+        this.events.onCwd?.(frame.session, frame.cwd);
         break;
       case "exited": {
         const listener = this.listeners.get(frame.session);

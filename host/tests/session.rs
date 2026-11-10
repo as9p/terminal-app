@@ -31,6 +31,8 @@ fn spec() -> SpawnSpec {
         kind: Kind::Shell,
         cwd: PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
         uuid: Uuid::nil(),
+        // No hook is installed here, so every shell starts as it did before the hook.
+        data_dir: PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no-hook"),
     }
 }
 
@@ -63,7 +65,12 @@ fn wait_for_exit(rx: &Receiver<ClientEvent>, limit: Duration) -> (bool, Option<i
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
-            Ok(ClientEvent::Snapshot(_) | ClientEvent::Output(_) | ClientEvent::Title(_)) => {}
+            Ok(
+                ClientEvent::Snapshot(_)
+                | ClientEvent::Output(_)
+                | ClientEvent::Title(_)
+                | ClientEvent::Cwd(_),
+            ) => {}
             Ok(ClientEvent::Exited { clean, signal }) => return (clean, signal),
             Err(err) => panic!("no exit event: {err}"),
         }

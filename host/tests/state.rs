@@ -226,11 +226,11 @@ async fn signed_in(host: &Host) -> Ws {
         .expect("upgrade to a WebSocket");
     say(
         &mut ws,
-        json!({"type": "hello", "token": host.token, "proto": 1}),
+        json!({"type": "hello", "token": host.token, "proto": 2}),
     )
     .await;
     let reply = hear(&mut ws, |frame| frame["type"] == "hello_ok").await;
-    assert_eq!(reply["proto"], 1, "{reply}");
+    assert_eq!(reply["proto"], 2, "{reply}");
     ws
 }
 

@@ -12,6 +12,7 @@ use portable_pty::{ChildKiller, MasterPty};
 use uuid::Uuid;
 
 use crate::env::{clean_env, host_env};
+use crate::osc::{self, OscEvent, Scanner};
 use crate::pty::{self, Exit, SharedWriter, Size};
 use crate::screen::Screen;
 
@@ -44,6 +45,8 @@ pub struct SpawnSpec {
     pub kind: Kind,
     pub cwd: PathBuf,
     pub uuid: Uuid,
+    /// Holds the shell hook. The program gets it as `TA_DATA` and the uuid as `TA_SESSION`.
+    pub data_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,6 +59,8 @@ pub enum ClientEvent {
     Output(Bytes),
     /// The window title changed. Also sent right after the snapshot when there is one.
     Title(String),
+    /// The shell hook reported a folder other than the last one.
+    Cwd(PathBuf),
     /// `clean` means a normal process exit, whatever the exit code, except that on Windows an
     /// error status code (a crash or Ctrl+C) is not clean.
     Exited {
@@ -70,6 +75,8 @@ pub type ClientTx = Sender<ClientEvent>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub title: Option<String>,
+    /// The folder the shell hook last reported, if it has.
+    pub cwd: Option<PathBuf>,
     /// None until the exit has been announced, then whether it was clean.
     pub exited: Option<bool>,
     pub size: Size,
@@ -103,6 +110,7 @@ impl Session {
         let (announced_tx, announced_rx) = bounded(0);
         let status = Arc::new(Mutex::new(Status {
             title: None,
+            cwd: None,
             exited: None,
             size,
         }));
@@ -125,6 +133,8 @@ impl Session {
             pid,
             size,
             screen: Screen::new(size, SCROLLBACK),
+            scanner: Scanner::new(),
+            cwd: None,
             clients: Vec::new(),
             kill_sent: false,
             kill_deadline: never(),
@@ -308,6 +318,8 @@ struct Actor {
     pid: Option<u32>,
     size: Size,
     screen: Screen,
+    scanner: Scanner,
+    cwd: Option<PathBuf>,
     clients: Vec<Client>,
     kill_sent: bool,
     kill_deadline: Receiver<Instant>,
@@ -411,12 +423,29 @@ impl Actor {
             sent.is_ok()
         });
         // After the clients so parsing never delays the bytes they see.
+        for event in self.scanner.feed(&chunk) {
+            self.report(event);
+        }
         self.screen.feed(&chunk);
         if let Some(title) = self.screen.take_new_title() {
             self.update_status(|status| status.title = Some(title.clone()));
             for client in &self.clients {
                 let _ = client.tx.try_send(ClientEvent::Title(title.clone()));
             }
+        }
+    }
+
+    /// A folder counts only if it is on this computer and exists, since a shell over SSH
+    /// reports the other computer's folders.
+    fn report(&mut self, event: OscEvent) {
+        let OscEvent::Cwd { host, path } = event;
+        if self.cwd.as_ref() == Some(&path) || !osc::is_this_host(&host) || !path.is_dir() {
+            return;
+        }
+        self.cwd = Some(path.clone());
+        self.update_status(|status| status.cwd = Some(path.clone()));
+        for client in &self.clients {
+            let _ = client.tx.try_send(ClientEvent::Cwd(path.clone()));
         }
     }
 
