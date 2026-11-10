@@ -107,7 +107,7 @@ Alex's PC crashes now and then, and Orca once closed on it while Alex was out, w
 | macOS Terminal | 18 |
 | Orca, visible tab | 9.7 |
 
-Test build memory was about 500 MB from a debug build with one tab. Orca used 2.2 to 2.6 GB with all of Alex's sessions open. The test build has no sidebar or host process, so the real app will lose some speed.
+Test build memory was about 500 MB from a debug build with one tab. Orca used 2.2 to 2.6 GB with all of Alex's sessions open. The test build has no sidebar or host process, so the real app will lose some speed. For the real app see the 2026-11-10 results below.
 
 Typing latency, 60 presses of a key in each terminal running `cat`, measured from key press to the first changed screen frame at 120 fps on Alex's Mac:
 
@@ -120,12 +120,12 @@ Typing latency, 60 presses of a key in each terminal running `cat`, measured fro
 
 Terminal, Orca and kitty are effectively tied: the median gap is 3.2 ms and one screen frame is about 8 ms. In this test xterm.js in Electron does not lose to native terminals on typing.
 
-The test build passes the latency target on its typing median, 2.4 ms behind kitty, so the native Mac client path is not triggered. Both were watched across the whole window, so kitty's 19.0 ms is the fair comparison, not its 17.4 ms spot-only rerun. Two weaker results remain:
+The test build passes the latency target on its typing median, 2.4 ms behind kitty, so the native Mac client path is not triggered. This held for the test build only; for the real app see the 2026-11-10 results below. Both were watched across the whole window, so kitty's 19.0 ms is the fair comparison, not its 17.4 ms spot-only rerun. Two weaker results remain:
 
 - Backspace median is 6.2 ms behind kitty, and the 95th percentile is 9.7 ms behind. Both gaps are about one screen frame or less.
 - 11 of 60 presses took over 30 ms, against 1 for kitty and Orca and 0 for Terminal. The cause isn't known.
 
-The test build is a debug build that sends every key through a Node server and a WebSocket, which the Rust host would replace. Measure the real app again as a release build.
+The test build is a debug build that sends every key through a Node server and a WebSocket, which the Rust host would replace. Measure the real app again as a release build. That was done on 2026-11-10; see the results below.
 
 Limits of this test:
 
@@ -136,6 +136,55 @@ Limits of this test:
 - Orca ran at its normal 1728x1084 with its sessions open, the test build ran at 1728x1084, and kitty and Terminal ran at about 1200x800.
 - ghostty-web has no typing number, because the tool's calibration fails on it. Calibration also fails on xterm.js, but its run doesn't need calibration because its screen doesn't change when idle.
 - Orca's window changes about 13 times per second on its own, so its test watched only the 18x36 pixel spot where the character appears. kitty and Terminal were watched across the whole window. Rerunning kitty with the spot-only method gave a median of 17.4 ms against 19.0 ms, so the method difference is small, and that kitty rerun is level with Orca's 17.8 ms.
+
+#### Real app through the host (2026-11-10)
+
+First measurements of the real app, going through the Rust host process. All on Alex's MacBook Pro, release build, with `tools/keylat` and `tools/speed`. kitty was measured in the same sitting each time, because kitty's own numbers moved between days. Raw files are under `tools/keylat/results/task-7`, `task-7b` and `task-7b-dom`.
+
+Three sittings:
+
+1. Before the output fix, with WebGL.
+2. After the fix, with WebGL.
+3. After the fix, with the xterm.js DOM renderer.
+
+Output speed, 30 MB burst, three runs each, in MB/s:
+
+| Sitting | Terminal | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|---|
+| 1, before the fix, WebGL | App | 28.0 | 35.8 | 36.8 |
+| 1, before the fix, WebGL | kitty | 75.9 | 78.1 | 81.6 |
+| 2, after the fix, WebGL | App | 78.1 | 71.5 | 77.6 |
+| 2, after the fix, WebGL | kitty | 79.5 | 81.8 | 84.8 |
+| 3, after the fix, DOM | App | 91.0 | 89.5 | 88.8 |
+| 3, after the fix, DOM | kitty | 81.9 | 79.2 | 73.3 |
+
+Typing, with the same method as the test-build table above:
+
+| Sitting | Terminal | Median | 95th percentile | Over 30 ms | Backspace median |
+|---|---|---|---|---|---|
+| 1, before the fix, WebGL | App | 20.8 ms | 31.9 ms | 11% | 20.8 ms |
+| 1, before the fix, WebGL | kitty | 12.8 ms | 20.8 ms | 2% | 12.4 ms |
+| 2, after the fix, WebGL | App | 23.7 ms | 36.8 ms | 24% | 24.3 ms |
+| 2, after the fix, WebGL | kitty | 14.3 ms | 23.0 ms | 2% | 14.4 ms |
+| 3, after the fix, DOM | App | 25.4 ms | 33.9 ms | 26% | 25.6 ms |
+| 3, after the fix, DOM | kitty | 14.2 ms | 22.3 ms | 2% | 14.1 ms |
+
+What it means:
+
+- The output target (at least 40 MB/s) is met after the fix. Before it, the app got 28 to 37 MB/s.
+- The cause of the first miss: macOS hands the host about 1,000 bytes per terminal read, and each read went out as its own WebSocket message. That was about 31,000 messages per burst, and the web view pays a cost per message.
+- The fix: when a read comes back full, the host keeps reading for up to 0.1 ms and sends up to 64 KiB as one message. A short read, such as a key echo, is sent at once. Messages per burst fell to about 1,000.
+- The typing target (median within 5 ms of kitty) is missed, by 8.0 ms, 9.4 ms and 11.2 ms in the three sittings.
+- The host is not the cause. A key's round trip through the host measures about 0.2 ms headless.
+- The renderer is not the cause. WebGL and DOM both miss.
+- The app's 20.8 ms in sitting 1 equals the earlier no-host test build (21.4 ms). kitty got faster between test days: 19.0 ms then, 12.8 to 14.3 ms now. That is why the earlier "2.4 ms behind kitty" no longer holds.
+- The gap is about one screen frame at 120 Hz (8.3 ms), and it sits in the Mac web view's own drawing pipeline. This is inferred from the shape of the numbers, not measured directly.
+- Per the rule below, a typing miss opens the question of replacing the terminal drawing on the Mac, or building a native Mac client. That decision is open and is Alex's. Sidebar work continues in the web client meanwhile, because the web client is also the Windows client. **(my call)**
+
+Known limits of these runs:
+
+- `keylat` resizes kitty to 1200x800 but leaves the app at its own size.
+- The app's share of slow presses (11% to 26%) is much higher than kitty's 2%. The cause isn't known yet.
 
 Speed targets for the real app **(my call)**: at least 40 MB/s with a visible tab through the host process, and typing and backspace medians within 5 ms of kitty on the same machine, measured on a release build. Missing the latency target triggers the native Mac client path. Also report the 95th percentile and the share of presses over 30 ms, since a good median can hide slow presses.
 

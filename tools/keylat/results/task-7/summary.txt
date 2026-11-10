@@ -1,0 +1,26 @@
+release build modified Nov 10 10:13:33 2026
+app typing: samples=180 median=20.8 p95=31.9 over_30ms=19 (11%)
+app backspace: samples=180 median=20.8 p95=31.8 over_30ms=18 (10%)
+  run 1 typing: samples=60 median=20.0 p95=31.9 over_30ms=5 (8%)
+  run 2 typing: samples=60 median=18.5 p95=31.7 over_30ms=7 (12%)
+  run 3 typing: samples=60 median=21.5 p95=33.6 over_30ms=7 (12%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+kitty typing: samples=180 median=12.8 p95=20.8 over_30ms=3 (2%)
+kitty backspace: samples=180 median=12.4 p95=20.0 over_30ms=1 (1%)
+  run 1 typing: samples=60 median=13.3 p95=20.7 over_30ms=1 (2%)
+  run 2 typing: samples=60 median=12.2 p95=20.8 over_30ms=1 (2%)
+  run 3 typing: samples=60 median=13.2 p95=17.6 over_30ms=1 (2%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+app 30 1.070 28.0
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.byipp028GV: Directory not empty
+app 30 0.839 35.8
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.2I9pfuZwtW: Directory not empty
+app 30 0.814 36.8
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.OjmmeJNX4D: Directory not empty
+kitty 30 0.395 75.9
+kitty 30 0.384 78.1
+kitty 30 0.368 81.6

@@ -1,0 +1,9 @@
+accessibility=true screen=true
+display max fps=120
+target terminal-app window 1147x800 id=19673
+changes while idle for 1 s=0
+key typed, frame display time: samples=60 min=8.7 median=21.8 p95=35.3 max=38.1 ms
+key typed, frame reached tool: samples=60 min=9.2 median=22.2 p95=35.9 max=38.6 ms
+backspace, frame display time: samples=60 min=7.5 median=20.3 p95=32.0 max=48.8 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished

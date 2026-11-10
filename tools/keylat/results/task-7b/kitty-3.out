@@ -1,0 +1,9 @@
+accessibility=true screen=true
+display max fps=120
+target kitty window 1200x800 id=20971
+changes while idle for 1 s=0
+key typed, frame display time: samples=60 min=6.6 median=13.1 p95=22.9 max=62.2 ms
+key typed, frame reached tool: samples=60 min=7.0 median=13.7 p95=23.6 max=62.7 ms
+backspace, frame display time: samples=60 min=5.6 median=12.8 p95=21.1 max=22.1 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished
