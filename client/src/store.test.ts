@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Group, Split, Tab, Tree } from "./connection";
-import { Store, leaves, nextCurrent, tabAt, withCollapsed } from "./store";
+import { Store, leaves, nextCurrent, roundToCells, tabAt, withCollapsed, withSizesAt } from "./store";
 
 function leaf(session: string): Split {
   return { type: "leaf", session };
@@ -143,5 +143,20 @@ describe("store", () => {
     const next = withCollapsed(t, "a", true);
     expect(next.groups.map((g) => g.collapsed)).toEqual([true, false]);
     expect(t.groups[0].collapsed).toBe(false);
+  });
+  it("resize_rounds_to_whole_cells", () => {
+    const cell = 8.4;
+    const sizes = roundToCells([100, 205], cell);
+    // 100 px is 11.9 cells, so the first pane takes 12 and the last keeps the rest.
+    expect(sizes[0]).toBeCloseTo(12 * cell);
+    expect(sizes[0] + sizes[1]).toBeCloseTo(305);
+    // A pane dragged to nothing still keeps one cell.
+    expect(roundToCells([1, 300], cell)[0]).toBeCloseTo(cell);
+    const split: Split = { type: "row", children: [leaf("a"), { type: "col", children: [leaf("b"), leaf("c")], sizes: [1, 1] }], sizes: [1, 1] };
+    expect(withSizesAt(split, [1], [3, 5])).toEqual({
+      type: "row",
+      children: [leaf("a"), { type: "col", children: [leaf("b"), leaf("c")], sizes: [3, 5] }],
+      sizes: [1, 1],
+    });
   });
 });

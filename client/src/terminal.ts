@@ -8,6 +8,7 @@ import { Terminal } from "@xterm/xterm";
 import type { Connection, SessionListener } from "./connection";
 import { followLeftOption } from "./option-key";
 import { fontFamily, fontSize, lineHeight, theme } from "./theme";
+import { ZOOM_DEFAULT, spacingFor } from "./zoom";
 
 const ACK_BYTES = 128 * 1024;
 const ACK_QUIET_MS = 100;
@@ -18,6 +19,27 @@ const FULL_RESET = "\x1bc";
 const STOPPED_LINE = "\r\n\x1b[2mThe program stopped unexpectedly.\x1b[0m\r\n";
 
 export type Renderer = "webgl" | "dom";
+
+// The natural cell width at 14 px in CSS pixels, from the stage 1 handoff (16.8 device pixels at
+// ratio 2), for when the font cannot be measured.
+const REFERENCE_CELL_CSS = 8.4;
+let measureCanvas: HTMLCanvasElement | undefined;
+
+/** The terminal font's natural cell width at 14 px in device pixels, before xterm rounds it. */
+function referenceCellWidth(): number {
+  try {
+    measureCanvas ??= document.createElement("canvas");
+    const context = measureCanvas.getContext("2d");
+    if (context) {
+      context.font = `${ZOOM_DEFAULT}px ${fontFamily}`;
+      const width = context.measureText("W").width;
+      if (width > 0) return width * devicePixelRatio;
+    }
+  } catch {
+    // Falls back to the measured value below.
+  }
+  return REFERENCE_CELL_CSS * devicePixelRatio;
+}
 
 export type TerminalViewEvents = {
   /** The selection changed to this non-empty text. */
@@ -65,8 +87,16 @@ export class TerminalView {
   private attachedAt = 0;
   private reattachTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** `renderer` is for speed runs: `dom` leaves out WebGL, so xterm draws with the DOM. */
-  constructor(parent: HTMLElement, events: TerminalViewEvents, renderer: Renderer = "webgl") {
+  /**
+   * `renderer` is for speed runs: `dom` leaves out WebGL, so xterm draws with the DOM. `fontPx`
+   * is the zoomed text size, so a new terminal opens at the saved size.
+   */
+  constructor(
+    parent: HTMLElement,
+    events: TerminalViewEvents,
+    renderer: Renderer = "webgl",
+    fontPx: number = fontSize,
+  ) {
     this.parent = parent;
     this.events = events;
     this.term = new Terminal({
@@ -75,9 +105,10 @@ export class TerminalView {
       cursorBlink: false,
       drawBoldTextInBrightColors: false,
       fontFamily,
-      fontSize,
-      // xterm rounds a glyph's width down and kitty rounds it up. One device pixel matches kitty.
-      letterSpacing: 1,
+      fontSize: fontPx,
+      // xterm rounds a glyph's width down and kitty rounds it up. The spacing makes up the
+      // difference at each size: one device pixel at 14 px.
+      letterSpacing: spacingFor(fontPx, referenceCellWidth()),
       lineHeight,
       scrollback: 20000,
       theme,
@@ -135,6 +166,30 @@ export class TerminalView {
 
   focus(): void {
     this.term.focus();
+  }
+
+  /** Text zoom. The fit that follows sends the new column and row count to the host. */
+  setFontSize(px: number): void {
+    if (this.term.options.fontSize === px) return;
+    this.term.options.letterSpacing = spacingFor(px, referenceCellWidth());
+    this.term.options.fontSize = px;
+    this.fitSoon();
+  }
+
+  /** Only used with the `dim` setting on: the pane drops to 58 percent (styles.css). */
+  setDimmed(on: boolean): void {
+    this.parent.classList.toggle("dim", on);
+  }
+
+  /** One cell in CSS pixels, read from the drawn screen. Only for a divider drag ending. */
+  cellSize(): { width: number; height: number } {
+    const screen = this.term.element?.querySelector<HTMLElement>(".xterm-screen");
+    const rect = screen?.getBoundingClientRect();
+    if (rect && rect.width > 0 && this.term.cols > 0 && this.term.rows > 0) {
+      return { width: rect.width / this.term.cols, height: rect.height / this.term.rows };
+    }
+    const px = this.term.options.fontSize ?? fontSize;
+    return { width: px * 0.6, height: px * lineHeight };
   }
 
   dispose(): void {

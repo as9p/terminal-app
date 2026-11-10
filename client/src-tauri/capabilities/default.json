@@ -1,11 +1,12 @@
 {
   "identifier": "default",
-  "description": "Moving the window by the empty parts of the sidebar, closing it when its session exits cleanly, and copy on select, which writes the clipboard and never reads it. host_connection is an app command and needs no entry here.",
+  "description": "Moving the window by the empty parts of the sidebar, closing it when its session exits cleanly, and copy on select, which writes the clipboard and never reads it, and hearing the menu's Close tab. host_connection is an app command and needs no entry here.",
   "windows": ["main"],
   "permissions": [
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "core:event:allow-listen"
   ]
 }

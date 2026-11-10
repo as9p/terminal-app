@@ -455,3 +455,190 @@ button.slot {
   font: 12px/1.4 var(--mono);
   pointer-events: none;
 }
+
+/* Rename field, Mac theme (docs/ui-review.md "Selection, hover, focus, rename"). The 3 px above
+   and below keep the row height; the -5 and +5 px keep the name's left edge in place. */
+
+.rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 22px;
+  margin: 3px 0 3px -5px;
+  padding: 0 5px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(205, 214, 244, 0.06);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  color: var(--text-strong);
+  caret-color: var(--cursor);
+  font: inherit;
+  user-select: text;
+}
+
+.ghead .rename {
+  margin-left: -1px;
+  font-weight: 600;
+}
+
+.rename::selection {
+  background: rgba(245, 224, 220, 0.82);
+  color: #1e1e2e;
+}
+
+/* Right-click menu, Mac theme. Outside the sidebar, so it carries its own sizes. */
+
+.row.menu-open::before {
+  background: var(--mac-hover);
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 20;
+  width: 200px;
+  box-sizing: border-box;
+  padding: 4px;
+  background: #24222f;
+  border: 1px solid var(--mac-hair);
+  border-radius: 6px;
+  font: normal 13px var(--sys);
+  color: var(--text-name);
+  cursor: default;
+  user-select: none;
+}
+
+.ctx-menu .item {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+.ctx-menu .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctx-menu .hint {
+  flex: none;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ctx-menu .item:not(.disabled):hover {
+  background: rgba(205, 214, 244, 0.16);
+  color: var(--text-strong);
+}
+
+.ctx-menu .item.disabled {
+  color: var(--text-dim);
+}
+
+/* Drag targets (docs/ui-review.md "Drag targets"). */
+
+.drag-src {
+  opacity: 0.35;
+}
+
+.ghost {
+  position: absolute;
+  z-index: 15;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: calc(100% - 16px);
+  height: var(--row-h);
+  padding: 0 12px 0 4px;
+  background: #24222f;
+  border: 1px solid var(--mac-hair);
+  border-radius: 6px;
+  opacity: 0.96;
+  pointer-events: none;
+  white-space: nowrap;
+  color: var(--text-name);
+}
+
+.ghost .slot {
+  flex: none;
+  width: var(--slot);
+}
+
+.ghost .gtext {
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.insert {
+  position: absolute;
+  z-index: 14;
+  top: 0;
+  left: var(--pad-l);
+  right: var(--pad-r);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.row.join-target::before {
+  background: rgba(137, 180, 250, 0.1);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.join-tag {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 11px;
+  line-height: var(--row-h);
+  color: var(--accent);
+}
+
+/* Split dividers: a 1 px line with a wider invisible grip. */
+
+.divider {
+  position: relative;
+  touch-action: none;
+}
+
+.divider::before {
+  content: "";
+  position: absolute;
+}
+
+.split-row > .divider::before {
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+  cursor: col-resize;
+}
+
+.split-col > .divider::before {
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+  cursor: row-resize;
+}
+
+/* The `dim` setting, off by default (R32): panes without typing drop to 58 percent. */
+
+.dim-panes .pane .xterm-screen {
+  transition: opacity 120ms ease-out;
+}
+
+.dim-panes .pane.dim .xterm-screen {
+  opacity: 0.58;
+}

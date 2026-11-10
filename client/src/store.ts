@@ -43,6 +43,30 @@ export function nextCurrent(tree: Tree, closed: string, before: Tree): string | 
   return allTabs(tree)[0]?.id ?? null;
 }
 
+/**
+ * Pane sizes in pixels along a split, after a divider drag, made whole numbers of `cell` so no
+ * pane ends in a sliver of a column or row. Each pane but the last is rounded and keeps at least
+ * one cell; the last takes what is left, so the total stays the same.
+ */
+export function roundToCells(px: number[], cell: number): number[] {
+  if (px.length === 0 || !(cell > 0)) return px.slice();
+  const total = px.reduce((sum, size) => sum + size, 0);
+  const sizes = px.slice(0, -1).map((size) => Math.max(1, Math.round(size / cell)) * cell);
+  const used = sizes.reduce((sum, size) => sum + size, 0);
+  return [...sizes, Math.max(cell, total - used)];
+}
+
+/** A copy of `split` with new sizes on the box at `path` (child indexes from the top). */
+export function withSizesAt(split: Split, path: number[], sizes: number[]): Split {
+  if (split.type === "leaf") return split;
+  if (path.length === 0) return { ...split, sizes: sizes.slice() };
+  const [index, ...rest] = path;
+  return {
+    ...split,
+    children: split.children.map((child, i) => (i === index ? withSizesAt(child, rest, sizes) : child)),
+  };
+}
+
 /** A copy of `tree` with one group opened or closed, for showing a click before the host answers. */
 export function withCollapsed(tree: Tree, key: string, collapsed: boolean): Tree {
   return {

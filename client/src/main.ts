@@ -3,6 +3,7 @@ import "./fonts.css";
 import "./styles.css";
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
@@ -15,12 +16,14 @@ import {
   type Tree,
 } from "./connection";
 import { installFocusRule, refocus } from "./focus";
+import { DEFAULT_KEYS, type Action, installKeys, runAction } from "./keys";
 import { Panes } from "./panes";
 import { loadSettings, saveSettings } from "./settings";
 import { Sidebar, clampWidth } from "./sidebar";
 import { Store, allTabs, leaves, withCollapsed } from "./store";
 import { type Renderer, TerminalView, terminalFontReady } from "./terminal";
 import { theme } from "./theme";
+import { applyZoom, clampSize, nextSize } from "./zoom";
 
 type HostConnection = HostAddress & { home: string };
 
@@ -168,6 +171,8 @@ async function main(): Promise<void> {
   ]);
 
   let connection: Connection | undefined;
+  let home = "";
+  let fontPx = clampSize(settings.fontSize);
   let bringingUp = false;
   // True once this connection's first tree is in, so an empty tree after that means the last
   // tab closed rather than a fresh host.
@@ -218,16 +223,24 @@ async function main(): Promise<void> {
         },
       },
       renderer,
+      fontPx,
     );
     void attachView(view, uuid);
     return view;
   }
 
-  const panes = new Panes(parent, makeView, () => sidebar.markFocused());
-
   function send(op: Op): void {
     connection?.treeOp(op);
   }
+
+  const panes = new Panes(
+    parent,
+    makeView,
+    () => sidebar.markFocused(),
+    (tab, split) => send({ type: "set_sizes", tab, split }),
+  );
+  panes.setFocusFollowsMouse(settings.focusFollowsMouse);
+  panes.setDim(settings.dim);
 
   const sidebar = new Sidebar(sidebarElement, store, {
     select: (tab) => {
@@ -245,6 +258,12 @@ async function main(): Promise<void> {
     },
     title: (session) => titles.get(session) ?? folders.get(session),
     focusedSession: () => panes.focusedSession(),
+    op: send,
+    hoverPane: settings.focusFollowsMouse
+      ? (tab, session) => {
+          if (store.current === tab) panes.focusSession(session);
+        }
+      : undefined,
     resized: (width) => {
       saveSettings({ sidebarWidth: width }).catch((error: unknown) =>
         bar.note(`Could not save the sidebar width: ${error}`),
@@ -259,9 +278,45 @@ async function main(): Promise<void> {
     panes.prune(sessionsIn(store.tree));
     if (store.current !== null) rememberTab(store.current);
     sidebar.render();
-    refocus();
+    // Someone moving through the rows with the keyboard, or typing a name, keeps their place.
+    if (!sidebarElement.contains(document.activeElement)) refocus();
   });
   installFocusRule(document.body, panes);
+
+  function save(patch: Parameters<typeof saveSettings>[0]): void {
+    saveSettings(patch).catch((error: unknown) => bar.note(`Could not save the settings: ${error}`));
+  }
+
+  const ui = {
+    toggleSidebar: () => {
+      if (!sidebarElement) return;
+      sidebarElement.hidden = !sidebarElement.hidden;
+      save({ sidebarShown: !sidebarElement.hidden });
+      refocus();
+    },
+    rename: () => {
+      if (!sidebarElement.hidden) sidebar.renameCurrent();
+    },
+    zoom: (step: 1 | -1 | 0) => {
+      const next = nextSize(fontPx, step);
+      if (next === fontPx) return;
+      fontPx = next;
+      applyZoom(panes, next);
+      save({ fontSize: next });
+    },
+    note: (text: string) => bar.note(text),
+  };
+
+  function act(action: Action): void {
+    if (connection) runAction(action, { store, panes, connection, home, ui });
+  }
+  installKeys(DEFAULT_KEYS, act);
+  // The menu bar's Close tab item (Cmd+Shift+W): the menu takes the key before the page does.
+  if (inTauri()) {
+    listen("close-tab", () => act("closeTab")).catch((error: unknown) =>
+      bar.note(`The Close tab menu item will not work: ${error}`),
+    );
+  }
 
   function onTree(tree: Tree): void {
     const hadTabs = allTabs(store.tree).length > 0;
@@ -288,6 +343,7 @@ async function main(): Promise<void> {
       try {
         const host = await findHost();
         port = host.port;
+        home = host.home;
         const next = new Connection({
           onLost: () => {
             bar.show(LOST_TEXT);

@@ -1,9 +1,10 @@
 // The sidebar: one scrolling list of ungrouped tabs, then each group's header and tabs. Every
 // size and color is in styles.css, taken from docs/ui-review.md.
 
-import type { Group, Tab } from "./connection";
+import type { Group, Op, Tab } from "./connection";
 import { refocus } from "./focus";
-import { type Row, type Store, leaves } from "./store";
+import { RENAME_END, startRename } from "./rename";
+import { type Row, type Store, findTab, leaves } from "./store";
 
 export const MIN_WIDTH = 168;
 export const DEFAULT_WIDTH = 240;
@@ -12,6 +13,8 @@ export const MAX_WIDTH = 480;
 export const TERMINAL_MIN_WIDTH = 320;
 
 const FLIP_MS = 180;
+// How far the pointer travels before a press on a row becomes a drag.
+const DRAG_START_PX = 4;
 
 // What the keyboard moves between: tab rows and the folder button of each group header.
 const ITEMS = ".row, .ghead > .slot";
@@ -49,6 +52,23 @@ export type RowStyle = "compact";
 
 type Flip = { tops: Map<string, number>; group: string; clones: HTMLElement[] };
 
+type DropTarget =
+  | { kind: "insert"; y: number; op: Op }
+  | { kind: "join"; row: HTMLElement; tab: string; into: string };
+
+type Drag = {
+  source: HTMLElement;
+  startX: number;
+  startY: number;
+  live: boolean;
+  ghost?: HTMLElement;
+  // Measured once when the drag starts, so moving the pointer reads no layout.
+  rects: { element: HTMLElement; top: number; bottom: number }[];
+  sidebarTop: number;
+  sidebarLeft: number;
+  target?: DropTarget;
+};
+
 export type SidebarEvents = {
   select(tab: string): void;
   collapse(group: string, collapsed: boolean): void;
@@ -59,6 +79,10 @@ export type SidebarEvents = {
   resized?(width: number): void;
   /** Which pane of the current tab has typing. */
   focusedSession?(): string | undefined;
+  /** Rename, pin, close, move and join, straight to the host. */
+  op?(op: Op): void;
+  /** The pointer came onto a pane row; set only while focus follows the pointer (R31). */
+  hoverPane?(tab: string, session: string): void;
 };
 
 export class Sidebar {
@@ -74,6 +98,13 @@ export class Sidebar {
   private savedWidth = DEFAULT_WIDTH;
   private shownWidth = 0;
   private fitFrame = 0;
+  private renaming = false;
+  private renderLater = false;
+  private menus: HTMLElement[] = [];
+  private menuRow: HTMLElement | undefined;
+  private drag: Drag | undefined;
+  private dragged = false;
+  private hovered: HTMLElement | undefined;
 
   constructor(element: HTMLElement, store: Store, events: SidebarEvents, rowStyle: RowStyle = "compact") {
     this.element = element;
@@ -95,6 +126,11 @@ export class Sidebar {
     // Keys reach these only while a row or header has focus, never on the terminal's key path.
     this.list.addEventListener("keydown", this.onKeyDown);
     this.list.addEventListener("focusin", this.onFocusIn);
+    this.list.addEventListener("dblclick", this.onDoubleClick);
+    this.list.addEventListener("contextmenu", this.onContextMenu);
+    this.list.addEventListener("pointerdown", this.onPointerDown);
+    this.list.addEventListener("mouseover", this.onMouseOver);
+    this.list.addEventListener(RENAME_END, this.onRenameEnd);
     grip.addEventListener("pointerdown", this.onGripDown);
     window.addEventListener("resize", this.onWindowResize);
     this.applyWidth();
@@ -102,11 +138,24 @@ export class Sidebar {
 
   /** Builds the list again, unless nothing it shows has changed. */
   render(): void {
+    // A rebuild would take the rename field away mid-word; it runs once the field closes.
+    if (this.renaming) {
+      this.renderLater = true;
+      return;
+    }
     const rows = this.store.rows();
     const shape = this.shapeOf(rows);
     if (shape === this.shape) return;
     this.shape = shape;
     this.endFlip();
+    this.closeMenu();
+    this.endDrag();
+    // Keyboard focus on a row or header stays on the same one in the new list.
+    const active = document.activeElement;
+    const kept =
+      active instanceof HTMLElement && active.matches(ITEMS) && this.list.contains(active)
+        ? `${active.closest<HTMLElement>("[data-key]")?.dataset.key} ${active.classList.contains("slot")}`
+        : undefined;
     const from = this.flipFrom;
     this.flipFrom = undefined;
 
@@ -144,6 +193,11 @@ export class Sidebar {
     fill.setAttribute("data-tauri-drag-region", "");
     this.list.replaceChildren(...sections, fill);
     this.rove(this.list.querySelector<HTMLElement>(".row.selected") ?? this.items()[0]);
+    if (kept !== undefined) {
+      this.items()
+        .find((item) => `${item.closest<HTMLElement>("[data-key]")?.dataset.key} ${item.classList.contains("slot")}` === kept)
+        ?.focus();
+    }
     this.markFocused();
     if (from) this.playFlip(from);
   }
@@ -157,6 +211,12 @@ export class Sidebar {
         name.closest(".row")?.setAttribute("aria-label", text);
       }
     }
+  }
+
+  /** Opens the rename field on the selected tab's row (Cmd+Shift+R). */
+  renameCurrent(): void {
+    const row = this.list.querySelector<HTMLElement>(".row.selected");
+    if (row) this.renameRow(row);
   }
 
   /** Marks the sidebar pane row of the pane that has typing. */
@@ -307,6 +367,11 @@ export class Sidebar {
   }
 
   private readonly onClick = (event: MouseEvent): void => {
+    // The click that ends a drag is not a click on the row.
+    if (this.dragged) {
+      this.dragged = false;
+      return;
+    }
     const target = event.target instanceof Element ? event.target : null;
     const fold = target?.closest<HTMLElement>(".ghead .slot");
     if (fold) {
@@ -320,6 +385,346 @@ export class Sidebar {
     }
     const row = target?.closest<HTMLElement>(".row");
     if (row?.dataset.tab) this.events.select(row.dataset.tab);
+  };
+
+  private renameRow(row: HTMLElement): void {
+    const tab = row.dataset.tab ? findTab(this.store.tree, row.dataset.tab) : undefined;
+    if (!tab || this.renaming) return;
+    this.renaming = true;
+    startRename(row, row.querySelector(".name")?.textContent ?? "", (name) => {
+      this.events.op?.({ type: "rename_tab", tab: tab.id, name });
+    });
+  }
+
+  private renameGroup(head: HTMLElement): void {
+    const group = this.store.tree.groups.find((g) => g.key === head.dataset.group);
+    if (!group || this.renaming) return;
+    this.renaming = true;
+    startRename(head, head.querySelector(".gname")?.textContent ?? "", (name) => {
+      this.events.op?.({ type: "rename_group", group: group.key, name });
+    });
+  }
+
+  private readonly onRenameEnd = (): void => {
+    this.renaming = false;
+    if (!this.renderLater) return;
+    this.renderLater = false;
+    this.render();
+  };
+
+  // A double click on a tab row or a group name renames it. Not on the folder button, which
+  // opens and closes the group.
+  private readonly onDoubleClick = (event: MouseEvent): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest(".slot, input")) return;
+    const row = target.closest<HTMLElement>(".row");
+    if (row) {
+      this.renameRow(row);
+      return;
+    }
+    const head = target.closest<HTMLElement>(".ghead");
+    if (head) this.renameGroup(head);
+  };
+
+  private readonly onMouseOver = (event: MouseEvent): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const pane = target?.closest<HTMLElement>(".pane-row") ?? undefined;
+    if (pane === this.hovered) return;
+    this.hovered = pane;
+    if (pane?.dataset.tab && pane.dataset.session) this.events.hoverPane?.(pane.dataset.tab, pane.dataset.session);
+  };
+
+  // Right-click menu on a tab row: four items (docs/ui-review.md "Right-click menu"). It sits
+  // outside the sidebar, whose paint containment would clip a 200 px menu.
+
+  private readonly onContextMenu = (event: MouseEvent): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>(".row");
+    const tab = row?.dataset.tab ? findTab(this.store.tree, row.dataset.tab) : undefined;
+    if (!row || !tab) return;
+    event.preventDefault();
+    this.openMenu(row, tab);
+  };
+
+  private openMenu(row: HTMLElement, tab: Tab): void {
+    this.closeMenu();
+    const groupOf = this.store.tree.groups.find((g) => g.tabs.some((t) => t.id === tab.id));
+    const targets: { label: string; group: string | null; size: number }[] = [];
+    if (groupOf) targets.push({ label: "No group", group: null, size: this.store.tree.ungrouped.length });
+    for (const g of this.store.tree.groups) {
+      if (g !== groupOf) targets.push({ label: g.name ?? folderName(g.path), group: g.key, size: g.tabs.length });
+    }
+    const menu = this.menu([
+      { label: "Rename", hint: "\u21E7\u2318R", run: () => this.renameRow(row) },
+      {
+        label: tab.pinned ? "Unpin" : "Pin",
+        hint: "",
+        run: () => this.events.op?.({ type: "pin_tab", tab: tab.id, pinned: !tab.pinned }),
+      },
+      { label: "Close", hint: "\u21E7\u2318W", run: () => this.events.op?.({ type: "close_tab", tab: tab.id }) },
+      {
+        label: "Move to group",
+        hint: "\u203A",
+        disabled: targets.length === 0,
+        open: (item) =>
+          this.menu(
+            targets.map((target) => ({
+              label: target.label,
+              hint: "",
+              run: () =>
+                this.events.op?.({ type: "move_tab", tab: tab.id, group: target.group, index: target.size }),
+            })),
+            item,
+          ),
+      },
+    ]);
+    const rect = row.getBoundingClientRect();
+    const side = this.element.getBoundingClientRect();
+    menu.style.left = `${side.left + Math.min(72, this.shownWidth - 60)}px`;
+    menu.style.top = `${Math.max(0, Math.min(rect.bottom - 2, window.innerHeight - menu.offsetHeight - 4))}px`;
+    row.classList.add("menu-open");
+    this.menuRow = row;
+    window.addEventListener("pointerdown", this.onMenuOutside, true);
+    window.addEventListener("keydown", this.onMenuKey, true);
+    window.addEventListener("blur", this.closeMenu);
+  }
+
+  /** A menu of `items`, in the page. A submenu opens beside `beside`, its item in the menu above. */
+  private menu(
+    items: {
+      label: string;
+      hint: string;
+      disabled?: boolean;
+      run?: () => void;
+      open?: (item: HTMLElement) => HTMLElement;
+    }[],
+    beside?: HTMLElement,
+  ): HTMLElement {
+    const menu = document.createElement("div");
+    menu.className = "ctx-menu";
+    menu.setAttribute("role", "menu");
+    // The menu above keeps only this one submenu.
+    const depth = beside ? this.menus.indexOf(beside.closest<HTMLElement>(".ctx-menu") as HTMLElement) + 1 : 0;
+    for (const extra of this.menus.splice(depth)) extra.remove();
+    for (const entry of items) {
+      const item = document.createElement("div");
+      item.className = entry.disabled ? "item disabled" : "item";
+      item.setAttribute("role", "menuitem");
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = entry.label;
+      const hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = entry.hint;
+      item.append(label, hint);
+      if (!entry.disabled) {
+        if (entry.open) {
+          const open = entry.open;
+          const show = () => {
+            if (!this.menus.some((m) => m.dataset.parent === entry.label)) open(item).dataset.parent = entry.label;
+          };
+          item.addEventListener("mouseenter", show);
+          item.addEventListener("click", show);
+        } else {
+          const run = entry.run;
+          item.addEventListener("mouseenter", () => {
+            for (const extra of this.menus.splice(depth + 1)) extra.remove();
+          });
+          item.addEventListener("click", () => {
+            this.closeMenu();
+            run?.();
+          });
+        }
+      }
+      menu.append(item);
+    }
+    document.body.append(menu);
+    this.menus.push(menu);
+    if (beside) {
+      const rect = beside.getBoundingClientRect();
+      menu.style.left = `${Math.min(rect.right + 2, window.innerWidth - menu.offsetWidth - 4)}px`;
+      menu.style.top = `${Math.max(0, Math.min(rect.top - 4, window.innerHeight - menu.offsetHeight - 4))}px`;
+    }
+    return menu;
+  }
+
+  private readonly closeMenu = (): void => {
+    if (this.menus.length === 0) return;
+    for (const menu of this.menus) menu.remove();
+    this.menus = [];
+    this.menuRow?.classList.remove("menu-open");
+    this.menuRow = undefined;
+    window.removeEventListener("pointerdown", this.onMenuOutside, true);
+    window.removeEventListener("keydown", this.onMenuKey, true);
+    window.removeEventListener("blur", this.closeMenu);
+  };
+
+  private readonly onMenuOutside = (event: PointerEvent): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target?.closest(".ctx-menu")) this.closeMenu();
+  };
+
+  // Only while a menu is open: Esc closes it and never reaches the terminal.
+  private readonly onMenuKey = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.closeMenu();
+  };
+
+  // Dragging rows (docs/ui-review.md "Drag targets"). A tab row moves within its own list or
+  // joins another tab as a split (right, or down with Shift); a group header moves between
+  // groups; a pane row dropped in a gap between rows becomes its own tab.
+
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0 || this.renaming) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest("input")) return;
+    const source = target.closest<HTMLElement>(".row, .ghead, .pane-row");
+    if (!source) return;
+    this.endDrag();
+    this.drag = {
+      source,
+      startX: event.clientX,
+      startY: event.clientY,
+      live: false,
+      rects: [],
+      sidebarTop: 0,
+      sidebarLeft: 0,
+    };
+    window.addEventListener("pointermove", this.onDragMove);
+    window.addEventListener("pointerup", this.onDragUp);
+    window.addEventListener("pointercancel", this.endDrag);
+  };
+
+  private readonly onDragMove = (event: PointerEvent): void => {
+    const drag = this.drag;
+    if (!drag) return;
+    if (!drag.live) {
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_START_PX) return;
+      this.beginDrag(drag);
+    }
+    if (drag.ghost) {
+      drag.ghost.style.transform = `translate(${event.clientX - drag.sidebarLeft + 8}px, ${event.clientY - drag.sidebarTop - drag.ghost.offsetHeight / 2}px)`;
+    }
+    this.showTarget(drag, this.targetAt(drag, event.clientY));
+  };
+
+  private beginDrag(drag: Drag): void {
+    drag.live = true;
+    this.closeMenu();
+    const side = this.element.getBoundingClientRect();
+    drag.sidebarTop = side.top;
+    drag.sidebarLeft = side.left;
+    drag.rects = [...this.list.querySelectorAll<HTMLElement>(".row, .ghead")].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { element, top: rect.top, bottom: rect.bottom };
+    });
+    drag.source.classList.add("drag-src");
+    const ghost = document.createElement("div");
+    ghost.className = "ghost";
+    const slot = document.createElement("span");
+    slot.className = "slot";
+    const name = document.createElement("span");
+    name.className = "gtext";
+    name.textContent =
+      drag.source.querySelector(".name, .gname, .pname")?.textContent ?? "";
+    ghost.append(slot, name);
+    this.element.append(ghost);
+    drag.ghost = ghost;
+  }
+
+  // What a drop at `y` would do. Rows are measured, so this reads no layout.
+  private targetAt(drag: Drag, y: number): DropTarget | undefined {
+    const hit = drag.rects.find((rect) => y >= rect.top && y < rect.bottom);
+    if (!hit || hit.element === drag.source) return undefined;
+    const { element } = hit;
+    const height = hit.bottom - hit.top;
+    const after = y >= hit.top + height / 2;
+    const gapY = after ? hit.bottom : hit.top;
+    const source = drag.source;
+
+    if (source.classList.contains("ghead")) {
+      if (!element.classList.contains("ghead")) return undefined;
+      const order = this.store.tree.groups.map((g) => g.key).filter((key) => key !== source.dataset.group);
+      const index = order.indexOf(element.dataset.group ?? "") + (after ? 1 : 0);
+      if (!source.dataset.group || index < 0) return undefined;
+      return { kind: "insert", y: gapY, op: { type: "move_group", group: source.dataset.group, index } };
+    }
+
+    if (source.classList.contains("pane-row")) {
+      // Its own tab's row is where it already is.
+      if (element.dataset.tab === source.dataset.tab || !source.dataset.session) return undefined;
+      return { kind: "insert", y: gapY, op: { type: "split_out", session: source.dataset.session } };
+    }
+
+    const tab = source.dataset.tab;
+    if (!tab || !element.classList.contains("row") || !element.dataset.tab) return undefined;
+    const middle = y >= hit.top + height / 4 && y < hit.bottom - height / 4;
+    if (middle) return { kind: "join", row: element, tab, into: element.dataset.tab };
+    // Reordering stays inside the row's own list: its group, or the ungrouped tabs.
+    const list = source.parentElement;
+    if (element.parentElement !== list || !list) return undefined;
+    const order = [...list.children].filter((child) => child.classList.contains("row") && child !== source);
+    const index = order.indexOf(element) + (after ? 1 : 0);
+    const group = list.classList.contains("group")
+      ? (list.querySelector<HTMLElement>(".ghead")?.dataset.group ?? null)
+      : null;
+    return { kind: "insert", y: gapY, op: { type: "move_tab", tab, group, index } };
+  }
+
+  private showTarget(drag: Drag, target: DropTarget | undefined): void {
+    const old = drag.target;
+    drag.target = target;
+    if (old?.kind === "join" && (target?.kind !== "join" || target.row !== old.row)) {
+      old.row.classList.remove("join-target");
+      old.row.querySelector(".join-tag")?.remove();
+    }
+    if (target?.kind === "join" && !target.row.classList.contains("join-target")) {
+      target.row.classList.add("join-target");
+      const tag = document.createElement("span");
+      tag.className = "join-tag";
+      tag.textContent = "join";
+      target.row.append(tag);
+    }
+    let line = this.element.querySelector<HTMLElement>(":scope > .insert");
+    if (target?.kind !== "insert") {
+      line?.remove();
+      return;
+    }
+    if (!line) {
+      line = document.createElement("div");
+      line.className = "insert";
+      this.element.append(line);
+    }
+    line.style.transform = `translateY(${target.y - drag.sidebarTop - 1}px)`;
+  }
+
+  private readonly onDragUp = (event: PointerEvent): void => {
+    const drag = this.drag;
+    const target = drag?.live ? drag.target : undefined;
+    this.dragged = drag?.live ?? false;
+    this.endDrag();
+    if (target?.kind === "join") {
+      this.events.op?.({ type: "join_tabs", tab: target.tab, into: target.into, dir: event.shiftKey ? "down" : "right" });
+    } else if (target) {
+      this.events.op?.(target.op);
+    }
+    // A click follows only when the press and release were on the same row; any other leaves
+    // the flag set, so it is cleared after this event.
+    if (this.dragged) setTimeout(() => (this.dragged = false), 0);
+  };
+
+  private readonly endDrag = (): void => {
+    const drag = this.drag;
+    if (!drag) return;
+    this.drag = undefined;
+    window.removeEventListener("pointermove", this.onDragMove);
+    window.removeEventListener("pointerup", this.onDragUp);
+    window.removeEventListener("pointercancel", this.endDrag);
+    drag.source.classList.remove("drag-src");
+    drag.ghost?.remove();
+    this.showTarget(drag, undefined);
   };
 
   private toggle(fold: HTMLElement): void {

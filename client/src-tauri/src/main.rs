@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod host;
+#[cfg(target_os = "macos")]
+mod menu;
 
 use std::path::PathBuf;
 
@@ -70,7 +72,7 @@ fn settings_set(app: tauri::AppHandle, patch: Map<String, Value>) -> Result<(), 
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         // Saves the window's size and place on exit and puts them back at the next start.
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -79,7 +81,11 @@ fn main() {
             renderer,
             settings_get,
             settings_set
-        ])
+        ]);
+    // Close tab moves to Cmd+Shift+W so Cmd+W can close a pane.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(menu::on_event);
+    builder
         .run(tauri::generate_context!())
         .expect("tauri failed to run");
 }

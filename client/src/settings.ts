@@ -7,6 +7,8 @@ export type Settings = {
   focusFollowsMouse: boolean;
   sidebarWidth: number;
   sidebarShown: boolean;
+  /** Dims panes that do not have typing to 58 percent (R32). Off by default. */
+  dim: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -14,6 +16,7 @@ export const DEFAULT_SETTINGS: Settings = {
   focusFollowsMouse: true,
   sidebarWidth: 240,
   sidebarShown: true,
+  dim: false,
 };
 
 const DEV_KEY = "settings";
@@ -32,6 +35,7 @@ function settle(raw: unknown): Settings {
     focusFollowsMouse: pick("focusFollowsMouse"),
     sidebarWidth: pick("sidebarWidth"),
     sidebarShown: pick("sidebarShown"),
+    dim: pick("dim"),
   };
 }
 
