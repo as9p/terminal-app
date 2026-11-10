@@ -229,6 +229,29 @@ describe("marker rig", () => {
     expect(idle.querySelector<HTMLElement>(".fspin")?.style.animationDelay).toBe("");
   });
 
+  it("window_focus_leaves_a_flake_morphing_into_work_to_its_settle", () => {
+    vi.useFakeTimers();
+    reduceMotion(false);
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const spin = (mk: HTMLElement) => mk.querySelector<HTMLElement>(".fspin");
+    const resting = createMarker("working");
+    const morphing = createMarker("idle");
+    document.body.append(resting, morphing);
+    setMarkerState(morphing, "working");
+    expect(spin(morphing)?.style.animationDelay).toBe("-1000ms");
+    now.mockReturnValue(10_100);
+    resyncTicks(document);
+    expect(spin(resting)?.style.animationDelay).toBe("-2100ms");
+    // Its turn on .fset was worked out against the tick it has; a restart now would jump.
+    expect(spin(morphing)?.style.animationDelay).toBe("-1000ms");
+    now.mockReturnValue(12_300);
+    vi.advanceTimersByTime(MORPH_RUN_MS);
+    expect(morphing.classList.contains("mo-run")).toBe(false);
+    expect(spin(morphing)?.style.animationDelay).toBe("-300ms");
+    expect(spin(morphing)?.style.animationName).toBe("");
+    expect(spin(resting)?.style.animationDelay).toBe("-2100ms");
+  });
+
   it("only_a_ticking_flake_gets_a_layer_of_its_own", () => {
     expect(css).not.toMatch(/\.mk\.a \.fspin \{[^}]*will-change: transform/);
     expect(css).toContain(".mk.a.s-working:not(.off) .fspin { will-change: transform; }");
@@ -303,6 +326,53 @@ describe("markers in the sidebar", () => {
     // No title at all: the line still shows, with the name the row shows.
     expect(element.querySelector('.row[data-tab="b"] .sub')?.textContent).toBe("Shell");
     expect(element.querySelector('.row[data-tab="b"]')?.classList.contains("has-sub")).toBe(true);
+  });
+
+  it("a_blank_title_falls_back_to_the_row_name_on_the_dim_line", () => {
+    const { element, store } = mount(tree([], [tab("a", "api"), tab("b", "web")]), { "s-a": "", "s-b": "   " });
+    store.setStates([
+      { session: "s-a", state: "blocked", since_ms: 1 },
+      { session: "s-b", state: "done", since_ms: 1 },
+    ]);
+    expect(element.querySelector('.row[data-tab="a"] .sub')?.textContent).toBe("api");
+    expect(element.querySelector('.row[data-tab="b"] .sub')?.textContent).toBe("web");
+  });
+
+  it("a_marker_back_in_view_rejoins_the_shared_tick", () => {
+    type Seen = (entries: { target: Element; isIntersecting: boolean }[]) => void;
+    let seen: Seen = () => {};
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: Seen) {
+          seen = callback;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const { element, store } = mount(tree([], [tab("a"), tab("b")]));
+    store.setStates([
+      { session: "s-a", state: "working", since_ms: 1 },
+      { session: "s-b", state: "working", since_ms: 1 },
+    ]);
+    const marks = [rowMarker(element, "a"), rowMarker(element, "b")].filter((mk) => mk !== null);
+    expect(marks).toHaveLength(2);
+    const delays = () => marks.map((mk) => mk.querySelector<HTMLElement>(".fspin")?.style.animationDelay);
+    const all = (isIntersecting: boolean) => seen(marks.map((target) => ({ target, isIntersecting })));
+    // First sight of a marker already ticking in view: its running tick is left alone.
+    now.mockReturnValue(1_700);
+    all(true);
+    expect(delays()).toEqual(["-1000ms", "-1000ms"]);
+    all(false);
+    expect(marks.every((mk) => mk.classList.contains("off"))).toBe(true);
+    // Back in view: one phase for the whole callback, from the shared clock.
+    now.mockReturnValueOnce(9_250).mockReturnValue(9_400);
+    all(true);
+    expect(marks.some((mk) => mk.classList.contains("off"))).toBe(false);
+    expect(delays()).toEqual(["-1250ms", "-1250ms"]);
   });
 
   it("a_removed_marker_is_no_longer_watched", () => {

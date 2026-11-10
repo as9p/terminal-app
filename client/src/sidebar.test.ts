@@ -255,6 +255,32 @@ describe("sidebar", () => {
     expect(hoverPane).toHaveBeenCalledTimes(1);
   });
 
+  it("leaving_the_list_lets_the_same_pane_row_take_focus_again", () => {
+    const split: Split = {
+      type: "row",
+      children: [{ type: "leaf", session: "p1" }, { type: "leaf", session: "p2" }],
+      sizes: [1, 1],
+    };
+    const hoverPane = vi.fn();
+    const { element, sidebar } = mount(tree([], [tab("t", null, split)]), { hoverPane });
+    const list = element.querySelector("#list");
+    const over = (session: string) =>
+      element.querySelector(`.pane-row[data-session="${session}"]`)?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    over("p1");
+    expect(hoverPane).toHaveBeenCalledTimes(1);
+    // Out to a terminal pane, which may take focus, and back to the same row.
+    list?.dispatchEvent(new MouseEvent("pointerleave"));
+    over("p1");
+    expect(hoverPane).toHaveBeenCalledTimes(2);
+    expect(hoverPane).toHaveBeenLastCalledWith("t", "p1");
+    // Still nothing while a rename is open.
+    sidebar.renameCurrent();
+    list?.dispatchEvent(new MouseEvent("pointerleave"));
+    over("p1");
+    expect(hoverPane).toHaveBeenCalledTimes(2);
+    element.querySelector("input.rename")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+
   describe("row drag", () => {
     function dragSetup() {
       const op = vi.fn();

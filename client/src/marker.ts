@@ -94,10 +94,12 @@ export function syncTick(mk: HTMLElement, now = performance.now()): number {
 /**
  * Puts every ticking flake under `root` back in step with the clock, after the window comes back
  * and the paused ticks resume from wherever they stopped. One style pass for all of them; the
- * tick restarts because its animation is taken off and put back with a new start.
+ * tick restarts because its animation is taken off and put back with a new start. A flake still
+ * morphing into work is left alone: its turn on .fset was worked out against the tick it has, so
+ * a restart would jump. Its settle puts it in step.
  */
 export function resyncTicks(root: ParentNode): void {
-  const spins = [...root.querySelectorAll<HTMLElement>(".mk.s-working .fspin")];
+  const spins = [...root.querySelectorAll<HTMLElement>(".mk.s-working:not(.mo-hold) .fspin")];
   if (spins.length === 0) return;
   const delay = `-${tickPhase(performance.now())}ms`;
   for (const spin of spins) spin.style.animationName = "none";
@@ -288,7 +290,8 @@ export function setMarkerStates(changes: readonly MarkerChange[]): void {
 
 // Hands every marker of a finished batch back to the plain marker, together: the bottom copy
 // hides and the turn left on .fset clears, with one reflow for the batch. A marker a later change
-// took over is left to that change.
+// took over is left to that change. A flake that now ticks restarts its tick in step with the
+// clock in the same reflow, since a window focus during the morph left it out of the resync.
 function settleBatch(batch: object, morphs: readonly Move[]): void {
   const live: Move[] = [];
   for (const move of morphs) {
@@ -298,14 +301,26 @@ function settleBatch(batch: object, morphs: readonly Move[]): void {
     else settle(move.mk);
   }
   if (live.length === 0) return;
-  for (const { mk, fset, ly0 } of live) {
+  const spins: HTMLElement[] = [];
+  for (const { mk, next, fset, ly0 } of live) {
     mk.classList.add("mo-snap");
     mk.classList.remove("mo-run", "mo-hold");
     ly0.style.removeProperty("color");
     fset.style.removeProperty("transform");
+    const spin = next === "working" ? mk.querySelector<HTMLElement>(".fspin") : null;
+    if (spin) {
+      spin.style.animationName = "none";
+      spins.push(spin);
+    }
   }
   void live[0].mk.getBoundingClientRect();
   for (const { mk } of live) mk.classList.remove("mo-snap");
+  if (spins.length === 0) return;
+  const delay = `-${tickPhase(performance.now())}ms`;
+  for (const spin of spins) {
+    spin.style.removeProperty("animation-name");
+    spin.style.animationDelay = delay;
+  }
 }
 
 /**

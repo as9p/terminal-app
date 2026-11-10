@@ -135,16 +135,21 @@ export class Sidebar {
     this.list.addEventListener("contextmenu", this.onContextMenu);
     this.list.addEventListener("pointerdown", this.onPointerDown);
     this.list.addEventListener("mouseover", this.onMouseOver);
+    this.list.addEventListener("pointerleave", this.onPointerLeave);
     this.list.addEventListener(RENAME_END, this.onRenameEnd);
     grip.addEventListener("pointerdown", this.onGripDown);
     window.addEventListener("resize", this.onWindowResize);
     if (typeof IntersectionObserver !== "undefined") {
       this.ticks = new IntersectionObserver(
         (entries) => {
+          // A marker back in view starts its tick again from 0, so it takes the clock's phase,
+          // one for the whole callback. One that never left keeps its running tick.
+          const now = performance.now();
           for (const entry of entries) {
             const mk = entry.target as HTMLElement;
+            const back = entry.isIntersecting && mk.classList.contains("off");
             mk.classList.toggle("off", !entry.isIntersecting);
-            if (entry.isIntersecting) syncTick(mk);
+            if (back) syncTick(mk, now);
           }
         },
         { root: this.list },
@@ -292,16 +297,15 @@ export class Sidebar {
 
   // A blocked or done row gets a dim second line with the title of the session in that state,
   // even when that is also the row's name (an unnamed tab), so every such row reads the same.
+  // A blank title counts as none, and the line shows the row's name.
   private applySub(row: HTMLElement, tab: Tab, state: AgentState | null): void {
     const body = row.querySelector<HTMLElement>(":scope > .body");
     if (!body) return;
     let text = "";
     if (state === "blocked" || state === "done") {
       const session = leaves(tab.split).find((s) => this.store.stateOf(s) === state);
-      text =
-        (session !== undefined ? this.events.title(session) : undefined) ??
-        body.querySelector(".name")?.textContent ??
-        "";
+      const title = session !== undefined ? this.events.title(session) : undefined;
+      text = (title?.trim() ? title : body.querySelector(".name")?.textContent) ?? "";
     }
     let sub = body.querySelector<HTMLElement>(":scope > .sub");
     if (text === "") {
@@ -555,6 +559,12 @@ export class Sidebar {
     if (pane === this.hovered) return;
     this.hovered = pane;
     if (pane?.dataset.tab && pane.dataset.session) this.events.hoverPane?.(pane.dataset.tab, pane.dataset.session);
+  };
+
+  // Out of the list the pointer may give focus to a terminal pane, so coming back to the same
+  // row has to count again. Only forgets the row; focus moves on the next mouseover.
+  private readonly onPointerLeave = (): void => {
+    this.hovered = undefined;
   };
 
   // Right-click menu on a tab row: four items (docs/ui-review.md "Right-click menu"). It sits
