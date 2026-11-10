@@ -643,14 +643,16 @@ impl Tree {
                 .leaves()
                 .into_iter()
                 .find_map(|session| closed.panes.iter().find(|pane| pane.uuid == session));
-            let Some(cwd) = first.map(|pane| pane.cwd.as_path()) else {
-                continue;
-            };
-            let root = cwd
-                .ancestors()
-                .find(|folder| folder.file_name().is_some_and(|found| found == name))
-                .unwrap_or(cwd);
-            closed.group = Some(project::folder_key(root));
+            // With no folder to go by, the tab reopens ungrouped rather than under a key that
+            // names no folder.
+            closed.group = first.map(|pane| {
+                let cwd = pane.cwd.as_path();
+                let root = cwd
+                    .ancestors()
+                    .find(|folder| folder.file_name().is_some_and(|found| found == name))
+                    .unwrap_or(cwd);
+                project::folder_key(root)
+            });
         }
         self.defaults.retain(|key, _| !is_name_key(key));
     }
@@ -694,15 +696,21 @@ impl Tree {
     /// Brings back a group for a reopened tab, from the folder its first pane was last in.
     /// When that folder resolves to another project (the shell had left for a folder that is
     /// no group), a folder group comes back at the folder its key names, and a remote one at
-    /// the folder itself. `found` is that folder's project, resolved by the caller; None or
-    /// another project's means the folder is used as is.
+    /// the folder itself. A folder key with no absolute path in it, saved when keys held only
+    /// the name, names no folder, so the folder itself is used under its own key. `found` is
+    /// that folder's project, resolved by the caller; None or another project's means the
+    /// folder is used as is.
     fn recreate_group(&mut self, key: &str, cwd: &Path, found: Option<Project>) -> usize {
         let project = if let Some(found) = found.filter(|found| found.key == key) {
             found
         } else {
-            let root = key.strip_prefix("folder:").map_or(cwd, Path::new);
+            let (key, root) = match key.strip_prefix("folder:").map(Path::new) {
+                Some(path) if path.is_absolute() => (key.to_string(), path),
+                Some(_) => (project::folder_key(cwd), cwd),
+                None => (key.to_string(), cwd),
+            };
             Project {
-                key: key.to_string(),
+                key,
                 root: root.to_path_buf(),
                 is_git: false,
                 branch: None,

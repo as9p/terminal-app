@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use term_host::project::Project;
-use term_host::state::SavedSession;
-use term_host::tree::{Dir, Effects, GroupDefaults, Op, Place, Split, Tab, Tree, TreeError};
+use term_host::state::{self, SavedSession, State};
+use term_host::tree::{
+    ClosedTab, Dir, Effects, GroupDefaults, Op, Place, Split, Tab, Tree, TreeError,
+};
 use uuid::Uuid;
 
 const CHAT: Uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
@@ -345,6 +347,66 @@ fn same_named_folders_are_separate_groups() {
     );
     let group = tree.groups.iter().find(|group| group.key == second);
     assert_eq!(group.expect("the second group").tabs[0].id, a);
+}
+
+/// A tree with one closed tab saved under the name-only key `folder:app` and no such group,
+/// as a file from before folder keys held the whole path can have. The tab's pane was in
+/// `app`, a plain folder.
+fn closed_under_old_key(app: &Path) -> Tree {
+    let mut tree = Tree::default();
+    let gone = shell(&mut tree, "a", app);
+    tree.close_tab(&gone, vec![saved("a", "shell", app, None)])
+        .expect("close");
+    assert!(tree.groups.is_empty());
+    tree.closed[0].group = Some("folder:app".to_string());
+    tree
+}
+
+#[test]
+fn reopen_under_an_old_key_with_no_group_uses_the_tabs_folder() {
+    let root = Root::new();
+    let app = root.0.join("work").join("app");
+    fs::create_dir_all(&app).expect("make app");
+
+    // Saved and loaded, so the key is upgraded on the way in.
+    let mut tree = closed_under_old_key(&app);
+    let state = State {
+        sessions: Vec::new(),
+        tree,
+    };
+    state::save(&root.0, &state).expect("save");
+    tree = state::load(&root.0).tree;
+    ok(&mut tree, Op::ReopenTab);
+    assert_eq!(tree.groups.len(), 1);
+    assert!(tree.groups[0].path.is_absolute());
+    assert_eq!(tree.groups[0].path, app);
+    assert_eq!(tree.groups[0].key, format!("folder:{}", app.display()));
+
+    // Never upgraded: a reopen still builds no group on a relative folder.
+    let mut tree = closed_under_old_key(&app);
+    ok(&mut tree, Op::ReopenTab);
+    assert_eq!(tree.groups.len(), 1);
+    assert_eq!(tree.groups[0].path, app);
+    assert_eq!(tree.groups[0].key, format!("folder:{}", app.display()));
+}
+
+#[test]
+fn old_key_on_a_closed_tab_with_no_folder_is_cleared() {
+    let mut tree = Tree::default();
+    tree.closed.push(ClosedTab {
+        tab: Tab {
+            id: "t1".to_string(),
+            name: None,
+            pinned: false,
+            split: leaf("a"),
+            last_used: 0,
+        },
+        group: Some("folder:app".to_string()),
+        index: 0,
+        panes: Vec::new(),
+    });
+    tree.upgrade_folder_keys();
+    assert_eq!(tree.closed[0].group, None);
 }
 
 #[test]
