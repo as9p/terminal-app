@@ -73,6 +73,8 @@ export class TerminalView {
   private readonly observer: ResizeObserver;
   private readonly subscriptions: { dispose(): void }[] = [];
   private readonly stopOption: () => void;
+  private readonly renderer: Renderer;
+  private webgl: WebglAddon | undefined;
 
   private connection: Connection | undefined;
   private session = 0;
@@ -99,6 +101,7 @@ export class TerminalView {
   ) {
     this.parent = parent;
     this.events = events;
+    this.renderer = renderer;
     this.term = new Terminal({
       allowProposedApi: true,
       cursorStyle: "bar",
@@ -176,6 +179,23 @@ export class TerminalView {
     this.fitSoon();
   }
 
+  /** Whether the view draws with WebGL now. */
+  webglOn(): boolean {
+    return this.webgl !== undefined;
+  }
+
+  /**
+   * Loads or drops the view's WebGL context. Panes keeps only a few live (WEBGL_CAP); without one
+   * xterm draws with the DOM. With the `dom` renderer there is never one.
+   */
+  setWebgl(on: boolean): void {
+    if (!on) {
+      this.dropWebgl();
+    } else if (!this.webgl && this.renderer === "webgl") {
+      this.loadWebgl();
+    }
+  }
+
   /** Only used with the `dim` setting on: the pane drops to 58 percent (styles.css). */
   setDimmed(on: boolean): void {
     this.parent.classList.toggle("dim", on);
@@ -200,6 +220,8 @@ export class TerminalView {
     this.observer.disconnect();
     this.stopOption();
     for (const subscription of this.subscriptions) subscription.dispose();
+    // Disposing the terminal disposes the addon too.
+    this.webgl = undefined;
     this.term.dispose();
     this.parent.replaceChildren();
   }
@@ -289,11 +311,24 @@ export class TerminalView {
   private loadWebgl(): void {
     try {
       const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
+      webgl.onContextLoss(() => {
+        if (this.webgl !== webgl) return;
+        this.dropWebgl();
+        // On screen it draws with WebGL again at once. A parked pane (display: none, so it has no
+        // boxes) gets one back when it is shown.
+        if (this.parent.getClientRects().length > 0) this.loadWebgl();
+      });
       this.term.loadAddon(webgl);
+      this.webgl = webgl;
     } catch {
       // No WebGL here. xterm's default renderer stays in place.
     }
+  }
+
+  private dropWebgl(): void {
+    const webgl = this.webgl;
+    this.webgl = undefined;
+    webgl?.dispose();
   }
 
   private readonly onKey = (event: KeyboardEvent): boolean => {

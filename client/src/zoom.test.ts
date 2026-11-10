@@ -33,7 +33,14 @@ describe("zoom", () => {
     document.body.append(root);
     const views = new Map<string, { setFontSize: ReturnType<typeof vi.fn> }>();
     const panes = new Panes(root, (_container, session) => {
-      const view = { setFontSize: vi.fn(), focus: vi.fn(), dispose: vi.fn(), setDimmed: vi.fn() };
+      const view = {
+        setFontSize: vi.fn(),
+        focus: vi.fn(),
+        dispose: vi.fn(),
+        setDimmed: vi.fn(),
+        webglOn: () => true,
+        setWebgl: vi.fn(),
+      };
       views.set(session, view);
       return view as unknown as TerminalView;
     });

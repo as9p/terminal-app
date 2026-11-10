@@ -1,5 +1,6 @@
 // The app's keys, from the final table in docs/ui-review.md. One window listener serves them all
-// and leaves every key without Cmd or Ctrl at once, so plain typing costs one check. No key puts
+// and leaves every key without Cmd or Ctrl at once, so plain typing costs one check, and Ctrl on a
+// key no binding uses costs a few more. No key puts
 // up a popup, toast or readout.
 
 import type { Connection, Dir, Place, Tab } from "./connection";
@@ -159,34 +160,59 @@ export function keyIds(spec: string): string[] {
   });
 }
 
-const tables = new WeakMap<Record<Action, string>, Map<string, Action>>();
+// A key table, and whether any binding uses Ctrl without Cmd on a key other than a digit. The
+// defaults have none (only Ctrl+1 to 9), so Ctrl+C, Ctrl+R or a held Ctrl+N leave at once.
+type Matcher = { table: Map<string, Action>; ctrlBeyondDigits: boolean };
 
-function tableFor(keys: Record<Action, string>): Map<string, Action> {
-  let table = tables.get(keys);
-  if (!table) {
-    table = new Map();
+const matchers = new WeakMap<Record<Action, string>, Matcher>();
+
+function matcherFor(keys: Record<Action, string>): Matcher {
+  let matcher = matchers.get(keys);
+  if (!matcher) {
+    matcher = { table: new Map(), ctrlBeyondDigits: false };
     for (const action of Object.keys(keys) as Action[]) {
-      for (const key of keyIds(keys[action])) table.set(key, action);
+      for (const key of keyIds(keys[action])) {
+        matcher.table.set(key, action);
+        const [mods, name] = key.split(" ");
+        if (mods.includes("T") && !mods.includes("C") && !/^[0-9]$/.test(name)) matcher.ctrlBeyondDigits = true;
+      }
     }
-    tables.set(keys, table);
+    matchers.set(keys, matcher);
   }
-  return table;
+  return matcher;
+}
+
+// A digit on the main row or the keypad, by position or by what it types. Nothing is made.
+function isDigitKey(e: KeyboardEvent): boolean {
+  const { key, code } = e;
+  return code.startsWith("Digit") || code.startsWith("Numpad") || (key.length === 1 && key >= "0" && key <= "9");
+}
+
+function lookup(e: KeyboardEvent, matcher: Matcher): Action | null {
+  const name = nameOf(e);
+  if (name === undefined) return null;
+  return matcher.table.get(id(e.metaKey, e.ctrlKey, e.altKey, e.shiftKey, name)) ?? null;
 }
 
 export function matchKey(e: KeyboardEvent, keys: Record<Action, string>): Action | null {
   // Plain typing leaves here: no lookup, nothing made.
   if (!e.metaKey && !e.ctrlKey) return null;
-  const name = nameOf(e);
-  if (name === undefined) return null;
-  return tableFor(keys).get(id(e.metaKey, e.ctrlKey, e.altKey, e.shiftKey, name)) ?? null;
+  const matcher = matcherFor(keys);
+  if (!e.metaKey && !matcher.ctrlBeyondDigits && !isDigitKey(e)) return null;
+  return lookup(e, matcher);
 }
 
 /** One capture listener on the window, ahead of the terminal. Returns the way to stop. */
 export function installKeys(keys: Record<Action, string>, run: (action: Action) => void): () => void {
+  // Once here, so a key never pays for finding its table.
+  const matcher = matcherFor(keys);
+  const { ctrlBeyondDigits } = matcher;
   const onKeyDown = (event: KeyboardEvent): void => {
     if (!event.metaKey && !event.ctrlKey) return;
+    // Ctrl on a key no binding uses leaves here too, so a held Ctrl+N costs no lookup.
+    if (!event.metaKey && !ctrlBeyondDigits && !isDigitKey(event)) return;
     if (event.isComposing) return;
-    const action = matchKey(event, keys);
+    const action = lookup(event, matcher);
     if (action === null) return;
     // The terminal never sees an app key, and the page does nothing of its own with it.
     event.preventDefault();

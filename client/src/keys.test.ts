@@ -334,6 +334,58 @@ describe("installKeys", () => {
     done();
   });
 
+  it("ctrl_letter_leaves_before_the_name_lookup_and_ctrl_digit_still_matches", () => {
+    const run = vi.fn();
+    const add = vi.spyOn(window, "addEventListener");
+    const stop = installKeys(DEFAULT_KEYS, run);
+    const onKeyDown = add.mock.calls.find(([type]) => type === "keydown")?.[1] as (event: KeyboardEvent) => void;
+    add.mockRestore();
+    const ctrlC = press("Ctrl+C");
+    const heldCtrlN = press("Ctrl+N", true);
+    const ctrlR = press("Ctrl+R");
+    // Counts the name lookup's regex, case fold and table get. Plain wrappers, as vi.spyOn on these
+    // prototypes calls them itself.
+    const { test } = RegExp.prototype;
+    const { toUpperCase } = String.prototype;
+    const { get } = WeakMap.prototype;
+    let calls = 0;
+    RegExp.prototype.test = function (this: RegExp, text: string) {
+      calls++;
+      return test.call(this, text);
+    };
+    String.prototype.toUpperCase = function (this: string) {
+      calls++;
+      return toUpperCase.call(this);
+    };
+    WeakMap.prototype.get = function (this: WeakMap<WeakKey, unknown>, key: WeakKey) {
+      calls++;
+      return get.call(this, key);
+    };
+    try {
+      onKeyDown(ctrlC);
+      onKeyDown(heldCtrlN);
+      onKeyDown(ctrlR);
+    } finally {
+      RegExp.prototype.test = test;
+      String.prototype.toUpperCase = toUpperCase;
+      WeakMap.prototype.get = get;
+    }
+    expect(calls).toBe(0);
+    expect(ctrlC.defaultPrevented).toBe(false);
+    onKeyDown(press("Ctrl+3"));
+    onKeyDown(new KeyboardEvent("keydown", { key: "3", code: "Numpad3", ctrlKey: true }));
+    expect(run.mock.calls.map(([action]) => action)).toEqual(["tab3", "tab3"]);
+    stop();
+  });
+
+  it("a_configured_ctrl_letter_binding_still_matches", () => {
+    const run = vi.fn();
+    const stop = installKeys({ ...DEFAULT_KEYS, rename: "Ctrl+R" }, run);
+    window.dispatchEvent(press("Ctrl+R"));
+    expect(run).toHaveBeenCalledWith("rename");
+    stop();
+  });
+
   it("repeat_is_filtered_only_for_actions_that_ignore_it", () => {
     const { run, seen, send, done } = setup();
     const held = send(press("Cmd+T", true));

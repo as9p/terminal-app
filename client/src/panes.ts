@@ -20,6 +20,34 @@ type Entry = { element: HTMLElement; view: TerminalView | undefined };
 type Box = { left: number; right: number; top: number; bottom: number };
 
 /**
+ * Live WebGL contexts across all views. Browsers keep about 16 and drop the oldest without a
+ * word, which would leave a tab on xterm's slow DOM renderer for good.
+ */
+export const WEBGL_CAP = 8;
+
+/**
+ * The views to drop WebGL from: parked ones holding a context, least recently shown first, until
+ * no more than `cap` hold one. `order` is least recently shown first. A visible view always keeps
+ * its context, so with more than `cap` visible the total stays above it.
+ */
+export function webglEvictions(
+  order: readonly string[],
+  live: ReadonlySet<string>,
+  visible: ReadonlySet<string>,
+  cap: number,
+): string[] {
+  const evict: string[] = [];
+  let count = live.size;
+  for (const session of order) {
+    if (count <= cap) break;
+    if (!live.has(session) || visible.has(session)) continue;
+    evict.push(session);
+    count--;
+  }
+  return evict;
+}
+
+/**
  * The pane to move to from `from` in `direction`: of those wholly on that side and level with it,
  * the nearest, and of equally near ones the one sharing the most edge.
  */
@@ -75,6 +103,11 @@ export class Panes {
   private splits = new Map<string, Split>();
   // One pane filling its tab (Cmd+Shift+Enter), client only.
   private filled: { tab: string; session: string } | undefined;
+  // Sessions by when their view was last on screen, least recent first, for WEBGL_CAP.
+  private shownOrder: string[] = [];
+  // A pane asked to take typing before its view was made, such as a new split's pane while the
+  // tree that shows it is on its way. The show that makes the view focuses it.
+  private pendingFocus: string | undefined;
   private followMouse = false;
   private dim = false;
   private stateOf: (session: string) => MarkerState | null = () => null;
@@ -98,9 +131,10 @@ export class Panes {
   show(tab: Tab | undefined): void {
     const before = this.tab;
     this.tab = tab;
-    if (before && tab && before.id === tab.id && before.split !== tab.split) {
-      this.keepFocusNear(tab.id, before.split, tab.split);
-    }
+    // A tab coming back from the background in the same tree that closed its focused pane goes by
+    // the split remembered at the last prune, as prune leaves the current tab to this.
+    const was = tab && (before?.id === tab.id ? before.split : this.splits.get(tab.id));
+    if (tab && was && was !== tab.split) this.keepFocusNear(tab.id, was, tab.split);
     if (this.filled && (!tab || tab.id !== this.filled.tab || !leaves(tab.split).includes(this.filled.session))) {
       this.filled = undefined;
     }
@@ -138,6 +172,13 @@ export class Panes {
       const entry = this.entries.get(session);
       if (entry) entry.view = this.make(entry.element, session);
     }
+    this.keepWebgl(shown);
+    const pending = this.pendingFocus;
+    if (tab && pending !== undefined && shown.has(pending)) {
+      this.pendingFocus = undefined;
+      this.focused.set(tab.id, pending);
+      this.entries.get(pending)?.view?.focus();
+    }
     this.updateDim();
   }
 
@@ -147,8 +188,11 @@ export class Panes {
     if (session !== undefined) this.entries.get(session)?.view?.focus();
   }
 
+  /** Focuses `session`'s pane, or, if its view is not made yet, the show that makes it does. */
   focusSession(session: string): void {
-    this.entries.get(session)?.view?.focus();
+    const view = this.entries.get(session)?.view;
+    this.pendingFocus = view ? undefined : session;
+    view?.focus();
   }
 
   /** The current tab's focused pane. */
@@ -265,17 +309,22 @@ export class Panes {
    * remembered pane changes: no real focus moves and nothing on screen is touched.
    */
   prune(alive: Set<string>, tabs?: Tab[]): void {
+    let ended = false;
     for (const [session, entry] of this.entries) {
       if (alive.has(session)) continue;
+      // Its WebGL context goes with it.
       entry.view?.dispose();
       entry.element.remove();
       this.entries.delete(session);
+      ended = true;
     }
+    if (ended) this.shownOrder = this.shownOrder.filter((session) => alive.has(session));
+    if (this.pendingFocus !== undefined && !alive.has(this.pendingFocus)) this.pendingFocus = undefined;
     if (tabs) {
       const splits = new Map<string, Split>();
       for (const tab of tabs) {
         const before = this.splits.get(tab.id);
-        // The tab on screen was handled by show().
+        // The tab on screen was handled by show(), with the split remembered here.
         if (before && before !== tab.split && tab.id !== this.tab?.id) this.keepFocusNear(tab.id, before, tab.split);
         splits.set(tab.id, tab.split);
       }
@@ -294,6 +343,24 @@ export class Panes {
     const near = neighborOf(before, was);
     if (near !== undefined && left.includes(near)) this.focused.set(tab, near);
     else this.focused.delete(tab);
+  }
+
+  // Only when the panes on screen change, never on a key or output. Every visible view gets a
+  // context, then past WEBGL_CAP the least recently shown parked ones give theirs up and draw
+  // with the DOM, out of sight, until shown again.
+  private keepWebgl(shown: Set<string>): void {
+    this.shownOrder = this.shownOrder.filter((session) => !shown.has(session));
+    for (const session of shown) {
+      this.shownOrder.push(session);
+      this.entries.get(session)?.view?.setWebgl(true);
+    }
+    const live = new Set<string>();
+    for (const [session, entry] of this.entries) {
+      if (entry.view?.webglOn()) live.add(session);
+    }
+    for (const session of webglEvictions(this.shownOrder, live, shown, WEBGL_CAP)) {
+      this.entries.get(session)?.view?.setWebgl(false);
+    }
   }
 
   // Never runs with the setting off, so the default costs nothing on a focus change.

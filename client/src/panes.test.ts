@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { Split, Tab } from "./connection";
-import { Panes } from "./panes";
+import type { Split, Tab, Tree } from "./connection";
+import { type ActionContext, runAction } from "./keys";
+import { Panes, WEBGL_CAP, webglEvictions } from "./panes";
 import { startRename } from "./rename";
+import { Store, allTabs, leaves } from "./store";
 import type { TerminalView } from "./terminal";
 
-type FakeView = { focus: ReturnType<typeof vi.fn>; setFontSize: ReturnType<typeof vi.fn> };
+// `webgl` stands in for the view's WebGL addon: true while it holds a live context.
+type FakeView = { focus: ReturnType<typeof vi.fn>; setFontSize: ReturnType<typeof vi.fn>; webgl: boolean };
 
 function leaf(session: string): Split {
   return { type: "leaf", session };
@@ -19,13 +22,29 @@ function tab(id: string, split: Split): Tab {
   return { id, name: null, pinned: false, split, last_used: 0 };
 }
 
-function mount() {
+/** With `realFocus`, a view taking focus fires focusin on its pane, as a real terminal does. */
+function mount(realFocus = false) {
   const root = document.createElement("div");
   document.body.append(root);
   const views = new Map<string, FakeView>();
   const boxes = new Map<string, HTMLElement>();
   const panes = new Panes(root, (container, session) => {
-    const view = { focus: vi.fn(), setFontSize: vi.fn(), dispose: vi.fn(), setDimmed: vi.fn() };
+    const view = {
+      focus: vi.fn(() => {
+        if (realFocus) container.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      }),
+      setFontSize: vi.fn(),
+      dispose: vi.fn(() => {
+        view.webgl = false;
+      }),
+      setDimmed: vi.fn(),
+      // A new view loads its context, as TerminalView does.
+      webgl: true,
+      webglOn: () => view.webgl,
+      setWebgl: (on: boolean) => {
+        view.webgl = on;
+      },
+    };
     views.set(session, view);
     boxes.set(session, container);
     return view as unknown as TerminalView;
@@ -119,4 +138,113 @@ describe("panes", () => {
     sideRow.remove();
     root.remove();
   });
+
+  it("closing_the_focused_pane_of_a_background_tab_as_it_becomes_current_focuses_its_neighbor", () => {
+    const { root, panes, focusIn } = mount();
+    const all = new Set(["a", "b", "c", "d"]);
+    panes.show(tab("t1", row("a", "b", "c")));
+    panes.prune(all, [tab("t1", row("a", "b", "c")), tab("t2", leaf("d"))]);
+    focusIn("c");
+    panes.show(tab("t2", leaf("d")));
+    panes.prune(all, [tab("t1", row("a", "b", "c")), tab("t2", leaf("d"))]);
+    // One tree: "c" closes and t1 becomes the current tab.
+    panes.show(tab("t1", row("a", "b")));
+    panes.prune(new Set(["a", "b", "d"]), [tab("t1", row("a", "b")), tab("t2", leaf("d"))]);
+    expect(panes.focusedSession()).toBe("b");
+    root.remove();
+  });
+});
+
+describe("webgl contexts", () => {
+  it("evicts_the_least_recently_shown_parked_views_past_the_cap", () => {
+    const all = new Set(["a", "b", "c", "d"]);
+    expect(webglEvictions(["a", "b", "c", "d"], all, new Set(["d"]), 2)).toEqual(["a", "b"]);
+    expect(webglEvictions(["a", "b", "c", "d"], all, new Set(["d"]), 4)).toEqual([]);
+    // A visible view keeps its context even past the cap.
+    expect(webglEvictions(["a", "b", "c"], new Set(["a", "b", "c"]), new Set(["a", "b", "c"]), 2)).toEqual([]);
+    expect(webglEvictions(["a", "b", "c"], new Set(["a", "b", "c"]), new Set(["a", "c"]), 1)).toEqual(["b"]);
+    // A view without a context has nothing to give up.
+    expect(webglEvictions(["a", "b", "c"], new Set(["b", "c"]), new Set(["c"]), 1)).toEqual(["b"]);
+  });
+
+  it("visible_panes_always_hold_a_context_and_the_total_stays_within_the_cap", () => {
+    const { root, panes, views } = mount();
+    const live = () => [...views.values()].filter((view) => view.webgl).length;
+    const check = (visible: string[]) => {
+      for (const session of visible) expect(views.get(session)?.webgl).toBe(true);
+      expect(live()).toBeLessThanOrEqual(Math.max(WEBGL_CAP, visible.length));
+    };
+    const count = WEBGL_CAP + 4;
+    for (let i = 0; i < count; i++) {
+      panes.show(tab(`t${i}`, leaf(`s${i}`)));
+      check([`s${i}`]);
+    }
+    expect(live()).toBe(WEBGL_CAP);
+    // The least recently shown went first, and one shown again gets its context back.
+    expect(views.get("s0")?.webgl).toBe(false);
+    expect(views.get(`s${count - WEBGL_CAP}`)?.webgl).toBe(true);
+    panes.show(tab("t0", leaf("s0")));
+    check(["s0"]);
+    expect(views.get(`s${count - WEBGL_CAP}`)?.webgl).toBe(false);
+    // More visible panes than the cap: each still gets one, and every parked view gives way.
+    const many = Array.from({ length: WEBGL_CAP + 2 }, (_, i) => `m${i}`);
+    panes.show(tab("big", row(...many)));
+    check(many);
+    expect(live()).toBe(many.length);
+    panes.show(tab("t1", leaf("s1")));
+    check(["s1"]);
+    expect(live()).toBe(WEBGL_CAP);
+    // Filling the tab parks the other panes, but they lose nothing until the cap is passed.
+    panes.show(tab("t2", row("s2", "s3")));
+    panes.toggleFill();
+    check(["s2"]);
+    expect(views.get("s3")?.webgl).toBe(true);
+    root.remove();
+  });
+});
+
+function tree(tabs: Tab[]): Tree {
+  return { groups: [], ungrouped: tabs, closed: [], defaults: {} };
+}
+
+describe("split from a filled pane", () => {
+  // main.ts shows the tree in one store listener; openShell follows the new pane in another.
+  for (const followFirst of [false, true]) {
+    it(`ends_with_the_new_pane_built_visible_and_focused_${followFirst ? "follow_first" : "panes_first"}`, async () => {
+      const { root, panes, views, boxes } = mount(true);
+      const store = new Store();
+      const watch = () => {
+        panes.show(store.currentTab());
+        panes.prune(new Set(allTabs(store.tree).flatMap((t) => leaves(t.split))), allTabs(store.tree));
+        panes.focusCurrent();
+      };
+      if (!followFirst) store.subscribe(watch);
+      store.setTree(tree([tab("a", row("s-a", "s-b"))]));
+      if (followFirst) watch();
+      panes.focusSession("s-a");
+      panes.toggleFill();
+      expect(root.querySelector(".split")).toBeNull();
+      const ctx: ActionContext = {
+        store,
+        panes,
+        connection: { treeOp: vi.fn(), list: vi.fn(async () => []), create: vi.fn(async () => 1), kill: vi.fn() },
+        home: "/home",
+        ui: { toggleSidebar: vi.fn(), rename: vi.fn(), zoom: vi.fn(), note: vi.fn() },
+      };
+      const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("0-0-0-0-new");
+      runAction("splitRight", ctx);
+      await vi.waitFor(() => expect(ctx.connection.create).toHaveBeenCalled());
+      if (followFirst) store.subscribe(watch);
+      store.setTree(tree([tab("a", row("s-a", "0-0-0-0-new", "s-b"))]));
+      const box = boxes.get("0-0-0-0-new");
+      expect(views.has("0-0-0-0-new")).toBe(true);
+      expect(box?.isConnected).toBe(true);
+      expect(box?.closest(".parked")).toBeNull();
+      expect(root.querySelectorAll(".split > .pane").length).toBe(3);
+      expect(views.get("0-0-0-0-new")?.focus).toHaveBeenCalled();
+      expect(panes.focusedSession()).toBe("0-0-0-0-new");
+      uuid.mockRestore();
+      root.remove();
+    });
+  }
 });

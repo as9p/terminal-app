@@ -156,6 +156,15 @@ function sessionsIn(tree: Tree): Set<string> {
   return new Set(allTabs(tree).flatMap((tab) => leaves(tab.split)));
 }
 
+/**
+ * Someone moving through the sidebar's rows with the keyboard, typing a name, or in a context menu
+ * opened from the keyboard (it lives in the body, not the sidebar) keeps their place.
+ */
+export function focusHeldAside(sidebar: HTMLElement): boolean {
+  const active = document.activeElement;
+  return sidebar.contains(active) || active?.closest('[role="menu"]') != null;
+}
+
 async function main(): Promise<void> {
   const statusElement = document.querySelector<HTMLElement>("#status");
   const parent = document.querySelector<HTMLElement>("#terminal");
@@ -281,8 +290,7 @@ async function main(): Promise<void> {
     if (store.current !== null) rememberTab(store.current);
     sidebar.render();
     sendSeen();
-    // Someone moving through the rows with the keyboard, or typing a name, keeps their place.
-    if (!sidebarElement.contains(document.activeElement)) refocus();
+    if (!focusHeldAside(sidebarElement)) refocus();
   });
   installFocusRule(document.body, panes);
   // States change only markers, in place: no row is built again and no terminal is touched.
