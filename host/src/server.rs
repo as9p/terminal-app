@@ -31,7 +31,7 @@ use crate::session::resolve_dir;
 use crate::state::{self, SavedSession, State};
 use crate::tree::{Op, Place, Tree, TreeError};
 use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec, Status};
-use crate::{auth, shellinit};
+use crate::{auth, project, shellinit};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -405,23 +405,20 @@ impl Connection {
             let Some(folder) = resolve_dir(&spec.cwd) else {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
             };
-            Ok((start_program(spec, size)?, folder))
+            let project = project::resolve(&folder);
+            Ok((start_program(spec, size)?, project))
         })
         .await;
-        let (running, folder) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
+        let (running, project) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
 
+        // The pane goes in before the session is listed. Its folders and exits reach the tree
+        // only through the registry, so none can arrive before there is a pane for them.
+        let shell = kind_name == "shell";
+        lock(&self.registry.tree).add_session_in(&uuid, place, &project, shell);
         let served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
         let _ = served.running.set(running);
         let session = self.registry.add(served);
-        let registry = Arc::clone(&self.registry);
-        let tab_for = uuid.clone();
-        let shell = kind_name == "shell";
-        // Off the runtime, since `project::resolve` looks at folders.
-        let _ = spawn_blocking(move || {
-            lock(&registry.tree).add_session(&tab_for, place, &folder, shell);
-            registry.push_tree();
-        })
-        .await;
+        self.registry.push_tree();
         Ok(Some(HostFrame::Created { session, uuid }))
     }
 
@@ -568,11 +565,11 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
 }
 
 /// Everything the host serves, shared by all connections. The locks only cover quick
-/// lookups, so they are safe to take on the async runtime, except `tree`, whose calls can
-/// look at folders and so are made off it.
+/// lookups, so they are safe to take on the async runtime.
 ///
 /// Lock order: `watchers` before `tree`, and only to copy the tree. `tree` is otherwise held
-/// alone: never while calling into a session, sending to a client or saving.
+/// alone, and only for work in memory: folders are resolved before it is taken, and it is
+/// never held while calling into a session, sending to a client or saving.
 struct Registry {
     last_session: AtomicU32,
     sessions: Mutex<HashMap<u32, Arc<Served>>>,
@@ -760,16 +757,15 @@ impl Registry {
     fn tree_op(self: &Arc<Self>, op: Op) -> Result<(), HostFrame> {
         let op = match op {
             Op::OpenFolder { path } => return self.open_folder(&path),
+            Op::CloseTab { tab } => return self.close_tab(&tab),
             op => op,
         };
-        let closing = match &op {
-            Op::CloseTab { tab } => Some(tab.clone()),
-            _ => None,
-        };
-        let effects = lock(&self.tree).apply(op).map_err(tree_error)?;
-        if let Some(tab) = closing {
-            self.keep_closed(&tab, &effects.kill);
-        }
+        // Resolved between two holds of the lock. If the closed list changes in between, the
+        // tree falls back to the folder as is rather than looking at the disk itself.
+        let folder = lock(&self.tree).folder_for(&op);
+        let project = folder.map(|folder| project::resolve(&folder));
+        // A reopened pane is in the tree before its session is listed, as in `create`.
+        let effects = lock(&self.tree).apply_in(op, project).map_err(tree_error)?;
         for uuid in &effects.kill {
             if let Some((session, _)) = self.find(uuid) {
                 let _ = self.kill(session);
@@ -782,22 +778,26 @@ impl Registry {
         Ok(())
     }
 
-    /// Puts what the closed tab's sessions need to come back into its entry, read before
-    /// they are killed. The tree only knows their uuids.
-    fn keep_closed(&self, tab: &str, sessions: &[String]) {
+    /// Reads what the tab's sessions need to come back, then closes it with that in one hold
+    /// of the lock, so no `reopen_tab` can find its entry empty. Then ends the sessions.
+    fn close_tab(self: &Arc<Self>, tab: &str) -> Result<(), HostFrame> {
+        let sessions = lock(&self.tree)
+            .tab_sessions(tab)
+            .ok_or_else(|| tree_error(TreeError::NoTab))?;
+        // Asks the sessions, so not under the tree lock. A pane split in meanwhile has no
+        // entry here and does not come back.
         let panes: Vec<SavedSession> = sessions
             .iter()
             .filter_map(|uuid| self.find(uuid)?.1.saved())
             .collect();
-        let mut tree = lock(&self.tree);
-        if let Some(closed) = tree
-            .closed
-            .iter_mut()
-            .rev()
-            .find(|closed| closed.tab.id == tab)
-        {
-            closed.panes = panes;
+        let effects = lock(&self.tree).close_tab(tab, panes).map_err(tree_error)?;
+        for uuid in &effects.kill {
+            if let Some((session, _)) = self.find(uuid) {
+                let _ = self.kill(session);
+            }
         }
+        self.push_tree();
+        Ok(())
     }
 
     /// Starts a shell in the folder, then makes its group and tab in one go, so no one sees
@@ -815,27 +815,28 @@ impl Registry {
             data_dir: self.data_dir.clone(),
             known_cwd: false,
         };
+        let project = project::resolve(&folder);
         // Its first attach gives it a real size.
         let running = start_program(spec, RESTORE_SIZE)?;
         let uuid = id.to_string();
-        let served = Served::new(uuid.clone(), id, "shell", None, folder.clone(), None);
-        let _ = served.running.set(running);
-        let session = self.add(served);
 
+        // The group and its pane go in before the session is listed, as in `create`.
         let opened = {
             let mut tree = lock(&self.tree);
-            let opened = tree.apply(Op::OpenFolder {
-                path: folder.clone(),
-            });
+            let path = folder.clone();
+            let opened = tree.apply_in(Op::OpenFolder { path }, Some(project.clone()));
             if opened.is_ok() {
-                tree.add_session(&uuid, Place::NewTab, &folder, true);
+                tree.add_session_in(&uuid, Place::NewTab, &project, true);
             }
             opened
         };
         if let Err(error) = opened {
-            let _ = self.kill(session);
+            running.handle.kill();
             return Err(tree_error(error));
         }
+        let served = Served::new(uuid, id, "shell", None, folder, None);
+        let _ = served.running.set(running);
+        self.add(served);
         self.push_tree();
         Ok(())
     }
@@ -853,7 +854,8 @@ impl Registry {
             }
             *seen = Some(cwd.to_path_buf());
         }
-        if lock(&self.tree).on_cwd(&served.uuid, cwd) {
+        let project = project::resolve(cwd);
+        if lock(&self.tree).on_cwd_in(&served.uuid, &project) {
             self.push_tree();
         }
     }

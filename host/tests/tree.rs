@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use term_host::project::Project;
 use term_host::state::SavedSession;
 use term_host::tree::{Dir, Effects, GroupDefaults, Op, Place, Split, Tab, Tree, TreeError};
 use uuid::Uuid;
@@ -406,7 +407,12 @@ fn close_tab_kills_every_pane() {
     assert_eq!(split_of(&mut tree, "c", "b", Dir::Down, &app), id);
     assert_eq!(tab(&tree, &id).split.leaves(), ["a", "b", "c"]);
 
-    let effects = ok(&mut tree, Op::CloseTab { tab: id.clone() });
+    // The panes go in with the close itself, so no reopen can find the entry without them.
+    let panes = vec![
+        saved("a", "shell", &app, None),
+        saved("c", "shell", &app, None),
+    ];
+    let effects = tree.close_tab(&id, panes.clone()).expect("close");
     assert_eq!(effects.kill, ["a", "b", "c"]);
     assert!(effects.spawn.is_empty());
     assert_eq!(layout(&tree)[0].1, [keep]);
@@ -415,6 +421,61 @@ fn close_tab_kills_every_pane() {
     assert_eq!(closed.tab.id, id);
     assert_eq!(closed.group.as_deref(), Some("remote:github.com/owner/app"));
     assert_eq!(closed.index, 1);
+    assert_eq!(closed.panes, panes);
+}
+
+#[test]
+fn close_with_nothing_to_bring_back_leaves_no_entry() {
+    let root = Root::new();
+    let plain = root.plain("plain");
+    let mut tree = Tree::default();
+    let kept = shell(&mut tree, "k", &plain);
+    let empty = shell(&mut tree, "e", &plain);
+    let other = shell(&mut tree, "o", &plain);
+    tree.close_tab(&kept, vec![saved("k", "shell", &plain, None)])
+        .expect("close");
+    // Neither a close with no panes nor one whose panes match no leaf can be reopened.
+    ok(&mut tree, Op::CloseTab { tab: empty });
+    tree.close_tab(&other, vec![saved("z", "shell", &plain, None)])
+        .expect("close");
+    assert_eq!(tree.closed.len(), 1);
+
+    let effects = ok(&mut tree, Op::ReopenTab);
+    assert_eq!(effects.spawn[0].uuid, "k");
+    assert_eq!(layout(&tree)[0].1, [kept]);
+}
+
+#[test]
+fn resolved_project_needs_no_disk() {
+    let mut tree = Tree::default();
+    let gone = Path::new("/no/such/folder");
+    let repo = Project {
+        key: "remote:example.com/owner/repo".to_string(),
+        root: gone.to_path_buf(),
+        is_git: true,
+        branch: Some("main".to_string()),
+    };
+    let plain = Project {
+        key: "folder:else".to_string(),
+        root: gone.join("else"),
+        is_git: false,
+        branch: None,
+    };
+    tree.add_session_in("a", Place::NewTab, &plain, true);
+    assert!(tree.groups.is_empty());
+    assert!(tree.on_cwd_in("a", &repo));
+    assert_eq!(tree.groups[0].key, repo.key);
+    assert_eq!(tree.groups[0].branch.as_deref(), Some("main"));
+    let effects = tree
+        .apply_in(
+            Op::OpenFolder {
+                path: gone.join("else"),
+            },
+            Some(plain.clone()),
+        )
+        .expect("open");
+    assert_eq!(effects.spawn[0].cwd, gone.join("else"));
+    assert_eq!(tree.groups.len(), 2);
 }
 
 #[test]
@@ -457,18 +518,13 @@ fn reopen_restores_place_and_resumes_claude() {
     );
 
     // The server fills in each closed tab's panes from its sessions, in the order of `kill`.
-    ok(
-        &mut tree,
-        Op::CloseTab {
-            tab: second.clone(),
-        },
-    );
-    tree.closed.last_mut().expect("closed").panes = vec![
+    let panes = vec![
         saved("c", "claude", &app, Some(CHAT)),
         saved("s", "shell", &app.join("src"), None),
     ];
-    ok(&mut tree, Op::CloseTab { tab: first.clone() });
-    tree.closed.last_mut().expect("closed").panes = vec![saved("x", "shell", &app, None)];
+    tree.close_tab(&second, panes).expect("close");
+    tree.close_tab(&first, vec![saved("x", "shell", &app, None)])
+        .expect("close");
     assert!(tree.groups.is_empty());
 
     let effects = ok(&mut tree, Op::ReopenTab);
@@ -509,8 +565,9 @@ fn closed_list_caps_at_20() {
     let ids: Vec<String> = (0..25)
         .map(|n| shell(&mut tree, &format!("s{n}"), &plain))
         .collect();
-    for id in &ids {
-        ok(&mut tree, Op::CloseTab { tab: id.clone() });
+    for (n, id) in ids.iter().enumerate() {
+        let pane = saved(&format!("s{n}"), "shell", &plain, None);
+        tree.close_tab(id, vec![pane]).expect("close");
     }
     assert_eq!(tree.closed.len(), 20);
     assert_eq!(tree.closed[0].tab.id, ids[5]);
@@ -583,8 +640,8 @@ fn tree_round_trips_json() {
         },
     );
     ok(&mut tree, Op::Used { tab: a });
-    ok(&mut tree, Op::CloseTab { tab: gone });
-    tree.closed[0].panes = vec![saved("c", "shell", &plain, None)];
+    tree.close_tab(&gone, vec![saved("c", "shell", &plain, None)])
+        .expect("close");
     tree.defaults.insert(
         "folder:old".to_string(),
         GroupDefaults {
@@ -750,4 +807,29 @@ fn ops_name_what_is_missing() {
         },
     );
     assert_eq!(tab(&tree, &id).split, sized);
+}
+
+#[test]
+fn set_sizes_rejects_single_child_node() {
+    let root = Root::new();
+    let plain = root.plain("plain");
+    let mut tree = Tree::default();
+    let id = shell(&mut tree, "a", &plain);
+    split_of(&mut tree, "b", "a", Dir::Right, &plain);
+    let before = tree.clone();
+    let lonely = tree.apply(Op::SetSizes {
+        tab: id,
+        split: Split::Row {
+            children: vec![
+                Split::Col {
+                    children: vec![leaf("a")],
+                    sizes: vec![1.0],
+                },
+                leaf("b"),
+            ],
+            sizes: vec![0.5, 0.5],
+        },
+    });
+    assert_eq!(lonely, Err(TreeError::BadOp));
+    assert_eq!(tree, before);
 }

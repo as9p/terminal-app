@@ -1,6 +1,8 @@
 //! The tree the sidebar shows: groups of tabs, each tab a split of panes, and the rules for
-//! where a tab lands and when it moves. Pure: the only outside call is `project::resolve`,
-//! there is no clock, and the caller carries out the kills and spawns `apply` asks for.
+//! where a tab lands and when it moves. Pure: the only outside call is `project::resolve`, made
+//! only by the convenience calls (`add_session`, `on_cwd`, `apply`). The `_in` forms take the
+//! project already resolved, so a caller can look at the disk before it takes a lock. There
+//! is no clock, and the caller carries out the kills and spawns `apply` asks for.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -217,6 +219,17 @@ impl Tree {
         session: &str,
         place: Place,
         cwd: &Path,
+        kind_is_shell: bool,
+    ) -> String {
+        self.add_session_in(session, place, &project::resolve(cwd), kind_is_shell)
+    }
+
+    /// `add_session` with the project of its folder already resolved.
+    pub fn add_session_in(
+        &mut self,
+        session: &str,
+        place: Place,
+        project: &Project,
         _kind_is_shell: bool,
     ) -> String {
         if let Some(spot) = self.find_session(session) {
@@ -230,10 +243,9 @@ impl Tree {
             tab.split.split_leaf(of, session, *dir);
             return tab.id.clone();
         }
-        let project = project::resolve(cwd);
-        let group = match self.group_for(&project) {
+        let group = match self.group_for(project) {
             Some(index) => Some(index),
-            None if project.is_git => Some(self.create_group(&project)),
+            None if project.is_git => Some(self.create_group(project)),
             None => self.last_used_group(),
         };
         let id = self.next_id();
@@ -252,11 +264,15 @@ impl Tree {
     /// repo. The group's branch is refreshed whenever one of its tabs reports a folder in it.
     /// True when the tree changed.
     pub fn on_cwd(&mut self, session: &str, cwd: &Path) -> bool {
+        self.on_cwd_in(session, &project::resolve(cwd))
+    }
+
+    /// `on_cwd` with the project of the reported folder already resolved.
+    pub fn on_cwd_in(&mut self, session: &str, project: &Project) -> bool {
         let Some(spot) = self.find_session(session) else {
             return false;
         };
-        let project = project::resolve(cwd);
-        let target = self.group_for(&project);
+        let target = self.group_for(project);
         let tab = self.tab(spot);
         let moves = !tab.pinned
             && tab.split.first() == session
@@ -269,7 +285,7 @@ impl Tree {
             let tab = self.tabs_mut(spot.group).remove(spot.index);
             let index = match target {
                 Some(index) => index,
-                None => self.create_group(&project),
+                None => self.create_group(project),
             };
             self.groups[index].tabs.push(tab);
             self.tidy();
@@ -277,15 +293,50 @@ impl Tree {
         }
         if project.is_git {
             let now = self.find_session(session).and_then(|spot| spot.group);
-            if let Some(index) = now.filter(|&index| self.group_for(&project) == Some(index)) {
+            if let Some(index) = now.filter(|&index| self.group_for(project) == Some(index)) {
                 let group = &mut self.groups[index];
                 if group.branch != project.branch {
-                    group.branch = project.branch;
+                    group.branch.clone_from(&project.branch);
                     changed = true;
                 }
             }
         }
         changed
+    }
+
+    /// Closes a tab and keeps it for `ReopenTab` with `panes`, what its sessions need to come
+    /// back, read by the caller beforehand. A tab none of whose leaves has a pane there is not
+    /// kept, so `ReopenTab` never takes an entry that brings nothing back.
+    pub fn close_tab(&mut self, tab: &str, panes: Vec<SavedSession>) -> Result<Effects, TreeError> {
+        let spot = self.find_tab(tab).ok_or(TreeError::NoTab)?;
+        let group = spot.group.map(|index| self.groups[index].key.clone());
+        let tab = self.tabs_mut(spot.group).remove(spot.index);
+        let kill = tab.split.leaves();
+        let panes: Vec<SavedSession> = panes
+            .into_iter()
+            .filter(|pane| kill.contains(&pane.uuid))
+            .collect();
+        if !panes.is_empty() {
+            self.closed.push(ClosedTab {
+                tab,
+                group,
+                index: spot.index,
+                panes,
+            });
+            let extra = self.closed.len().saturating_sub(KEEP_CLOSED);
+            self.closed.drain(..extra);
+        }
+        self.tidy();
+        Ok(Effects {
+            kill,
+            spawn: Vec::new(),
+        })
+    }
+
+    /// The session uuids in a tab, left to right, top to bottom.
+    pub fn tab_sessions(&self, tab: &str) -> Option<Vec<String>> {
+        let spot = self.find_tab(tab)?;
+        Some(self.tab(spot).split.leaves())
     }
 
     /// A session's program ended. A clean exit takes its pane out, and closes the tab when it
@@ -304,10 +355,35 @@ impl Tree {
     }
 
     pub fn apply(&mut self, op: Op) -> Result<Effects, TreeError> {
+        let project = self.folder_for(&op).map(|folder| project::resolve(&folder));
+        self.apply_in(op, project)
+    }
+
+    /// The folder whose project `apply_in` wants for this op: the folder to open, or where the
+    /// first pane of the tab `ReopenTab` brings back was. None for every other op.
+    pub fn folder_for(&self, op: &Op) -> Option<PathBuf> {
+        match op {
+            Op::OpenFolder { path } => Some(path.clone()),
+            Op::ReopenTab => {
+                let closed = self.closed.last()?;
+                let leaves = closed.tab.split.leaves();
+                leaves
+                    .iter()
+                    .find_map(|session| closed.panes.iter().find(|pane| &pane.uuid == session))
+                    .map(|pane| pane.cwd.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `apply` with the project of `folder_for(&op)` already resolved. Touches no disk. A
+    /// missing or stale project (the closed list changed since `folder_for`) falls back to a
+    /// group for the folder itself.
+    pub fn apply_in(&mut self, op: Op, project: Option<Project>) -> Result<Effects, TreeError> {
         let mut effects = Effects::default();
         match op {
             Op::OpenFolder { path } => {
-                let project = project::resolve(&path);
+                let project = project.unwrap_or_else(|| folder_only(&path));
                 if self.group_for(&project).is_none() {
                     self.create_group(&project);
                 }
@@ -319,21 +395,9 @@ impl Tree {
                     chat: None,
                 });
             }
-            Op::CloseTab { tab } => {
-                let spot = self.find_tab(&tab).ok_or(TreeError::NoTab)?;
-                let group = spot.group.map(|index| self.groups[index].key.clone());
-                let tab = self.tabs_mut(spot.group).remove(spot.index);
-                effects.kill = tab.split.leaves();
-                self.closed.push(ClosedTab {
-                    tab,
-                    group,
-                    index: spot.index,
-                    panes: Vec::new(),
-                });
-                let extra = self.closed.len().saturating_sub(KEEP_CLOSED);
-                self.closed.drain(..extra);
-                self.tidy();
-            }
+            // With no panes nothing can come back, so no entry is kept. The server closes
+            // through `close_tab` with the panes it read from its sessions.
+            Op::CloseTab { tab } => return self.close_tab(&tab, Vec::new()),
             Op::ReopenTab => {
                 let ClosedTab {
                     mut tab,
@@ -362,7 +426,8 @@ impl Tree {
                         Some(index) => index,
                         None => {
                             let cwd = effects.spawn.first().map(|saved| saved.cwd.clone());
-                            self.recreate_group(&key, cwd.as_deref().unwrap_or(Path::new("")))
+                            let cwd = cwd.as_deref().unwrap_or(Path::new(""));
+                            self.recreate_group(&key, cwd, project)
                         }
                     }),
                     None => None,
@@ -569,9 +634,10 @@ impl Tree {
     /// Brings back a group for a reopened tab, from the folder its first pane was last in.
     /// When that folder resolves to another project (the shell had left for a folder that is
     /// no group), a parent folder with the group's name is used, else the folder itself.
-    fn recreate_group(&mut self, key: &str, cwd: &Path) -> usize {
-        let found = project::resolve(cwd);
-        let project = if found.key == key {
+    /// `found` is that folder's project, resolved by the caller; None or another project's
+    /// means the folder is used as is.
+    fn recreate_group(&mut self, key: &str, cwd: &Path, found: Option<Project>) -> usize {
+        let project = if let Some(found) = found.filter(|found| found.key == key) {
             found
         } else {
             let root = cwd
@@ -754,17 +820,28 @@ impl Split {
         }
     }
 
-    /// Every node has children, one positive share per child.
+    /// Every node has at least two children, one positive share per child. A node may hold
+    /// one running the same way, since `retain` can leave one when it lifts a lone child.
     fn is_valid(&self) -> bool {
         match self {
             Split::Leaf { .. } => true,
             Split::Row { children, sizes } | Split::Col { children, sizes } => {
-                !children.is_empty()
+                children.len() >= 2
                     && children.len() == sizes.len()
                     && sizes.iter().all(|size| size.is_finite() && *size > 0.0)
                     && children.iter().all(Split::is_valid)
             }
         }
+    }
+}
+
+/// A group for the folder itself, for when no resolved project was handed in.
+fn folder_only(folder: &Path) -> Project {
+    Project {
+        key: project::folder_key(folder),
+        root: folder.to_path_buf(),
+        is_git: false,
+        branch: None,
     }
 }
 

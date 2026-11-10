@@ -1,6 +1,7 @@
 //! Finds the project a folder belongs to: its git root, branch and remote, read straight from
 //! the files under `.git`. Never runs the git program, so it costs no process per prompt.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,10 +24,11 @@ pub fn resolve(folder: &Path) -> Project {
 
 /// `resolve` with the home folder given, so tests need not change the real one.
 fn resolve_under(folder: &Path, home: Option<&Path>) -> Project {
+    let home = home.map(plain);
     for dir in folder.ancestors() {
         // Home is only looked at when it is the folder asked about, so a dotfiles repo there
         // does not swallow every folder under it.
-        if Some(dir) == home && dir != folder {
+        if home.is_some() && home == Some(plain(dir)) && dir != folder {
             break;
         }
         let dot_git = dir.join(".git");
@@ -46,6 +48,20 @@ fn resolve_under(folder: &Path, home: Option<&Path>) -> Project {
         root: folder.to_path_buf(),
         is_git: false,
         branch: None,
+    }
+}
+
+/// The folder as text without the `\\?\` that `canonicalize` puts in front of a Windows path,
+/// so a resolved folder and the home folder compare in the same form. A Unix folder never
+/// starts that way.
+fn plain(path: &Path) -> Cow<'_, str> {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => Cow::Owned(rest.to_string()),
+        None => text,
     }
 }
 
@@ -282,6 +298,23 @@ mod tests {
 
         // Home itself is still a repo when that is the folder asked about.
         assert!(resolve_under(&home, Some(&home)).is_git);
+    }
+
+    /// `canonicalize` puts `\\?\` in front of a Windows folder, and the home folder has none.
+    #[test]
+    fn home_matches_without_verbatim_prefix() {
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\Users\x")),
+            plain(Path::new(r"C:\Users\x"))
+        );
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\server\share\x")),
+            plain(Path::new(r"\\server\share\x"))
+        );
+        assert_ne!(
+            plain(Path::new(r"\\?\C:\Users\x")),
+            plain(Path::new(r"C:\Users\y"))
+        );
     }
 
     #[test]
