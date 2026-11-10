@@ -389,7 +389,8 @@ export class Sidebar {
   }
 
   private autoName(session: string, folder: string | undefined): string {
-    return this.events.title(session) ?? folder ?? "Shell";
+    // An empty title or folder counts as missing, so a row never shows a blank name.
+    return this.events.title(session)?.trim() || folder?.trim() || "Shell";
   }
 
   private header(group: Group): HTMLElement {
