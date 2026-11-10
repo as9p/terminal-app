@@ -529,6 +529,7 @@ async fn tree_get_answers_an_empty_tree() {
         hear(&mut ws).await,
         json!({"type": "tree", "tree": {"groups": [], "ungrouped": [], "closed": [], "defaults": {}}})
     );
+    assert_eq!(hear(&mut ws).await, json!({"type": "states", "items": []}));
 }
 
 #[tokio::test]
@@ -1198,10 +1199,14 @@ mod sessions {
 
     const OTHER_UUID: &str = "8e2c0a4f-3b5d-4f9a-8b7c-1d2e3f4a5b6c";
 
-    /// Asks for the tree and returns it. Pushed trees on the way are skipped.
+    /// Asks for the tree and returns it. Pushed trees on the way are skipped, and the states
+    /// that follow the tree are read.
     async fn tree(ws: &mut Ws) -> Value {
         say(ws, json!({"type": "tree_get"})).await;
-        pushed_tree(ws, |_| true).await
+        let tree = pushed_tree(ws, |_| true).await;
+        let states = hear_text(ws).await;
+        assert_eq!(states["type"], "states", "{states}");
+        tree
     }
 
     /// The next tree frame that passes `check`.

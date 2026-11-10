@@ -310,3 +310,182 @@ async fn hook_request_reaches_serve() {
     let expected: Value = serde_json::from_slice(&stop_json(10)).unwrap();
     assert_eq!(got.payload, expected);
 }
+
+/// The real host binary with a data folder of its own, killed on drop.
+#[cfg(unix)]
+struct LiveHost {
+    child: std::process::Child,
+    port: u16,
+    token: String,
+}
+
+#[cfg(unix)]
+impl Drop for LiveHost {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+impl LiveHost {
+    fn start(data: &Path) -> LiveHost {
+        term_host::prepare_for_fork();
+        let port = 41_000 + (std::process::id() % 4_000) as u16;
+        let child = Command::new(env!("CARGO_BIN_EXE_term-host"))
+            .env("TERM_APP_DATA", data)
+            .env("TERM_HOST_PORT", port.to_string())
+            .env("SHELL", "/bin/sh")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start the host");
+        let mut host = LiveHost {
+            child,
+            port,
+            token: String::new(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let listening = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+            if let Ok(token) = fs::read_to_string(data.join("host-token"))
+                && listening
+                && token.len() == 64
+            {
+                host.token = token;
+                return host;
+            }
+            assert!(Instant::now() < deadline, "host was not ready in time");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(unix)]
+type Ws = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+#[cfg(unix)]
+async fn say(ws: &mut Ws, frame: Value) {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    ws.send(Message::text(frame.to_string()))
+        .await
+        .expect("send a frame");
+}
+
+/// The first text frame that `wanted` accepts, skipping output and other frames.
+#[cfg(unix)]
+async fn hear(ws: &mut Ws, wanted: impl Fn(&Value) -> bool) -> Value {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .expect("no matching frame arrived in time")
+            .expect("the connection ended")
+            .expect("read a frame");
+        if let Message::Text(text) = frame {
+            let frame: Value = serde_json::from_str(text.as_str()).expect("parse a host frame");
+            assert_ne!(frame["type"], "error", "{frame}");
+            if wanted(&frame) {
+                return frame;
+            }
+        }
+    }
+}
+
+/// The state the frame gives `uuid`, or None if it lists no state for it.
+#[cfg(unix)]
+fn state_of(frame: &Value, uuid: &str) -> Option<String> {
+    frame["items"]
+        .as_array()?
+        .iter()
+        .find(|item| item["session"] == uuid)?["state"]
+        .as_str()
+        .map(String::from)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_reaches_host() {
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    const UUID: &str = "44444444-4444-4444-8444-444444444444";
+    let root = Root::new();
+    let data = root.0.join("data");
+    let host = LiveHost::start(&data);
+    let request = format!("ws://127.0.0.1:{}/", host.port)
+        .into_client_request()
+        .expect("build the request");
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", host.port))
+        .await
+        .expect("connect to the host");
+    let (mut ws, _) = tokio_tungstenite::client_async(request, stream)
+        .await
+        .expect("upgrade to a WebSocket");
+    say(
+        &mut ws,
+        serde_json::json!({"type": "hello", "token": host.token, "proto": 3}),
+    )
+    .await;
+    hear(&mut ws, |frame| frame["type"] == "hello_ok").await;
+    say(&mut ws, serde_json::json!({"type": "tree_get"})).await;
+    let first = hear(&mut ws, |frame| frame["type"] == "states").await;
+    assert_eq!(state_of(&first, UUID), None, "{first}");
+
+    let cwd = root.0.to_str().expect("a UTF-8 folder");
+    say(
+        &mut ws,
+        serde_json::json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": cwd, "cols": 80, "rows": 24}),
+    )
+    .await;
+    let created = hear(&mut ws, |frame| frame["type"] == "created").await;
+    let session = created["session"].as_u64().expect("a session number") as u32;
+    say(
+        &mut ws,
+        serde_json::json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+    )
+    .await;
+    hear(&mut ws, |frame| frame["type"] == "attached").await;
+
+    // The shell has TA_SESSION, TA_TOKEN and TA_DATA, as a Claude it started would.
+    let exe = env!("CARGO_BIN_EXE_term-host").replace('\'', r"'\''");
+    let typed =
+        format!("echo '{{}}' | '{exe}' hook UserPromptSubmit; echo '{{}}' | '{exe}' hook Stop\n");
+    {
+        use futures_util::SinkExt;
+        ws.send(Message::binary(term_host::protocol::encode_binary(
+            session,
+            typed.as_bytes(),
+        )))
+        .await
+        .expect("type the hook calls");
+    }
+    let working = hear(&mut ws, |frame| {
+        frame["type"] == "states" && state_of(frame, UUID).is_some()
+    })
+    .await;
+    assert_eq!(
+        state_of(&working, UUID).as_deref(),
+        Some("working"),
+        "{working}"
+    );
+    let done = hear(&mut ws, |frame| {
+        frame["type"] == "states" && state_of(frame, UUID).as_deref() == Some("done")
+    })
+    .await;
+    assert!(done["items"][0]["since_ms"].as_u64().is_some(), "{done}");
+
+    say(
+        &mut ws,
+        serde_json::json!({"type": "seen", "session": UUID}),
+    )
+    .await;
+    hear(&mut ws, |frame| {
+        frame["type"] == "states" && state_of(frame, UUID).as_deref() == Some("idle")
+    })
+    .await;
+}

@@ -303,3 +303,141 @@ fn powershell_reports_folder_at_prompt() {
     shell.type_line(&format!("cd '{}'", other.display()));
     shell.until_cwd(&other);
 }
+
+/// Prints each argument in brackets between `got:` and `:end`, which a typed line never holds.
+#[cfg(unix)]
+const FAKE_CLAUDE: &str = "#!/bin/sh\nprintf 'go''t:'\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\nprintf ':end\\n'\n";
+
+#[cfg(unix)]
+const SHELLS: [&str; 2] = ["/bin/zsh", "/bin/bash"];
+
+/// A shell with the fake `claude` first on its PATH, the hooks file in place, and `flags` as
+/// the flags file.
+#[cfg(unix)]
+fn claude_shell(sandbox: &Sandbox, shell: &str, flags: &str) -> Watch {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = sandbox.0.join("bin");
+    fs::create_dir_all(&bin).expect("make the bin folder");
+    let fake = bin.join("claude");
+    fs::write(&fake, FAKE_CLAUDE).expect("write the fake claude");
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("make it runnable");
+    fs::write(sandbox.data().join("claude-hooks.json"), "{}").expect("write the hooks file");
+    fs::write(sandbox.data().join("claude-args"), flags).expect("write the flags file");
+    let mut watch = sandbox.start(shell, &[]);
+    watch.until_cwd(&sandbox.home());
+    // Typed rather than passed in, since a login shell's startup files can reorder PATH.
+    watch.type_line(&format!("PATH='{}':\"$PATH\"", bin.display()));
+    watch
+}
+
+/// The arguments of every call to the fake `claude` so far.
+#[cfg(unix)]
+fn claude_calls(watch: &Watch) -> Vec<String> {
+    watch
+        .output
+        .split("got:")
+        .skip(1)
+        .filter_map(|rest| rest.split_once(":end").map(|(args, _)| args.to_string()))
+        .collect()
+}
+
+/// Types `line` and waits for the call it makes.
+#[cfg(unix)]
+fn call_claude(watch: &mut Watch, line: &str) -> String {
+    let before = claude_calls(watch).len();
+    watch.type_line(line);
+    watch.until(line, |watch| claude_calls(watch).len() > before);
+    claude_calls(watch)[before].clone()
+}
+
+#[cfg(unix)]
+fn settings_args(sandbox: &Sandbox) -> String {
+    format!(
+        "[--settings][{}]",
+        sandbox.data().join("claude-hooks.json").display()
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_gets_settings_and_flags() {
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let got = call_claude(&mut watch, "claude --model haiku");
+        let settings = settings_args(&sandbox);
+        assert_eq!(
+            got,
+            format!("{settings}[--dangerously-skip-permissions][--model][haiku]"),
+            "{shell}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_subcommand_gets_nothing() {
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        assert_eq!(
+            call_claude(&mut watch, "claude mcp list"),
+            "[mcp][list]",
+            "{shell}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_flag_not_repeated() {
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let got = call_claude(&mut watch, "claude -p hi --dangerously-skip-permissions");
+        let settings = settings_args(&sandbox);
+        assert_eq!(
+            got,
+            format!("{settings}[-p][hi][--dangerously-skip-permissions]"),
+            "{shell}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_flags_off_still_gets_settings() {
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let mut watch = claude_shell(&sandbox, shell, "");
+        let got = call_claude(&mut watch, "claude");
+        assert_eq!(got, settings_args(&sandbox), "{shell}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_flags_apply_in_an_open_shell() {
+    for shell in SHELLS {
+        let sandbox = Sandbox::new();
+        let mut watch = claude_shell(&sandbox, shell, "--dangerously-skip-permissions\n");
+        let settings = settings_args(&sandbox);
+        let first = call_claude(&mut watch, "claude");
+        assert_eq!(
+            first,
+            format!("{settings}[--dangerously-skip-permissions]"),
+            "{shell}"
+        );
+        fs::write(
+            sandbox.data().join("claude-args"),
+            "--verbose\n--model\nhaiku\n",
+        )
+        .expect("change the flags");
+        let second = call_claude(&mut watch, "claude");
+        assert_eq!(
+            second,
+            format!("{settings}[--verbose][--model][haiku]"),
+            "{shell}"
+        );
+    }
+}

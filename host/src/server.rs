@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -24,14 +24,17 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 use uuid::Uuid;
 
+use crate::ctl::{self, CtlRequest, Tokens};
+use crate::env::host_env;
 use crate::protocol::{
-    ClientFrame, HostFrame, PROTO, SessionItem, code, decode_binary, encode_binary,
+    ClientFrame, HostFrame, PROTO, SessionItem, StateItem, code, decode_binary, encode_binary,
 };
 use crate::session::resolve_dir;
 use crate::state::{self, SavedSession, State};
+use crate::states::{self, HookEvent, Tracker};
 use crate::tree::{Op, Place, Tree, TreeError};
 use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec, Status};
-use crate::{auth, project, shellinit};
+use crate::{auth, claudecfg, project, shellinit};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -39,6 +42,8 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 // A stuck program must not grow the host without limit.
 const MAX_QUEUED_INPUT: usize = 16 * 1024 * 1024;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
+// How often a finished turn is checked for having waited long enough to show as done.
+const STATE_TICK: Duration = Duration::from_millis(250);
 // A restored shell starts before any client says how big it is. Its first attach resizes it.
 const RESTORE_SIZE: Size = Size { cols: 80, rows: 24 };
 
@@ -70,10 +75,14 @@ pub async fn serve(
         if let Err(error) = shellinit::install(&restoring.data_dir) {
             eprintln!("term-host: shells will not report their folder: {error}");
         }
+        // Also before any shell starts, since a `claude` in one reads both files.
+        restoring.write_claude_files();
         restoring.restore();
     })
     .await;
+    Arc::clone(&registry).start_hooks();
     Arc::clone(&registry).start_saving();
+    Arc::clone(&registry).start_ticking();
     tokio::select! {
         () = accept(listener, token, Arc::clone(&registry)) => {}
         () = shutdown => {}
@@ -353,6 +362,10 @@ impl Connection {
                 self.registry.watch(self.watcher, &self.out);
                 Ok(None)
             }
+            ClientFrame::Seen { session } => {
+                self.registry.saw_seen(&session);
+                Ok(None)
+            }
             ClientFrame::TreeOp { op } => {
                 // `project::resolve` looks at folders, and an op can start or end programs.
                 let registry = Arc::clone(&self.registry);
@@ -401,12 +414,13 @@ impl Connection {
         let cwd = spec.cwd.clone();
 
         // Forking is slow, and looking at a folder can stall on a network mount.
+        let tokens = self.registry.tokens.clone();
         let spawned = spawn_blocking(move || {
             let Some(folder) = resolve_dir(&spec.cwd) else {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
             };
             let project = project::resolve(&folder);
-            Ok((start_program(spec, size)?, project))
+            Ok((start_program(spec, size, &tokens)?, project))
         })
         .await;
         let (running, project) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
@@ -431,7 +445,8 @@ impl Connection {
             // once.
             let starting = Arc::clone(&served);
             let data_dir = self.registry.data_dir.clone();
-            let started = spawn_blocking(move || starting.start(size, &data_dir)).await;
+            let tokens = self.registry.tokens.clone();
+            let started = spawn_blocking(move || starting.start(size, &data_dir, &tokens)).await;
             started.unwrap_or_else(|_| Err(start_failed()))?;
         }
         let running = served.running()?;
@@ -583,6 +598,10 @@ struct Registry {
     /// Set before the last save on the way out. Nothing is saved after it, so the sessions a
     /// shutdown or reboot ends stay saved.
     shutting_down: AtomicBool,
+    /// Each session's Claude state, by uuid.
+    states: Mutex<Tracker>,
+    /// Each running program's `TA_TOKEN`, by uuid. Only in memory.
+    tokens: Tokens,
 }
 
 impl Registry {
@@ -596,6 +615,8 @@ impl Registry {
             data_dir,
             saved: Mutex::new(State::default()),
             shutting_down: AtomicBool::new(false),
+            states: Mutex::new(Tracker::default()),
+            tokens: Tokens::default(),
         }
     }
 
@@ -650,6 +671,7 @@ impl Registry {
         if lock(&self.tree).on_exit(&served.uuid, true) {
             self.push_tree();
         }
+        self.forget(&served);
         let Some(running) = served.running.get() else {
             self.remove(session);
             return Ok(());
@@ -713,7 +735,7 @@ impl Registry {
         if shell
             && let Some(served) = self.get(session)
             && let Err(HostFrame::Error { message, .. }) =
-                served.start(RESTORE_SIZE, &self.data_dir)
+                served.start(RESTORE_SIZE, &self.data_dir, &self.tokens)
         {
             // Stays listed, and its first attach tries again.
             eprintln!("term-host: could not restore a shell: {message}");
@@ -738,6 +760,100 @@ impl Registry {
         watchers.insert(watcher, out.clone());
         let tree = lock(&self.tree).clone();
         hand_text(out, &HostFrame::Tree { tree });
+        hand_text(out, &self.states_frame());
+    }
+
+    /// Sends every state to every watcher, the same way as `push_tree`.
+    fn push_states(&self) {
+        let watchers = lock(&self.watchers);
+        if watchers.is_empty() {
+            return;
+        }
+        let frame = self.states_frame();
+        for out in watchers.values() {
+            hand_text(out, &frame);
+        }
+    }
+
+    /// Lists only sessions with a state, so one whose state cleared drops out.
+    fn states_frame(&self) -> HostFrame {
+        let now = std::time::Instant::now();
+        let wall = SystemTime::now();
+        let items = lock(&self.states)
+            .all()
+            .into_iter()
+            .map(|(session, state, since)| {
+                let began = wall
+                    .checked_sub(now.saturating_duration_since(since))
+                    .unwrap_or(wall);
+                let since_ms = began
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_millis() as u64);
+                StateItem {
+                    session,
+                    state: Some(state.name().to_string()),
+                    since_ms,
+                }
+            })
+            .collect();
+        HostFrame::States { items }
+    }
+
+    /// One hook call from a Claude in some tab, taken in the order the calls came. Blocks.
+    fn on_hook(&self, request: &CtlRequest) {
+        let Some(event) = states::parse(&request.event, &request.payload) else {
+            return;
+        };
+        let session = request.session.as_str();
+        let ended = event == HookEvent::End;
+        let change = lock(&self.states).on_event(session, event, std::time::Instant::now());
+        if change.changed {
+            self.push_states();
+        }
+        if let Some(folder) = change
+            .first_edit
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|folder| !folder.as_os_str().is_empty())
+        {
+            // Looked at before the tree lock, as for a reported folder.
+            let project = project::resolve(folder);
+            if lock(&self.tree).on_first_edit_in(session, &project) {
+                self.push_tree();
+            }
+        }
+        let Some((_, served)) = self.find(session) else {
+            return;
+        };
+        if let Some(chat) = change.chat.and_then(|chat| Uuid::parse_str(&chat).ok()) {
+            *lock(&served.typed_chat) = Some(chat);
+        } else if ended {
+            *lock(&served.typed_chat) = None;
+        }
+    }
+
+    /// The user saw the session's tab.
+    fn saw_seen(&self, session: &str) {
+        if lock(&self.states).seen(session).changed {
+            self.push_states();
+        }
+    }
+
+    /// A session's program is ending: its token stops working and its state clears. The token
+    /// stays if a reopened tab with the same uuid already has a new one.
+    fn forget(&self, served: &Served) {
+        if let Some(running) = served.running.get()
+            && self.tokens.matches(&served.uuid, &running.token)
+        {
+            self.tokens.remove(&served.uuid);
+        }
+        let now = std::time::Instant::now();
+        if lock(&self.states)
+            .on_event(&served.uuid, HookEvent::End, now)
+            .changed
+        {
+            self.push_states();
+        }
     }
 
     /// Sends the tree to every watcher. Pushes never cross, so the last one sent is the newest.
@@ -817,7 +933,7 @@ impl Registry {
         };
         let project = project::resolve(&folder);
         // Its first attach gives it a real size.
-        let running = start_program(spec, RESTORE_SIZE)?;
+        let running = start_program(spec, RESTORE_SIZE, &self.tokens)?;
         let uuid = id.to_string();
 
         // The group and its pane go in before the session is listed, as in `create`.
@@ -871,6 +987,7 @@ impl Registry {
         if lock(&self.tree).on_exit(&served.uuid, clean) {
             self.push_tree();
         }
+        self.forget(served);
     }
 
     /// Passes on folders and exits of sessions no one is attached to, which have no pump.
@@ -898,10 +1015,66 @@ impl Registry {
                     thread::sleep(SAVE_EVERY);
                     self.notice();
                     self.save();
+                    // Picks up a change to the flags in the app's settings. Already reported
+                    // at startup if it fails.
+                    let _ = claudecfg::write_args(&self.data_dir);
                 }
             });
         if let Err(error) = started {
             eprintln!("term-host: sessions will not be saved: {error}");
+        }
+    }
+
+    /// The Claude settings file with the hooks, and the flags file. Blocks.
+    fn write_claude_files(&self) {
+        let written =
+            std::env::current_exe().and_then(|exe| claudecfg::write(&self.data_dir, &exe));
+        if let Err(error) = written {
+            eprintln!("term-host: Claude tabs will show no state: {error}");
+        }
+        if let Err(error) = claudecfg::write_args(&self.data_dir) {
+            eprintln!("term-host: claude will not get its flags: {error}");
+        }
+    }
+
+    /// Listens for hook calls. They are handled on one thread of their own, in the order they
+    /// came, since looking at a folder can stall. Needs the runtime.
+    fn start_hooks(self: Arc<Self>) {
+        let (calls, received) = unbounded::<CtlRequest>();
+        let listening = ctl::serve(&self.data_dir, self.tokens.clone(), move |request| {
+            let _ = calls.send(request);
+        });
+        if let Err(error) = listening {
+            eprintln!("term-host: Claude tabs will show no state: {error}");
+            return;
+        }
+        let started = thread::Builder::new()
+            .name("hook-calls".to_string())
+            .spawn(move || {
+                for request in received {
+                    self.on_hook(&request);
+                }
+            });
+        if let Err(error) = started {
+            eprintln!("term-host: Claude tabs will show no state: {error}");
+        }
+    }
+
+    /// Turns a finished turn into done once it has waited long enough.
+    fn start_ticking(self: Arc<Self>) {
+        let started = thread::Builder::new()
+            .name("state-ticker".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(STATE_TICK);
+                    let done = lock(&self.states).tick(std::time::Instant::now());
+                    if !done.is_empty() {
+                        self.push_states();
+                    }
+                }
+            });
+        if let Err(error) = started {
+            eprintln!("term-host: Claude tabs will not show done: {error}");
         }
     }
 
@@ -969,11 +1142,15 @@ struct Served {
     seen_cwd: Mutex<Option<PathBuf>>,
     /// Set once the exit has been passed to the tree.
     seen_exit: AtomicBool,
+    /// The chat of a `claude` typed in this tab, from its first hook call, until it ends.
+    typed_chat: Mutex<Option<Uuid>>,
 }
 
 struct Running {
     handle: Arc<SessionHandle>,
     input: InputQueue,
+    /// The program's `TA_TOKEN`.
+    token: String,
 }
 
 impl Served {
@@ -997,6 +1174,7 @@ impl Served {
             kill_asked: AtomicBool::new(false),
             seen_cwd: Mutex::new(None),
             seen_exit: AtomicBool::new(false),
+            typed_chat: Mutex::new(None),
         }
     }
 
@@ -1035,7 +1213,7 @@ impl Served {
     /// Starts a restored session, in its saved folder or the home folder if that is gone. A
     /// Claude chat resumes only if it has a transcript, since one that never got a first
     /// message cannot be resumed and starts fresh with the same id. Blocks.
-    fn start(&self, size: Size, data_dir: &Path) -> Result<(), HostFrame> {
+    fn start(&self, size: Size, data_dir: &Path, tokens: &Tokens) -> Result<(), HostFrame> {
         let _gate = lock(&self.starting);
         if self.running.get().is_some() {
             return Ok(());
@@ -1061,7 +1239,7 @@ impl Served {
             uuid: self.id,
             data_dir: data_dir.to_path_buf(),
         };
-        let _ = self.running.set(start_program(spec, size)?);
+        let _ = self.running.set(start_program(spec, size, tokens)?);
         Ok(())
     }
 
@@ -1089,23 +1267,53 @@ impl Served {
         {
             *lock(&self.cwd) = dir;
         }
+        // A `claude` typed in a shell tab comes back as a Claude tab resuming its chat.
+        let chat = lock(&self.typed_chat).or(self.chat);
+        let kind = if chat.is_some() { "claude" } else { self.kind };
         Some(SavedSession {
             uuid: self.uuid.clone(),
-            kind: self.kind.to_string(),
+            kind: kind.to_string(),
             cwd: lock(&self.cwd).clone(),
             title: self.title(status.as_ref()),
-            chat: self.chat,
+            chat,
         })
     }
 }
 
-/// Starts the program and its input thread. Blocks.
-fn start_program(spec: SpawnSpec, size: Size) -> Result<Running, HostFrame> {
+/// Starts the program and its input thread, with a new `TA_TOKEN` that only this program
+/// gets, so a hook call proves which tab it came from. Blocks.
+fn start_program(spec: SpawnSpec, size: Size, tokens: &Tokens) -> Result<Running, HostFrame> {
     let spawn_failed = |error: String| HostFrame::error(code::SPAWN_FAILED, &error);
-    let handle = Session::spawn(spec, size).map_err(|e| spawn_failed(format!("{e:#}")))?;
-    let handle = Arc::new(handle);
-    let input = InputQueue::start(Arc::clone(&handle)).map_err(|e| spawn_failed(e.to_string()))?;
-    Ok(Running { handle, input })
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| start_failed())?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let uuid = spec.uuid.to_string();
+    let env = host_env()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("TA_TOKEN"))
+        .chain([("TA_TOKEN".to_string(), token.clone())]);
+    // In place before the program starts, so its first hook call cannot beat it.
+    tokens.insert(&uuid, &token);
+    let started = Session::spawn_with_env(spec, size, env)
+        .map_err(|e| spawn_failed(format!("{e:#}")))
+        .and_then(|handle| {
+            let handle = Arc::new(handle);
+            let input =
+                InputQueue::start(Arc::clone(&handle)).map_err(|e| spawn_failed(e.to_string()))?;
+            Ok((handle, input))
+        });
+    match started {
+        Ok((handle, input)) => Ok(Running {
+            handle,
+            input,
+            token,
+        }),
+        Err(error) => {
+            if tokens.matches(&uuid, &token) {
+                tokens.remove(&uuid);
+            }
+            Err(error)
+        }
+    }
 }
 
 fn tree_error(error: TreeError) -> HostFrame {

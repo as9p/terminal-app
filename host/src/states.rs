@@ -25,6 +25,18 @@ pub enum AgentState {
     Idle,
 }
 
+impl AgentState {
+    /// The name the protocol sends.
+    pub fn name(self) -> &'static str {
+        match self {
+            AgentState::Working => "working",
+            AgentState::Blocked => "blocked",
+            AgentState::Done => "done",
+            AgentState::Idle => "idle",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HookEvent {
     /// The chat started, cleared or was compacted. `chat` is Claude's session id.
@@ -227,6 +239,14 @@ impl Tracker {
 
     pub fn state(&self, session: &str) -> Option<AgentState> {
         self.sessions.get(session).and_then(|entry| entry.state)
+    }
+
+    /// Every session that has a state, with when that state began.
+    pub fn all(&self) -> Vec<(String, AgentState, Instant)> {
+        self.sessions
+            .iter()
+            .filter_map(|(session, entry)| Some((session.clone(), entry.state?, entry.since?)))
+            .collect()
     }
 
     /// The blocked sessions, the one blocked longest first.

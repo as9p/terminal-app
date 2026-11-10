@@ -533,12 +533,75 @@ async fn claude_restore_uses_resume() {
     }
     let mut calls = wait_for_claude_calls(&dirs, 2).await;
     calls.sort();
+    // The hooks file and the default flags come first, as for a `claude` typed in a shell.
+    let added = format!(
+        "--settings {} --dangerously-skip-permissions",
+        dirs.data().join("claude-hooks.json").display()
+    );
     assert_eq!(
         calls,
         [
-            format!("--resume {FIRST}"),
-            format!("--session-id {SECOND}")
+            format!("{added} --resume {FIRST}"),
+            format!("{added} --session-id {SECOND}")
         ]
+    );
+    host.stop();
+}
+
+/// A `claude` typed in a shell tab reports its chat through the hook. The tab is then saved as
+/// a Claude tab, and comes back resuming that chat.
+#[cfg(unix)]
+#[tokio::test]
+async fn hand_typed_claude_restores_with_resume() {
+    let dirs = Dirs::new();
+    let mut host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    let session = create(&mut ws, FIRST, "shell", &dirs.work()).await;
+    attach(&mut ws, session).await;
+    let exe = env!("CARGO_BIN_EXE_term-host").replace('\'', r"'\''");
+    type_in(
+        &mut ws,
+        session,
+        &format!("echo '{{\"session_id\":\"{SECOND}\"}}' | '{exe}' hook SessionStart\n"),
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(dirs.state_file())
+        .ok()
+        .and_then(|text| serde_json::from_str::<State>(&text).ok())
+        .is_some_and(|state| state.sessions.iter().any(|saved| saved.kind == "claude"))
+    {
+        assert!(Instant::now() < deadline, "the tab was not saved as Claude");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    host.stop();
+
+    let state = dirs.read_state();
+    assert_eq!(uuids(&state), [FIRST]);
+    assert_eq!(state.sessions[0].kind, "claude");
+    assert_eq!(
+        state.sessions[0].chat,
+        Some(SECOND.parse().expect("a chat id"))
+    );
+
+    let transcripts = dirs.config().join("projects").join("-work");
+    std::fs::create_dir_all(&transcripts).expect("make the projects folder");
+    std::fs::write(transcripts.join(format!("{SECOND}.jsonl")), "{}\n")
+        .expect("write a transcript");
+    let mut host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    let items = list(&mut ws).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["uuid"], FIRST);
+    attach(
+        &mut ws,
+        items[0]["session"].as_u64().expect("a session number") as u32,
+    )
+    .await;
+    let calls = wait_for_claude_calls(&dirs, 1).await;
+    assert!(
+        calls[0].ends_with(&format!("--resume {SECOND}")),
+        "{calls:?}"
     );
     host.stop();
 }
@@ -568,7 +631,11 @@ async fn claude_restore_is_lazy() {
     let session = items[0]["session"].as_u64().expect("a session number") as u32;
     attach(&mut ws, session).await;
     let calls = wait_for_claude_calls(&dirs, 1).await;
-    assert_eq!(calls, [format!("--session-id {FIRST}")]);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0].ends_with(&format!("--session-id {FIRST}")),
+        "{calls:?}"
+    );
     host.stop();
 
     // A chat the host ended by shutting down is still there for next time.

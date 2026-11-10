@@ -67,6 +67,10 @@ pub enum ClientFrame {
     TreeOp {
         op: Op,
     },
+    /// The user has seen the session's tab, which turns a done session idle.
+    Seen {
+        session: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,6 +111,10 @@ pub enum HostFrame {
     /// The whole tree, as the answer to `tree_get` and after every change to it.
     Tree {
         tree: Tree,
+    },
+    /// Every session's Claude state, with the tree after `tree_get` and after every change.
+    States {
+        items: Vec<StateItem>,
     },
     Error {
         code: String,
@@ -248,4 +256,14 @@ mod tests {
         assert_eq!(decode_binary(&[1, 0, 0, 0]), Some((1, &b""[..])));
         assert_eq!(decode_binary(&[1, 0, 0]), None);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateItem {
+    /// The session's uuid, as the tree's panes hold it.
+    pub session: String,
+    /// `working`, `blocked`, `done` or `idle`. Null for a session that has had no hook event.
+    pub state: Option<String>,
+    /// When the state began, in milliseconds since the Unix epoch.
+    pub since_ms: u64,
 }

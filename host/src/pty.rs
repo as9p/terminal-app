@@ -10,6 +10,7 @@ use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system,
 };
 
+use crate::claudecfg;
 use crate::session::{Kind, SpawnSpec};
 use crate::shellinit::{self, set_env};
 
@@ -144,17 +145,49 @@ fn argv(
             resume: false,
         } => ("--session-id", chat),
     };
+    let added = claude_flags(data_dir);
     if windows {
-        ["cmd", "/c", "claude", flag, &id.to_string()]
-            .map(OsString::from)
-            .to_vec()
+        let mut argv: Vec<OsString> = ["cmd", "/c", "claude"].map(OsString::from).to_vec();
+        argv.extend(added.into_iter().map(OsString::from));
+        argv.extend([OsString::from(flag), OsString::from(id.to_string())]);
+        argv
     } else {
+        let mut line = "exec claude".to_string();
+        for arg in &added {
+            line.push(' ');
+            line.push_str(&sh_quote(arg));
+        }
         vec![
             shell.into(),
             "-lic".into(),
-            format!("exec claude {flag} {id}").into(),
+            format!("{line} {flag} {id}").into(),
         ]
     }
+}
+
+/// What the app puts before a Claude tab's own arguments, the same as the shell hook's
+/// `claude` adds: the hooks file, then each line of the flags file. Read at each start, so a
+/// changed setting applies to the next tab. A missing file adds nothing.
+fn claude_flags(data_dir: &Path) -> Vec<String> {
+    let mut added = Vec::new();
+    let hooks = data_dir.join(claudecfg::FILE);
+    if hooks.is_file() {
+        added.push("--settings".to_string());
+        added.push(hooks.to_string_lossy().into_owned());
+    }
+    if let Ok(text) = std::fs::read_to_string(data_dir.join(claudecfg::ARGS_FILE)) {
+        added.extend(
+            text.lines()
+                .filter(|line| !line.is_empty())
+                .map(String::from),
+        );
+    }
+    added
+}
+
+/// Single quotes, inside which a Unix shell expands nothing.
+fn sh_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
 /// Blocks until the program ends.
@@ -309,6 +342,45 @@ mod tests {
         assert_eq!(
             argv(&claude(true), "cmd.exe", true),
             ["cmd", "/c", "claude", "--resume", CHAT_TEXT]
+        );
+    }
+
+    #[test]
+    fn claude_argv_adds_settings_and_flags() {
+        let data = std::env::temp_dir().join(format!("term-host-flags-{}", std::process::id()));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("claude-hooks.json"), "{}").unwrap();
+        std::fs::write(data.join("claude-args"), "--model\nit's\n").unwrap();
+        let hooks = data
+            .join("claude-hooks.json")
+            .to_string_lossy()
+            .into_owned();
+        let windows = super::argv(&claude(false), "cmd.exe", true, &data, &mut Vec::new());
+        let unix = super::argv(&claude(true), "/bin/zsh", false, &data, &mut Vec::new());
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(
+            windows,
+            [
+                "cmd",
+                "/c",
+                "claude",
+                "--settings",
+                &hooks,
+                "--model",
+                "it's",
+                "--session-id",
+                CHAT_TEXT
+            ]
+        );
+        assert_eq!(
+            unix,
+            [
+                "/bin/zsh",
+                "-lic",
+                &format!(
+                    "exec claude '--settings' '{hooks}' '--model' 'it'\\''s' --resume {CHAT_TEXT}"
+                )
+            ]
         );
     }
 
