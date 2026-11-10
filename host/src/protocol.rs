@@ -1,9 +1,11 @@
-//! Protocol version 1. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
+//! Protocol version 3. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
 //! little-endian session number, then bytes, in both directions.
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTO: u32 = 1;
+use crate::tree::{Op, Place, Tree};
+
+pub const PROTO: u32 = 3;
 
 /// Values of `code` in `HostFrame::Error`.
 pub mod code {
@@ -16,9 +18,12 @@ pub mod code {
     pub const BAD_SIZE: &str = "bad_size";
     pub const BAD_KIND: &str = "bad_kind";
     pub const SPAWN_FAILED: &str = "spawn_failed";
+    pub const NO_TAB: &str = "no_tab";
+    pub const NO_GROUP: &str = "no_group";
+    pub const BAD_OP: &str = "bad_op";
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     Hello {
@@ -33,6 +38,9 @@ pub enum ClientFrame {
         cwd: String,
         cols: u16,
         rows: u16,
+        /// Where its pane goes in the tree. A client that leaves it out gets a tab of its own.
+        #[serde(default)]
+        place: Place,
     },
     Attach {
         session: u32,
@@ -55,13 +63,17 @@ pub enum ClientFrame {
         bytes: u64,
     },
     List,
-    LayoutGet,
-    LayoutSet {
-        json: String,
+    TreeGet,
+    TreeOp {
+        op: Op,
+    },
+    /// The user has seen the session's tab, which turns a done session idle.
+    Seen {
+        session: String,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostFrame {
     HelloOk {
@@ -83,6 +95,11 @@ pub enum HostFrame {
         session: u32,
         title: String,
     },
+    /// The folder the session's shell reported at its prompt.
+    Cwd {
+        session: u32,
+        cwd: String,
+    },
     Exited {
         session: u32,
         clean: bool,
@@ -91,8 +108,13 @@ pub enum HostFrame {
     Detached {
         session: u32,
     },
-    Layout {
-        json: Option<String>,
+    /// The whole tree, as the answer to `tree_get` and after every change to it.
+    Tree {
+        tree: Tree,
+    },
+    /// Every session's Claude state, with the tree after `tree_get` and after every change.
+    States {
+        items: Vec<StateItem>,
     },
     Error {
         code: String,
@@ -115,6 +137,9 @@ pub struct SessionItem {
     pub uuid: String,
     pub kind: String,
     pub title: Option<String>,
+    /// The folder the shell last reported. Null until it reports one, and always for a
+    /// program with no shell hook.
+    pub cwd: Option<String>,
     /// Null while running, otherwise whether it exited cleanly.
     pub exited: Option<bool>,
     pub cols: u16,
@@ -144,10 +169,10 @@ mod tests {
         let cases = [
             (
                 HostFrame::HelloOk {
-                    proto: 1,
+                    proto: 2,
                     host_version: "0.1.0".to_string(),
                 },
-                json!({"type": "hello_ok", "proto": 1, "host_version": "0.1.0"}),
+                json!({"type": "hello_ok", "proto": 2, "host_version": "0.1.0"}),
             ),
             (
                 HostFrame::Sessions {
@@ -156,6 +181,7 @@ mod tests {
                         uuid: "u".to_string(),
                         kind: "shell".to_string(),
                         title: None,
+                        cwd: Some("/tmp".to_string()),
                         exited: Some(true),
                         cols: 80,
                         rows: 24,
@@ -163,7 +189,7 @@ mod tests {
                 },
                 json!({"type": "sessions", "items": [{
                     "session": 1, "uuid": "u", "kind": "shell", "title": null,
-                    "exited": true, "cols": 80, "rows": 24,
+                    "cwd": "/tmp", "exited": true, "cols": 80, "rows": 24,
                 }]}),
             ),
             (
@@ -188,6 +214,13 @@ mod tests {
                 json!({"type": "title", "session": 1, "title": "t"}),
             ),
             (
+                HostFrame::Cwd {
+                    session: 1,
+                    cwd: "/tmp".to_string(),
+                },
+                json!({"type": "cwd", "session": 1, "cwd": "/tmp"}),
+            ),
+            (
                 HostFrame::Exited {
                     session: 1,
                     clean: false,
@@ -199,8 +232,10 @@ mod tests {
                 json!({"type": "detached", "session": 1}),
             ),
             (
-                HostFrame::Layout { json: None },
-                json!({"type": "layout", "json": null}),
+                HostFrame::Tree {
+                    tree: Tree::default(),
+                },
+                json!({"type": "tree", "tree": {"groups": [], "ungrouped": [], "closed": [], "defaults": {}}}),
             ),
             (
                 HostFrame::error(code::BAD_KIND, "m"),
@@ -221,4 +256,14 @@ mod tests {
         assert_eq!(decode_binary(&[1, 0, 0, 0]), Some((1, &b""[..])));
         assert_eq!(decode_binary(&[1, 0, 0]), None);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateItem {
+    /// The session's uuid, as the tree's panes hold it.
+    pub session: String,
+    /// `working`, `blocked`, `done` or `idle`. Null for a session that has had no hook event.
+    pub state: Option<String>,
+    /// When the state began, in milliseconds since the Unix epoch.
+    pub since_ms: u64,
 }

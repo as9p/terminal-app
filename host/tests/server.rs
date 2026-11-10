@@ -58,6 +58,8 @@ impl Host {
             .env("TERM_HOST_PORT", port.to_string())
             // So a test can never start the real login shell, which is slow and varies.
             .env("SHELL", "/bin/sh")
+            // So a login shell never reads the real startup files.
+            .env("HOME", &dir.0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr)
@@ -172,10 +174,10 @@ async fn hear_close(ws: &mut Ws) {
 }
 
 async fn expect_hello_ok(port: u16, ws: &mut Ws, token: &str) {
-    say(ws, json!({"type": "hello", "token": token, "proto": 1})).await;
+    say(ws, json!({"type": "hello", "token": token, "proto": 3})).await;
     let reply = hear(ws).await;
     assert_eq!(reply["type"], "hello_ok", "port {port}: {reply}");
-    assert_eq!(reply["proto"], 1, "{reply}");
+    assert_eq!(reply["proto"], 3, "{reply}");
     assert!(reply["host_version"].is_string(), "{reply}");
 }
 
@@ -270,7 +272,7 @@ async fn refuses_bad_token() {
         let mut ws = open(host.port).await;
         say(
             &mut ws,
-            json!({"type": "hello", "token": wrong, "proto": 1}),
+            json!({"type": "hello", "token": wrong, "proto": 3}),
         )
         .await;
         hear_close(&mut ws).await;
@@ -280,7 +282,7 @@ async fn refuses_bad_token() {
     let mut ws = open(host.port).await;
     say(
         &mut ws,
-        json!({"type": "hello", "token": "wrong", "proto": 2}),
+        json!({"type": "hello", "token": "wrong", "proto": 4}),
     )
     .await;
     hear_close(&mut ws).await;
@@ -289,9 +291,9 @@ async fn refuses_bad_token() {
     for first in [
         Message::text(r#"{"type":"list"}"#),
         Message::text("not json"),
-        Message::text(json!({"type": "hello", "proto": 1}).to_string()),
+        Message::text(json!({"type": "hello", "proto": 3}).to_string()),
         Message::binary(
-            json!({"type": "hello", "token": token, "proto": 1})
+            json!({"type": "hello", "token": token, "proto": 3})
                 .to_string()
                 .into_bytes(),
         ),
@@ -306,7 +308,7 @@ async fn refuses_bad_token() {
     let mut ws = open(host.port).await;
     say(
         &mut ws,
-        json!({"type": "hello", "token": token, "proto": 2}),
+        json!({"type": "hello", "token": token, "proto": 4}),
     )
     .await;
     let reply = hear(&mut ws).await;
@@ -344,6 +346,25 @@ async fn refuses_bad_token() {
         closed,
         "the host sent bytes to a client that never upgraded"
     );
+}
+
+#[tokio::test]
+async fn proto_2_client_is_refused() {
+    let host = Host::start();
+    let mut ws = open(host.port).await;
+    say(
+        &mut ws,
+        json!({"type": "hello", "token": host.token(), "proto": 2}),
+    )
+    .await;
+    let reply = hear(&mut ws).await;
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["code"], "proto_mismatch", "{reply}");
+    assert!(
+        reply["message"].as_str().is_some_and(|m| m.contains('3')),
+        "{reply}"
+    );
+    hear_close(&mut ws).await;
 }
 
 #[tokio::test]
@@ -429,7 +450,7 @@ async fn bad_request_after_hello_stays_open() {
         "not json".to_string(),
         json!({"type": "no_such_frame"}).to_string(),
         json!({"type": "attach", "session": "one"}).to_string(),
-        json!({"type": "hello", "token": host.token(), "proto": 1}).to_string(),
+        json!({"type": "hello", "token": host.token(), "proto": 3}).to_string(),
     ] {
         ws.send(Message::text(bad.clone())).await.expect("send");
         let reply = hear(&mut ws).await;
@@ -500,23 +521,38 @@ async fn session_frames_get_named_errors() {
 }
 
 #[tokio::test]
-async fn layout_is_held_as_an_opaque_string() {
+async fn tree_get_answers_an_empty_tree() {
     let host = Host::start();
     let mut ws = signed_in(&host).await;
-    say(&mut ws, json!({"type": "layout_get"})).await;
-    assert_eq!(hear(&mut ws).await, json!({"type": "layout", "json": null}));
-
-    say(
-        &mut ws,
-        json!({"type": "layout_set", "json": "not even json"}),
-    )
-    .await;
-    let mut other = signed_in(&host).await;
-    say(&mut other, json!({"type": "layout_get"})).await;
+    say(&mut ws, json!({"type": "tree_get"})).await;
     assert_eq!(
-        hear(&mut other).await,
-        json!({"type": "layout", "json": "not even json"})
+        hear(&mut ws).await,
+        json!({"type": "tree", "tree": {"groups": [], "ungrouped": [], "closed": [], "defaults": {}}})
     );
+    assert_eq!(hear(&mut ws).await, json!({"type": "states", "items": []}));
+}
+
+#[tokio::test]
+async fn tree_op_gets_named_errors() {
+    let host = Host::start();
+    let mut ws = signed_in(&host).await;
+    for (op, code) in [
+        (json!({"type": "close_tab", "tab": "t9"}), "no_tab"),
+        (
+            json!({"type": "rename_group", "group": "folder:none", "name": "x"}),
+            "no_group",
+        ),
+        (json!({"type": "reopen_tab"}), "bad_op"),
+        (
+            json!({"type": "open_folder", "path": "/no/such/folder/here"}),
+            "bad_cwd",
+        ),
+    ] {
+        say(&mut ws, json!({"type": "tree_op", "op": op})).await;
+        let reply = hear(&mut ws).await;
+        assert_eq!(reply["type"], "error", "{reply}");
+        assert_eq!(reply["code"], code, "{op} {reply}");
+    }
 }
 
 #[tokio::test]
@@ -549,9 +585,12 @@ async fn token_file_is_private() {
     };
     assert_eq!(mode(&host.dir.0), 0o700);
     assert_eq!(mode(&host.token_path()), 0o600);
+    // Only the token's own files count: the host writes others here (the shell hook, the
+    // Claude hook config, the ctl socket) in the background, so they may or may not exist yet.
     let names: Vec<_> = std::fs::read_dir(&host.dir.0)
         .expect("list the folder")
         .map(|entry| entry.expect("read an entry").file_name())
+        .filter(|name| name.to_string_lossy().starts_with("host-token"))
         .collect();
     assert_eq!(names, ["host-token"], "the temp file must not stay behind");
 
@@ -605,7 +644,7 @@ async fn partial_token_file_is_replaced() {
         let mut refused = open(host.port).await;
         say(
             &mut refused,
-            json!({"type": "hello", "token": partial, "proto": 1}),
+            json!({"type": "hello", "token": partial, "proto": 3}),
         )
         .await;
         hear_close(&mut refused).await;
@@ -790,6 +829,70 @@ mod sessions {
         }
     }
 
+    /// A report as the hook prints it, typed by hand because the test host's shell is
+    /// `/bin/sh`, which gets no hook.
+    const REPORT_TMP: &str = r#"printf '\033]7;file://%s/tmp\007' "$(hostname)""#;
+
+    #[tokio::test]
+    async fn cwd_frame_reaches_client() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        loop {
+            let frame = hear_text(&mut ws).await;
+            if frame["type"] == "cwd" {
+                assert_eq!(
+                    frame,
+                    json!({"type": "cwd", "session": session, "cwd": real_tmp()})
+                );
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_carries_cwd() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cwd"], Value::Null, "{items:?}");
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
+    }
+
+    #[tokio::test]
+    async fn late_attach_gets_current_cwd() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, REPORT_TMP).await;
+        wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
+
+        let mut late = signed_in(&host).await;
+        attach(&mut late, session).await;
+        loop {
+            let frame = hear_text(&mut late).await;
+            if frame["type"] == "cwd" {
+                assert_eq!(
+                    frame,
+                    json!({"type": "cwd", "session": session, "cwd": real_tmp()})
+                );
+                break;
+            }
+        }
+    }
+
+    /// `/tmp` is a link on macOS, and reported folders arrive resolved.
+    fn real_tmp() -> String {
+        let tmp = std::fs::canonicalize("/tmp").expect("resolve /tmp");
+        tmp.to_str().expect("a UTF-8 folder").to_string()
+    }
+
     #[tokio::test]
     async fn create_attach_type_echo() {
         let host = Host::start();
@@ -805,7 +908,7 @@ mod sessions {
             items,
             [json!({
                 "session": session, "uuid": UUID, "kind": "shell", "title": null,
-                "exited": null, "cols": 80, "rows": 24,
+                "cwd": null, "exited": null, "cols": 80, "rows": 24,
             })]
         );
     }
@@ -1093,5 +1196,168 @@ mod sessions {
         assert_eq!(list(&mut ws).await.len(), 2);
         type_line(&mut other, free, "echo st''ill here").await;
         read_until(&mut other, free, "still here").await;
+    }
+
+    const OTHER_UUID: &str = "8e2c0a4f-3b5d-4f9a-8b7c-1d2e3f4a5b6c";
+
+    /// Asks for the tree and returns it. Pushed trees on the way are skipped, and the states
+    /// that follow the tree are read.
+    async fn tree(ws: &mut Ws) -> Value {
+        say(ws, json!({"type": "tree_get"})).await;
+        let tree = pushed_tree(ws, |_| true).await;
+        let states = hear_text(ws).await;
+        assert_eq!(states["type"], "states", "{states}");
+        tree
+    }
+
+    /// The next tree frame that passes `check`.
+    async fn pushed_tree(ws: &mut Ws, check: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let frame = hear_text(ws).await;
+            assert_ne!(frame["type"], "error", "{frame}");
+            if frame["type"] == "tree" && check(&frame["tree"]) {
+                return frame["tree"].clone();
+            }
+        }
+    }
+
+    async fn tree_op(ws: &mut Ws, op: Value) {
+        say(ws, json!({"type": "tree_op", "op": op})).await;
+    }
+
+    fn leaf(session: &str) -> Value {
+        json!({"type": "leaf", "session": session})
+    }
+
+    fn scratch_folder(name: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("term-host-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("make a folder");
+        dir.canonicalize().expect("resolve the folder")
+    }
+
+    #[tokio::test]
+    async fn created_session_gets_a_tab() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        let tree = tree(&mut ws).await;
+        assert_eq!(tree["ungrouped"][0]["split"], leaf(UUID), "{tree}");
+    }
+
+    #[tokio::test]
+    async fn tree_pushed_to_second_client_after_op() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        let tab = tree(&mut ws).await["ungrouped"][0]["id"].clone();
+        let mut other = signed_in(&host).await;
+        tree(&mut other).await;
+
+        tree_op(
+            &mut ws,
+            json!({"type": "rename_tab", "tab": tab, "name": "build"}),
+        )
+        .await;
+        let pushed = pushed_tree(&mut other, |_| true).await;
+        assert_eq!(pushed["ungrouped"][0]["name"], "build", "{pushed}");
+    }
+
+    #[tokio::test]
+    async fn create_with_split_place_adds_pane() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80,
+                "rows": 24, "place": {"type": "split_of", "session": UUID, "dir": "right"}}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["type"], "created");
+        let tree = tree(&mut ws).await;
+        let tabs = tree["ungrouped"].as_array().expect("tabs");
+        assert_eq!(tabs.len(), 1, "{tree}");
+        assert_eq!(tabs[0]["split"]["type"], "row", "{tree}");
+        assert_eq!(
+            tabs[0]["split"]["children"],
+            json!([leaf(UUID), leaf(OTHER_UUID)])
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_tab_reopens_through_frames() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        let tab = tree(&mut ws).await["ungrouped"][0]["id"].clone();
+
+        tree_op(&mut ws, json!({"type": "close_tab", "tab": tab})).await;
+        let closed = pushed_tree(&mut ws, |tree| tree["closed"][0]["panes"][0].is_object()).await;
+        assert_eq!(closed["ungrouped"], json!([]), "{closed}");
+        assert_eq!(closed["closed"][0]["panes"][0]["uuid"], UUID, "{closed}");
+        assert_eq!(closed["closed"][0]["panes"][0]["kind"], "shell", "{closed}");
+        wait_for_list(&mut ws, |items| items.is_empty()).await;
+
+        tree_op(&mut ws, json!({"type": "reopen_tab"})).await;
+        let reopened = pushed_tree(&mut ws, |tree| tree["closed"] == json!([])).await;
+        assert_eq!(reopened["ungrouped"][0]["split"], leaf(UUID), "{reopened}");
+        let items = wait_for_list(&mut ws, |items| items.len() == 1).await;
+        assert_eq!(items[0]["uuid"], UUID, "{items:?}");
+        assert_eq!(items[0]["exited"], Value::Null, "{items:?}");
+        let session = items[0]["session"].as_u64().expect("a session number") as u32;
+        attach(&mut ws, session).await;
+    }
+
+    #[tokio::test]
+    async fn opened_folder_is_never_an_empty_group() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let folder = scratch_folder("open");
+        tree(&mut ws).await;
+
+        tree_op(&mut ws, json!({"type": "open_folder", "path": folder})).await;
+        let opened = pushed_tree(&mut ws, |tree| tree["groups"] != json!([])).await;
+        let group = &opened["groups"][0];
+        assert_eq!(
+            group["path"],
+            folder.to_str().expect("a UTF-8 folder"),
+            "{opened}"
+        );
+        let tabs = group["tabs"].as_array().expect("tabs");
+        assert_eq!(tabs.len(), 1, "{opened}");
+        let shell = tabs[0]["split"]["session"]
+            .as_str()
+            .expect("a pane")
+            .to_string();
+        let items = list(&mut ws).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["uuid"], shell.as_str(), "{items:?}");
+        assert_eq!(items[0]["kind"], "shell", "{items:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn clean_exit_removes_its_tab() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        tree(&mut ws).await;
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "exit 0").await;
+        pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+    }
+
+    #[tokio::test]
+    async fn kill_removes_its_tab() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        tree(&mut ws).await;
+        say(&mut ws, json!({"type": "kill", "session": session})).await;
+        let tree = pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+        assert_eq!(tree["closed"], json!([]), "{tree}");
     }
 }

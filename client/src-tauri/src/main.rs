@@ -14,6 +14,8 @@ async fn host_connection() -> Result<host::HostConnection, String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Saves the window's size and place on exit and puts them back at the next start.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(tauri::generate_handler![host_connection])
         .run(tauri::generate_context!())
         .expect("tauri failed to run");

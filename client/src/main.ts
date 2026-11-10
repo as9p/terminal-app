@@ -89,6 +89,25 @@ function describe(error: unknown, port: number | undefined): string {
   return String(error);
 }
 
+const LAST_SESSION_KEY = "lastSession";
+
+/** The uuid of the session the window last showed. Lost if storage is turned off. */
+function lastSession(): string | undefined {
+  try {
+    return localStorage.getItem(LAST_SESSION_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberSession(uuid: string): void {
+  try {
+    localStorage.setItem(LAST_SESSION_KEY, uuid);
+  } catch {
+    // Full or turned off: the next window starts on the first live session instead.
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -133,17 +152,22 @@ async function main(): Promise<void> {
   });
 
   async function chooseSession(next: Connection, home: string): Promise<number> {
+    // Kept across restarts, so a new window goes back to the same session.
+    sessionUuid ??= lastSession();
     const live = (await next.list()).filter((item) => item.exited === null);
     // Session numbers start over in a new host, so the uuid is what says it is the same one.
     const existing = live.find((item) => item.uuid === sessionUuid) ?? live[0];
+    let session: number;
     if (existing) {
       sessionUuid = existing.uuid;
-      return existing.session;
+      session = existing.session;
+    } else {
+      const uuid = crypto.randomUUID();
+      const { cols, rows } = view.size;
+      session = await next.create(uuid, "shell", home, cols, rows);
+      sessionUuid = uuid;
     }
-    const uuid = crypto.randomUUID();
-    const { cols, rows } = view.size;
-    const session = await next.create(uuid, "shell", home, cols, rows);
-    sessionUuid = uuid;
+    rememberSession(sessionUuid);
     return session;
   }
 

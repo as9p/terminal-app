@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -12,6 +12,7 @@ use portable_pty::{ChildKiller, MasterPty};
 use uuid::Uuid;
 
 use crate::env::{clean_env, host_env};
+use crate::osc::{self, OscEvent, Scanner};
 use crate::pty::{self, Exit, SharedWriter, Size};
 use crate::screen::Screen;
 
@@ -44,6 +45,11 @@ pub struct SpawnSpec {
     pub kind: Kind,
     pub cwd: PathBuf,
     pub uuid: Uuid,
+    /// Holds the shell hook. The program gets it as `TA_DATA` and the uuid as `TA_SESSION`.
+    pub data_dir: PathBuf,
+    /// Shows `cwd` as the folder from the start, as for a restored shell, whose hook reports
+    /// only at its first prompt.
+    pub known_cwd: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,6 +62,9 @@ pub enum ClientEvent {
     Output(Bytes),
     /// The window title changed. Also sent right after the snapshot when there is one.
     Title(String),
+    /// The shell hook reported a folder other than the last one. Also sent right after the
+    /// snapshot when there is one.
+    Cwd(PathBuf),
     /// `clean` means a normal process exit, whatever the exit code, except that on Windows an
     /// error status code (a crash or Ctrl+C) is not clean.
     Exited {
@@ -70,6 +79,8 @@ pub type ClientTx = Sender<ClientEvent>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub title: Option<String>,
+    /// The folder the shell hook last reported, if it has.
+    pub cwd: Option<PathBuf>,
     /// None until the exit has been announced, then whether it was clean.
     pub exited: Option<bool>,
     pub size: Size,
@@ -88,6 +99,11 @@ impl Session {
         size: Size,
         env: impl Iterator<Item = (String, String)>,
     ) -> Result<SessionHandle> {
+        let cwd = if spec.known_cwd {
+            resolve_dir(&spec.cwd)
+        } else {
+            None
+        };
         let pty::Pty {
             master,
             reader,
@@ -101,8 +117,10 @@ impl Session {
         let (exit_tx, exit_rx) = bounded(1);
         let (control_tx, control_rx) = unbounded();
         let (announced_tx, announced_rx) = bounded(0);
+        let (checked_tx, checked_rx) = unbounded();
         let status = Arc::new(Mutex::new(Status {
             title: None,
+            cwd: cwd.clone(),
             exited: None,
             size,
         }));
@@ -125,6 +143,12 @@ impl Session {
             pid,
             size,
             screen: Screen::new(size, SCROLLBACK),
+            scanner: Scanner::new(),
+            cwd,
+            checking: false,
+            pending: None,
+            checked_tx,
+            checked_rx,
             clients: Vec::new(),
             kill_sent: false,
             kill_deadline: never(),
@@ -308,6 +332,14 @@ struct Actor {
     pid: Option<u32>,
     size: Size,
     screen: Screen,
+    scanner: Scanner,
+    cwd: Option<PathBuf>,
+    // One folder check runs at a time. A report arriving meanwhile waits, replacing any
+    // older one waiting, so a flood costs one check at a time and the last report wins.
+    checking: bool,
+    pending: Option<PathBuf>,
+    checked_tx: Sender<Option<PathBuf>>,
+    checked_rx: Receiver<Option<PathBuf>>,
     clients: Vec<Client>,
     kill_sent: bool,
     kill_deadline: Receiver<Instant>,
@@ -368,6 +400,7 @@ impl Actor {
                     self.kill_deadline = never();
                     self.force_kill();
                 },
+                recv(self.checked_rx) -> resolved => self.checked(resolved.unwrap_or(None)),
                 recv(stale_deadline) -> _ => self.drop_stale_clients(),
                 recv(self.size_check) -> _ => self.check_size(),
                 recv(drain_deadline) -> _ => {
@@ -411,12 +444,62 @@ impl Actor {
             sent.is_ok()
         });
         // After the clients so parsing never delays the bytes they see.
+        for event in self.scanner.feed(&chunk) {
+            self.report(event);
+        }
         self.screen.feed(&chunk);
         if let Some(title) = self.screen.take_new_title() {
             self.update_status(|status| status.title = Some(title.clone()));
             for client in &self.clients {
                 let _ = client.tx.try_send(ClientEvent::Title(title.clone()));
             }
+        }
+    }
+
+    /// A folder counts only if it is on this computer and exists, since a shell over SSH
+    /// reports the other computer's folders.
+    fn report(&mut self, event: OscEvent) {
+        let OscEvent::Cwd { host, path } = event;
+        if !osc::is_this_host(&host) {
+            return;
+        }
+        if self.checking {
+            self.pending = Some(path);
+        } else {
+            self.check(path);
+        }
+    }
+
+    // On its own thread because looking at a folder can block, as on a stalled network
+    // drive, and that must not hold up the session's output.
+    fn check(&mut self, path: PathBuf) {
+        let done = self.checked_tx.clone();
+        let started = thread::Builder::new()
+            .name("session-cwd".to_string())
+            .spawn(move || {
+                let _ = done.send(resolve_dir(&path));
+            });
+        self.checking = started.is_ok();
+    }
+
+    /// Compares the resolved folder, so a link and its target count as one folder.
+    fn checked(&mut self, resolved: Option<PathBuf>) {
+        self.checking = false;
+        // A newer report makes this result stale.
+        if let Some(path) = self.pending.take() {
+            self.check(path);
+            return;
+        }
+        let Some(path) = resolved else {
+            return;
+        };
+        if self.cwd.as_ref() == Some(&path) {
+            return;
+        }
+        self.cwd = Some(path.clone());
+        self.update_status(|status| status.cwd = Some(path.clone()));
+        for client in &self.clients {
+            let _ = client.tx.try_send(ClientEvent::Cwd(path.clone()));
         }
     }
 
@@ -468,6 +551,9 @@ impl Actor {
                 if tx.try_send(ClientEvent::Snapshot(snapshot)).is_ok() {
                     if let Some(title) = self.screen.title() {
                         let _ = tx.try_send(ClientEvent::Title(title.to_string()));
+                    }
+                    if let Some(cwd) = &self.cwd {
+                        let _ = tx.try_send(ClientEvent::Cwd(cwd.clone()));
                     }
                     match self.announced {
                         Some(exit) => {
@@ -581,5 +667,32 @@ impl From<Exit> for ClientEvent {
             clean: exit.clean,
             signal: exit.signal,
         }
+    }
+}
+
+/// The folder with every link resolved, or None if it is not a folder. Blocks.
+pub(crate) fn resolve_dir(path: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    if !real.is_dir() {
+        return None;
+    }
+    Some(without_verbatim(real))
+}
+
+/// Drops the `\\?\` that `canonicalize` puts in front of a Windows path, so the client sees
+/// `C:\Users\x`.
+fn without_verbatim(path: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return path;
+    }
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
     }
 }

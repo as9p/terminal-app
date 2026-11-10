@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,7 +10,9 @@ use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system,
 };
 
+use crate::claudecfg;
 use crate::session::{Kind, SpawnSpec};
+use crate::shellinit::{self, set_env};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
@@ -88,25 +91,30 @@ pub fn prepare_for_fork() {
 #[cfg(not(target_os = "macos"))]
 pub fn prepare_for_fork() {}
 
-pub(crate) fn spawn(spec: &SpawnSpec, size: Size, env: Vec<(String, String)>) -> Result<Pty> {
+pub(crate) fn spawn(spec: &SpawnSpec, size: Size, mut env: Vec<(String, String)>) -> Result<Pty> {
     prepare_for_fork();
     let pair = open_pty(size)?;
     let reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
 
+    set_env(&mut env, "TA_SESSION", spec.uuid.to_string());
+    let data_dir = spec.data_dir.to_string_lossy().into_owned();
+    set_env(&mut env, "TA_DATA", data_dir);
     let mut command = CommandBuilder::new_default_prog();
     command.env_clear();
-    for (key, value) in env {
+    for (key, value) in &env {
         command.env(key, value);
     }
     command.cwd(&spec.cwd);
     // get_shell reads SHELL or COMSPEC from the environment set above, and on Unix
     // falls back to the account's shell when a bare environment has no SHELL.
     let shell = command.get_shell();
-    *command.get_argv_mut() = argv(&spec.kind, &shell, cfg!(windows))
-        .into_iter()
-        .map(OsString::from)
-        .collect();
+    *command.get_argv_mut() = argv(&spec.kind, &shell, cfg!(windows), &spec.data_dir, &mut env);
+    // Set again, since loading the hook can add to it.
+    command.env_clear();
+    for (key, value) in env {
+        command.env(key, value);
+    }
 
     let child = pair.slave.spawn_command(command)?;
     let killer = child.clone_killer();
@@ -122,27 +130,64 @@ pub(crate) fn spawn(spec: &SpawnSpec, size: Size, env: Vec<(String, String)>) ->
     })
 }
 
-fn argv(kind: &Kind, shell: &str, windows: bool) -> Vec<String> {
+fn argv(
+    kind: &Kind,
+    shell: &str,
+    windows: bool,
+    data_dir: &Path,
+    env: &mut Vec<(String, String)>,
+) -> Vec<OsString> {
     let (flag, id) = match kind {
-        Kind::Shell if windows => return vec![shell.to_string()],
-        Kind::Shell => return vec![shell.to_string(), "-l".to_string()],
+        Kind::Shell => return shellinit::wrap_for(Path::new(shell), data_dir, env, windows),
         Kind::Claude { chat, resume: true } => ("--resume", chat),
         Kind::Claude {
             chat,
             resume: false,
         } => ("--session-id", chat),
     };
+    let added = claude_flags(data_dir);
     if windows {
-        ["cmd", "/c", "claude", flag, &id.to_string()]
-            .map(String::from)
-            .to_vec()
+        let mut argv: Vec<OsString> = ["cmd", "/c", "claude"].map(OsString::from).to_vec();
+        argv.extend(added.into_iter().map(OsString::from));
+        argv.extend([OsString::from(flag), OsString::from(id.to_string())]);
+        argv
     } else {
+        let mut line = "exec claude".to_string();
+        for arg in &added {
+            line.push(' ');
+            line.push_str(&sh_quote(arg));
+        }
         vec![
-            shell.to_string(),
-            "-lic".to_string(),
-            format!("exec claude {flag} {id}"),
+            shell.into(),
+            "-lic".into(),
+            format!("{line} {flag} {id}").into(),
         ]
     }
+}
+
+/// What the app puts before a Claude tab's own arguments, the same as the shell hook's
+/// `claude` adds: the hooks file, then each line of the flags file. Read at each start, so a
+/// changed setting applies to the next tab. A missing file adds nothing.
+fn claude_flags(data_dir: &Path) -> Vec<String> {
+    let mut added = Vec::new();
+    let hooks = data_dir.join(claudecfg::FILE);
+    if hooks.is_file() {
+        added.push("--settings".to_string());
+        added.push(hooks.to_string_lossy().into_owned());
+    }
+    if let Ok(text) = std::fs::read_to_string(data_dir.join(claudecfg::ARGS_FILE)) {
+        added.extend(
+            text.lines()
+                .filter(|line| !line.is_empty())
+                .map(String::from),
+        );
+    }
+    added
+}
+
+/// Single quotes, inside which a Unix shell expands nothing.
+fn sh_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
 /// Blocks until the program ends.
@@ -246,6 +291,12 @@ mod tests {
         Kind::Claude { chat: CHAT, resume }
     }
 
+    /// With no hook files in the data folder, as stage 1 had.
+    fn argv(kind: &Kind, shell: &str, windows: bool) -> Vec<OsString> {
+        let no_hook = std::env::temp_dir().join("term-host-no-hook");
+        super::argv(kind, shell, windows, &no_hook, &mut Vec::new())
+    }
+
     #[test]
     fn only_the_kernel_race_counts_as_an_open_race() {
         let race = std::io::Error::from_raw_os_error(-6);
@@ -291,6 +342,45 @@ mod tests {
         assert_eq!(
             argv(&claude(true), "cmd.exe", true),
             ["cmd", "/c", "claude", "--resume", CHAT_TEXT]
+        );
+    }
+
+    #[test]
+    fn claude_argv_adds_settings_and_flags() {
+        let data = std::env::temp_dir().join(format!("term-host-flags-{}", std::process::id()));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("claude-hooks.json"), "{}").unwrap();
+        std::fs::write(data.join("claude-args"), "--model\nit's\n").unwrap();
+        let hooks = data
+            .join("claude-hooks.json")
+            .to_string_lossy()
+            .into_owned();
+        let windows = super::argv(&claude(false), "cmd.exe", true, &data, &mut Vec::new());
+        let unix = super::argv(&claude(true), "/bin/zsh", false, &data, &mut Vec::new());
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(
+            windows,
+            [
+                "cmd",
+                "/c",
+                "claude",
+                "--settings",
+                &hooks,
+                "--model",
+                "it's",
+                "--session-id",
+                CHAT_TEXT
+            ]
+        );
+        assert_eq!(
+            unix,
+            [
+                "/bin/zsh",
+                "-lic",
+                &format!(
+                    "exec claude '--settings' '{hooks}' '--model' 'it'\\''s' --resume {CHAT_TEXT}"
+                )
+            ]
         );
     }
 
