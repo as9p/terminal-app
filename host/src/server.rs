@@ -12,9 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::spawn_blocking;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_tungstenite::tungstenite::Message;
@@ -51,7 +51,7 @@ const STATE_TICK: Duration = Duration::from_millis(250);
 const RESTORE_SIZE: Size = Size { cols: 80, rows: 24 };
 
 type Ws = WebSocketStream<TcpStream>;
-type Out = UnboundedSender<Message>;
+type Out = UnboundedSender<Outgoing>;
 /// `Err` is an error frame to send back, which reads better with `?` than building a reply.
 type Answer = Result<Option<HostFrame>, HostFrame>;
 
@@ -213,18 +213,11 @@ fn judge_hello(first: Option<Message>, token: &str) -> Hello {
 }
 
 async fn serve_sessions(ws: Ws, registry: Arc<Registry>) {
-    let (mut sink, mut stream) = ws.split();
+    let (sink, mut stream) = ws.split();
     // Unbounded because unacked bytes are what bound it: a socket that stops reading costs
     // at most the flood limit per session, since no acks arrive.
-    let (out, mut outgoing) = unbounded_channel();
-    let writer = tokio::spawn(async move {
-        while let Some(message) = outgoing.recv().await {
-            if sink.send(message).await.is_err() {
-                return;
-            }
-        }
-        let _ = sink.close().await;
-    });
+    let (out, outgoing) = unbounded_channel();
+    let writer = tokio::spawn(write_out(outgoing, sink));
     let stop_writer = writer.abort_handle();
 
     let mut connection = Connection {
@@ -550,12 +543,12 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
                     snapshot_bytes,
                 };
                 hand_text(&out, &attached);
-                hand_binary(&out, session, &bytes);
+                hand_snapshot(&out, session, &bytes);
             }
             Ok(ClientEvent::Output(bytes)) => {
                 let (merged, next) = merge_waiting(bytes, || events.try_recv().ok());
                 pending = next;
-                hand_binary(&out, session, &merged);
+                hand_output(&out, session, &merged);
             }
             Ok(ClientEvent::Title(title)) => {
                 hand_text(&out, &HostFrame::Title { session, title });
@@ -612,6 +605,89 @@ fn merge_waiting(
                     .extend_from_slice(&chunk);
             }
             other => return (merged.map_or(first, BytesMut::freeze), other),
+        }
+    }
+}
+
+/// What goes to a connection's writer task. Output is kept apart from frames that are
+/// already built, so the writer merges a session's output and nothing else.
+#[derive(Debug)]
+enum Outgoing {
+    /// Sent as it is: text frames and snapshots.
+    Frame(Message),
+    /// A session's output, already encoded as a binary frame.
+    Output { session: u32, frame: Bytes },
+}
+
+impl Outgoing {
+    fn output(session: u32, bytes: &[u8]) -> Outgoing {
+        let frame = Bytes::from(encode_binary(session, bytes));
+        Outgoing::Output { session, frame }
+    }
+}
+
+/// Takes a connection's outgoing frames to its socket until every sender is gone, then closes
+/// it. Output that piled up while the socket was busy goes out merged, so a slow client pays
+/// per `MERGED_OUTPUT_BYTES` rather than per terminal read. Flushes after every frame.
+async fn write_out<S: Sink<Message> + Unpin>(
+    mut outgoing: UnboundedReceiver<Outgoing>,
+    mut sink: S,
+) {
+    // A frame that was waiting but could not join merged output. It goes next.
+    let mut held = None;
+    loop {
+        let first = match held.take() {
+            Some(first) => first,
+            None => match outgoing.recv().await {
+                Some(first) => first,
+                None => break,
+            },
+        };
+        let (message, next) = merge_outgoing(first, || outgoing.try_recv().ok());
+        held = next;
+        if sink.send(message).await.is_err() {
+            return;
+        }
+    }
+    let _ = sink.close().await;
+}
+
+/// Adds the same session's output already waiting behind `first` to it, up to
+/// `MERGED_OUTPUT_BYTES` of payload. `next` must only take what is already there, never wait,
+/// so a lone frame such as a key's echo goes out at once and without a copy. Returns the
+/// first waiting frame that could not join, which must be sent next. Acks count payload
+/// bytes, not frames, so merging leaves them as they were.
+fn merge_outgoing(
+    first: Outgoing,
+    mut next: impl FnMut() -> Option<Outgoing>,
+) -> (Message, Option<Outgoing>) {
+    let (session, first) = match first {
+        Outgoing::Frame(message) => return (message, None),
+        Outgoing::Output { session, frame } => (session, frame),
+    };
+    // The session number that starts every binary frame.
+    let header = mem::size_of::<u32>();
+    let mut merged: Option<BytesMut> = None;
+    let mut len = first.len() - header;
+    loop {
+        match next() {
+            Some(Outgoing::Output {
+                session: from,
+                frame,
+            }) if from == session && len + frame.len() - header <= MERGED_OUTPUT_BYTES => {
+                len += frame.len() - header;
+                merged
+                    .get_or_insert_with(|| {
+                        let mut merged = BytesMut::with_capacity(header + MERGED_OUTPUT_BYTES);
+                        merged.extend_from_slice(&first);
+                        merged
+                    })
+                    .extend_from_slice(&frame[header..]);
+            }
+            other => {
+                let frame = merged.map_or(first, BytesMut::freeze);
+                return (Message::Binary(frame), other);
+            }
         }
     }
 }
@@ -1438,12 +1514,19 @@ fn no_session() -> HostFrame {
 // The writer task only goes away with the connection, when nobody is left to tell.
 fn hand_text(out: &Out, frame: &HostFrame) {
     if let Ok(text) = serde_json::to_string(frame) {
-        let _ = out.send(Message::text(text));
+        let _ = out.send(Outgoing::Frame(Message::text(text)));
     }
 }
 
-fn hand_binary(out: &Out, session: u32, bytes: &[u8]) {
-    let _ = out.send(Message::binary(encode_binary(session, bytes)));
+fn hand_output(out: &Out, session: u32, bytes: &[u8]) {
+    let _ = out.send(Outgoing::output(session, bytes));
+}
+
+/// Never merged with output, since the client takes it whole as the screen.
+fn hand_snapshot(out: &Out, session: u32, bytes: &[u8]) {
+    let _ = out.send(Outgoing::Frame(Message::binary(encode_binary(
+        session, bytes,
+    ))));
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1591,5 +1674,178 @@ mod tests {
         let snapshot = ClientEvent::Snapshot(Bytes::from_static(b"screen"));
         let handed = pump(vec![snapshot.clone(), output("a"), output("b")]);
         assert_eq!(handed, vec![snapshot, output("ab")]);
+    }
+
+    fn queued_output(session: u32, bytes: &[u8]) -> Outgoing {
+        Outgoing::output(session, bytes)
+    }
+
+    fn queued_text(text: &str) -> Outgoing {
+        Outgoing::Frame(Message::text(text))
+    }
+
+    fn queued_snapshot(session: u32, bytes: &[u8]) -> Outgoing {
+        Outgoing::Frame(Message::binary(encode_binary(session, bytes)))
+    }
+
+    fn binary(session: u32, bytes: &[u8]) -> Message {
+        Message::binary(encode_binary(session, bytes))
+    }
+
+    /// What the socket is sent for `queued`, everything already waiting when the writer
+    /// starts and the channel closed behind it.
+    async fn written(queued: Vec<Outgoing>) -> Vec<Message> {
+        let (out, outgoing) = unbounded_channel();
+        for message in queued {
+            out.send(message).expect("queue a message");
+        }
+        drop(out);
+        let mut sent = Vec::new();
+        let sink = futures_util::sink::unfold(&mut sent, |sent, message| async move {
+            sent.push(message);
+            Ok::<_, std::convert::Infallible>(sent)
+        });
+        write_out(outgoing, std::pin::pin!(sink)).await;
+        sent
+    }
+
+    #[test]
+    fn lone_output_goes_to_the_socket_as_it_is() {
+        let lone = queued_output(3, b"a");
+        let Outgoing::Output { frame, .. } = &lone else {
+            panic!("expected output");
+        };
+        let at = frame.as_ptr();
+        let mut asked = 0;
+        let (message, next) = merge_outgoing(lone, || {
+            asked += 1;
+            None
+        });
+        assert_eq!(message, binary(3, b"a"));
+        let Message::Binary(sent) = &message else {
+            panic!("expected a binary frame");
+        };
+        assert_eq!(sent.as_ptr(), at, "a lone frame is not copied");
+        assert!(next.is_none());
+        assert_eq!(asked, 1, "only one look at the queue, never a wait");
+    }
+
+    #[tokio::test]
+    async fn waiting_output_goes_to_the_socket_as_one_frame_in_order() {
+        let sent = written(vec![
+            queued_output(1, b"one "),
+            queued_output(1, b"two "),
+            queued_output(1, b"three"),
+        ])
+        .await;
+        assert_eq!(sent, vec![binary(1, b"one two three")]);
+    }
+
+    #[tokio::test]
+    async fn socket_frame_may_hold_exactly_the_cap() {
+        let first = vec![b'x'; MERGED_OUTPUT_BYTES - 1];
+        let sent = written(vec![queued_output(1, &first), queued_output(1, b"y")]).await;
+        let mut whole = first;
+        whole.push(b'y');
+        assert_eq!(sent, vec![binary(1, &whole)]);
+    }
+
+    #[tokio::test]
+    async fn output_one_byte_over_the_cap_goes_in_the_next_socket_frame() {
+        let first = vec![b'x'; MERGED_OUTPUT_BYTES - 1];
+        let sent = written(vec![
+            queued_output(1, &first),
+            queued_output(1, b"ab"),
+            queued_output(1, b"c"),
+        ])
+        .await;
+        assert_eq!(sent, vec![binary(1, &first), binary(1, b"abc")]);
+    }
+
+    #[tokio::test]
+    async fn text_between_outputs_keeps_its_place_on_the_socket() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_output(1, b"b"),
+            queued_text("title"),
+            queued_output(1, b"c"),
+            queued_text("cwd"),
+            queued_text("exited"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![
+                binary(1, b"ab"),
+                Message::text("title"),
+                binary(1, b"c"),
+                Message::text("cwd"),
+                Message::text("exited"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_never_share_a_socket_frame() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_output(2, b"b"),
+            queued_output(2, b"c"),
+            queued_output(1, b"d"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![binary(1, b"a"), binary(2, b"bc"), binary(1, b"d")]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_never_joins_a_socket_frame() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_snapshot(1, b"screen"),
+            queued_output(1, b"b"),
+            queued_output(1, b"c"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![binary(1, b"a"), binary(1, b"screen"), binary(1, b"bc")]
+        );
+    }
+
+    #[tokio::test]
+    async fn burst_goes_to_the_socket_whole_within_the_cap() {
+        let input: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let queued = input
+            .chunks(1013)
+            .map(|chunk| queued_output(5, chunk))
+            .collect::<Vec<_>>();
+        let chunks = queued.len();
+        let sent = written(queued).await;
+        let payloads: Vec<&[u8]> = sent
+            .iter()
+            .map(|message| match message {
+                Message::Binary(frame) => {
+                    let (session, bytes) = decode_binary(frame).expect("a session number");
+                    assert_eq!(session, 5);
+                    bytes
+                }
+                other => panic!("expected output, got {other:?}"),
+            })
+            .collect();
+        assert!(
+            payloads
+                .iter()
+                .all(|bytes| bytes.len() <= MERGED_OUTPUT_BYTES),
+            "a frame went over {MERGED_OUTPUT_BYTES} bytes"
+        );
+        assert_eq!(payloads.concat(), input);
+        assert!(
+            payloads.len() < chunks / 10,
+            "{} frames for {chunks} chunks",
+            payloads.len()
+        );
     }
 }

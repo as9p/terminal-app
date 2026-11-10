@@ -1020,8 +1020,97 @@ mod sessions {
         );
     }
 
+    /// How much the app lets go unacked before it acks, from `client/src/terminal.ts`.
+    const ACK_BYTES: usize = 128 * 1024;
+
+    /// Reads like the app when each message costs it something: about 1 ms per frame, then
+    /// an ack of the running total once `ACK_BYTES` are unacked, snapshot included.
+    #[derive(Default)]
+    struct SlowClient {
+        taken: HashMap<u32, usize>,
+        acked: HashMap<u32, usize>,
+        seen: HashMap<u32, Vec<u8>>,
+        /// Each output frame's session and payload length, in the order they arrived.
+        frames: Vec<(u32, usize)>,
+    }
+
+    impl SlowClient {
+        fn attached(&mut self, session: u32, snapshot: &[u8]) {
+            self.taken.insert(session, snapshot.len());
+        }
+
+        fn printed(&self, session: u32, needle: &str) -> bool {
+            self.seen
+                .get(&session)
+                .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains(needle))
+        }
+
+        async fn read_until(&mut self, ws: &mut Ws, done: impl Fn(&SlowClient) -> bool) {
+            while !done(self) {
+                match hear_any(ws, PATIENCE).await {
+                    Some(Heard::Bytes(session, bytes)) => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        self.frames.push((session, bytes.len()));
+                        let taken = self.taken.entry(session).or_default();
+                        *taken += bytes.len();
+                        let taken = *taken;
+                        let acked = self.acked.entry(session).or_default();
+                        if taken - *acked >= ACK_BYTES {
+                            *acked = taken;
+                            ack(ws, session, taken).await;
+                        }
+                        self.seen.entry(session).or_default().extend(bytes);
+                    }
+                    Some(Heard::Text(_)) => {}
+                    None => panic!("the output stopped at {:?}", self.taken),
+                }
+            }
+        }
+
+        fn assert_frames_within_the_cap(&self) {
+            for &(session, len) in &self.frames {
+                assert!(
+                    len <= LARGEST_CHUNK,
+                    "session {session} got a frame of {len} bytes"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn two_sessions_never_share_a_frame() {
+    async fn slow_client_gets_output_whole_in_large_frames() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut client = SlowClient::default();
+        let snapshot = attach(&mut ws, session).await;
+        client.attached(session, &snapshot);
+        // More than the flood limit, so acks have to keep it going.
+        type_line(&mut ws, session, "seq 1 600000; echo END$((1+1))").await;
+        client
+            .read_until(&mut ws, |client| client.printed(session, "END2"))
+            .await;
+
+        let bytes = client.seen[&session].len();
+        assert!(bytes > FLOOD_LIMIT, "only {bytes} bytes");
+        assert!(
+            without_returns(&client.seen[&session]).contains(&seq_lines("", 1, 600000)),
+            "the lines arrived out of order or with gaps"
+        );
+        client.assert_frames_within_the_cap();
+        // One frame per terminal read averages about 1000 bytes here. The socket's own buffers
+        // take most of a backlog before the writer has to wait, so merging only fires once
+        // they are full: about 1600 bytes a frame on macOS.
+        let frames = client.frames.len();
+        assert!(
+            bytes / frames > 1100,
+            "{frames} frames for {bytes} bytes, {} bytes a frame",
+            bytes / frames
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sessions_on_one_connection_never_share_a_frame() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let first = create(&mut ws).await;
@@ -1033,33 +1122,42 @@ mod sessions {
         let reply = hear_text(&mut ws).await;
         assert_eq!(reply["type"], "created", "{reply}");
         let second = reply["session"].as_u64().expect("a session number") as u32;
-        attach(&mut ws, first).await;
-        attach(&mut ws, second).await;
+        let mut client = SlowClient::default();
+        let snapshot = attach(&mut ws, first).await;
+        client.attached(first, &snapshot);
+        let snapshot = attach(&mut ws, second).await;
+        client.attached(second, &snapshot);
 
-        type_line(&mut ws, first, "seq -f 'a%g' 1 30000; echo AEND$((1+1))").await;
-        type_line(&mut ws, second, "seq -f 'b%g' 1 30000; echo BEND$((1+1))").await;
-        let mut seen: HashMap<u32, Vec<u8>> = HashMap::new();
-        let done = |seen: &HashMap<u32, Vec<u8>>, session, needle| {
-            seen.get(&session)
-                .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains(needle))
-        };
-        while !(done(&seen, first, "AEND2") && done(&seen, second, "BEND2")) {
-            match hear_any(&mut ws, PATIENCE).await {
-                Some(Heard::Bytes(from, bytes)) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    let other = if from == first { "\nb" } else { "\na" };
-                    assert!(
-                        !text.contains(other),
-                        "session {from} got a frame with {text:?}"
-                    );
-                    seen.entry(from).or_default().extend(bytes);
-                }
-                Some(Heard::Text(_)) => {}
-                None => panic!("the output stopped"),
-            }
-        }
-        assert!(without_returns(&seen[&first]).contains(&seq_lines("a", 1, 30000)));
-        assert!(without_returns(&seen[&second]).contains(&seq_lines("b", 1, 30000)));
+        // Neither typed line has the other session's letter in it, nor does the prompt.
+        type_line(&mut ws, first, "seq -f 'a%g' 1 300000; echo AEND$((1+1))").await;
+        type_line(&mut ws, second, "seq -f 'b%g' 1 300000; echo BEND$((1+1))").await;
+        client
+            .read_until(&mut ws, |client| {
+                client.printed(first, "AEND2") && client.printed(second, "BEND2")
+            })
+            .await;
+
+        assert!(
+            !client.seen[&first].contains(&b'b'),
+            "a frame mixed sessions"
+        );
+        assert!(
+            !client.seen[&second].contains(&b'a'),
+            "a frame mixed sessions"
+        );
+        assert!(without_returns(&client.seen[&first]).contains(&seq_lines("a", 1, 300000)));
+        assert!(without_returns(&client.seen[&second]).contains(&seq_lines("b", 1, 300000)));
+        client.assert_frames_within_the_cap();
+        // Otherwise the writer was never offered two sessions' output at once.
+        let switches = client
+            .frames
+            .windows(2)
+            .filter(|pair| pair[0].0 != pair[1].0)
+            .count();
+        assert!(
+            switches >= 4,
+            "the sessions took turns only {switches} times"
+        );
     }
 
     #[tokio::test]
