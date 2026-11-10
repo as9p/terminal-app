@@ -118,6 +118,18 @@ describe("panes", () => {
     root.remove();
   });
 
+  it("focus_taken_by_hand_drops_a_focus_waiting_for_an_unbuilt_pane", () => {
+    const { root, panes, views, focusIn } = mount();
+    panes.show(tab("t", row("a", "b")));
+    // "c" has no view yet, so the focus waits for the show that builds it.
+    panes.focusSession("c");
+    focusIn("a");
+    panes.show(tab("t", row("a", "b", "c")));
+    expect(views.get("c")?.focus).not.toHaveBeenCalled();
+    expect(panes.focusedSession()).toBe("a");
+    root.remove();
+  });
+
   it("pointing_at_a_pane_does_not_take_focus_while_a_rename_is_open", () => {
     const { root, panes, views, boxes } = mount();
     panes.setFocusFollowsMouse(true);

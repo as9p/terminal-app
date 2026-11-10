@@ -464,6 +464,8 @@ export class Panes {
       element.className = "pane";
       element.addEventListener("focusin", () => {
         if (!this.tab) return;
+        // Focus taken by hand wins over a focus still waiting for a pane that is not built yet.
+        if (this.pendingFocus !== session) this.pendingFocus = undefined;
         this.focused.set(this.tab.id, session);
         this.updateDim();
         this.onFocus();
