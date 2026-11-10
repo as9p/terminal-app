@@ -66,6 +66,24 @@ describe("panes", () => {
     root.remove();
   });
 
+  it("closing_the_focused_pane_of_a_background_tab_remembers_its_neighbor", () => {
+    const { root, panes, focusIn, views } = mount();
+    // As main.ts does on each tree: the current tab is shown, then every tab is passed to prune.
+    panes.show(tab("t1", row("a", "b", "c")));
+    panes.prune(new Set(["a", "b", "c", "d"]), [tab("t1", row("a", "b", "c")), tab("t2", leaf("d"))]);
+    focusIn("c");
+    panes.show(tab("t2", leaf("d")));
+    panes.prune(new Set(["a", "b", "c", "d"]), [tab("t1", row("a", "b", "c")), tab("t2", leaf("d"))]);
+    // "c" closes while t1 is in the background.
+    panes.prune(new Set(["a", "b", "d"]), [tab("t1", row("a", "b")), tab("t2", leaf("d"))]);
+    // Nothing on screen moved.
+    expect(views.get("b")?.focus).not.toHaveBeenCalled();
+    expect(panes.focusedSession()).toBe("d");
+    panes.show(tab("t1", row("a", "b")));
+    expect(panes.focusedSession()).toBe("b");
+    root.remove();
+  });
+
   it("leaving_fill_brings_the_split_back_so_a_new_pane_is_built", () => {
     const { root, panes, views } = mount();
     panes.show(tab("t", row("a", "b")));

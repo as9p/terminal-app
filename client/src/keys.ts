@@ -259,6 +259,8 @@ async function openShell(ctx: ActionContext, dir?: Dir): Promise<void> {
     (tab) => holds(tab, uuid),
     (tab) => {
       selectTab(ctx, tab.id);
+      // A pane filling the tab would hide the new one. Left only now, so a failed open keeps it.
+      if (dir) ctx.panes.leaveFill();
       ctx.panes.focusSession(uuid);
     },
   );
@@ -368,13 +370,11 @@ export function runAction(a: Action, ctx: ActionContext): void {
     case "newTab":
       void openShell(ctx);
       return;
-    // A pane filling the tab would hide the new one, so the split comes back first.
+    // Fill mode is left once the new pane arrives (openShell).
     case "splitRight":
-      ctx.panes.leaveFill();
       void openShell(ctx, "right");
       return;
     case "splitDown":
-      ctx.panes.leaveFill();
       void openShell(ctx, "down");
       return;
     case "closePane":

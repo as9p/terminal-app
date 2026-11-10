@@ -177,13 +177,52 @@ describe("keys", () => {
     expect(store.current).toBe("b1");
   });
 
-  it("split_while_one_pane_fills_the_tab_leaves_fill_first", () => {
+  it("split_leaves_fill_when_the_new_pane_arrives_and_before_focusing_it", async () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    store.select("a");
+    const ctx = context(store);
+    ctx.panes.focusedSession = () => "s-a";
+    const order: string[] = [];
+    vi.mocked(ctx.panes.leaveFill).mockImplementation(() => order.push("leaveFill"));
+    vi.mocked(ctx.panes.focusSession).mockImplementation((session: string) => order.push(`focus ${session}`));
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("0-0-0-0-new");
+    runAction("splitRight", ctx);
+    await vi.waitFor(() => expect(ctx.connection.create).toHaveBeenCalled());
+    // Still filled until the split is real.
+    expect(ctx.panes.leaveFill).not.toHaveBeenCalled();
+    const split: Split = { type: "row", children: [leaf("s-a"), leaf("0-0-0-0-new")], sizes: [1, 1] };
+    store.setTree(tree([], [{ ...tab("a"), split }]));
+    expect(order).toEqual(["leaveFill", "focus 0-0-0-0-new"]);
+    uuid.mockRestore();
+  });
+
+  it("split_that_fails_to_open_keeps_fill", async () => {
     const store = new Store();
     store.setTree(tree([], [tab("a")]));
     const ctx = context(store);
+    ctx.panes.focusedSession = () => "s-a";
+    ctx.connection.create = vi.fn(async () => {
+      throw new Error("no host");
+    });
     runAction("splitRight", ctx);
     runAction("splitDown", ctx);
-    expect(ctx.panes.leaveFill).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(ctx.ui.note).toHaveBeenCalledTimes(2));
+    expect(ctx.panes.leaveFill).not.toHaveBeenCalled();
+  });
+
+  it("new_tab_does_not_leave_fill", async () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    const ctx = context(store);
+    ctx.panes.focusedSession = () => "s-a";
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue("0-0-0-0-tab");
+    runAction("newTab", ctx);
+    await vi.waitFor(() => expect(ctx.connection.create).toHaveBeenCalled());
+    store.setTree(tree([], [tab("a"), { ...tab("n"), split: leaf("0-0-0-0-tab") }]));
+    expect(ctx.panes.focusSession).toHaveBeenCalledWith("0-0-0-0-tab");
+    expect(ctx.panes.leaveFill).not.toHaveBeenCalled();
+    uuid.mockRestore();
   });
 });
 

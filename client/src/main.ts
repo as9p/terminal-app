@@ -277,7 +277,7 @@ async function main(): Promise<void> {
 
   store.subscribe(() => {
     panes.show(store.currentTab());
-    panes.prune(sessionsIn(store.tree));
+    panes.prune(sessionsIn(store.tree), allTabs(store.tree));
     if (store.current !== null) rememberTab(store.current);
     sidebar.render();
     sendSeen();

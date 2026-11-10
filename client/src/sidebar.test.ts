@@ -231,6 +231,30 @@ describe("sidebar", () => {
     element.querySelector("input.rename")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   });
 
+  it("after_a_rename_the_pane_row_under_the_pointer_takes_focus_again", () => {
+    const split: Split = {
+      type: "row",
+      children: [{ type: "leaf", session: "p1" }, { type: "leaf", session: "p2" }],
+      sizes: [1, 1],
+    };
+    const hoverPane = vi.fn();
+    const { element, sidebar } = mount(tree([], [tab("t", null, split)]), { hoverPane });
+    const paneRow = (session: string) => element.querySelector(`.pane-row[data-session="${session}"]`);
+    sidebar.renameCurrent();
+    paneRow("p2")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    paneRow("p2")?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(hoverPane).not.toHaveBeenCalled();
+    element.querySelector("input.rename")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(hoverPane).not.toHaveBeenCalled();
+    // The pointer has not left the row, so no mouseover comes; the next move over it is enough.
+    paneRow("p2")?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(hoverPane).toHaveBeenCalledTimes(1);
+    expect(hoverPane).toHaveBeenCalledWith("t", "p2");
+    // Later moves inside the same row change nothing.
+    paneRow("p2")?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(hoverPane).toHaveBeenCalledTimes(1);
+  });
+
   describe("row drag", () => {
     function dragSetup() {
       const op = vi.fn();

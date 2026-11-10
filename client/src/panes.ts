@@ -70,6 +70,9 @@ export class Panes {
   private layout: HTMLElement | undefined;
   // The pane typing last went to, per tab, so coming back to a tab lands in the same pane.
   private readonly focused = new Map<string, string>();
+  // Each tab's split as of the last prune, so a pane closing in a background tab can hand its
+  // remembered focus to its neighbour too.
+  private splits = new Map<string, Split>();
   // One pane filling its tab (Cmd+Shift+Enter), client only.
   private filled: { tab: string; session: string } | undefined;
   private followMouse = false;
@@ -256,13 +259,27 @@ export class Panes {
     return [...this.entries.keys()];
   }
 
-  /** Ends the views of sessions that are no longer in any tab. */
-  prune(alive: Set<string>): void {
+  /**
+   * Ends the views of sessions that are no longer in any tab. With `tabs`, every tab of the tree,
+   * a background tab that lost its focused pane remembers the neighbour instead. Only the
+   * remembered pane changes: no real focus moves and nothing on screen is touched.
+   */
+  prune(alive: Set<string>, tabs?: Tab[]): void {
     for (const [session, entry] of this.entries) {
       if (alive.has(session)) continue;
       entry.view?.dispose();
       entry.element.remove();
       this.entries.delete(session);
+    }
+    if (tabs) {
+      const splits = new Map<string, Split>();
+      for (const tab of tabs) {
+        const before = this.splits.get(tab.id);
+        // The tab on screen was handled by show().
+        if (before && before !== tab.split && tab.id !== this.tab?.id) this.keepFocusNear(tab.id, before, tab.split);
+        splits.set(tab.id, tab.split);
+      }
+      this.splits = splits;
     }
     for (const [tab, session] of this.focused) {
       if (!alive.has(session)) this.focused.delete(tab);

@@ -519,6 +519,11 @@ export class Sidebar {
 
   private readonly onRenameEnd = (): void => {
     this.renaming = false;
+    // The pointer may still be on a pane row, where no mouseover comes until it leaves: the
+    // next move over the list counts as pointing at the row under it. Once, so moves cost
+    // nothing after that.
+    this.hovered = undefined;
+    if (this.events.hoverPane) this.list.addEventListener("mousemove", this.onMouseOver, { once: true });
     if (!this.renderLater) return;
     this.renderLater = false;
     this.render();
@@ -541,10 +546,14 @@ export class Sidebar {
   private readonly onMouseOver = (event: MouseEvent): void => {
     const target = event.target instanceof Element ? event.target : null;
     const pane = target?.closest<HTMLElement>(".pane-row") ?? undefined;
+    // A rename field keeps typing until Enter, Esc or a click elsewhere. Nothing is recorded, so
+    // the row under the pointer still counts once the field closes.
+    if (renaming()) {
+      this.hovered = undefined;
+      return;
+    }
     if (pane === this.hovered) return;
     this.hovered = pane;
-    // A rename field keeps typing until Enter, Esc or a click elsewhere.
-    if (renaming()) return;
     if (pane?.dataset.tab && pane.dataset.session) this.events.hoverPane?.(pane.dataset.tab, pane.dataset.session);
   };
 
