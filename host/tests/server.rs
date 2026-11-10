@@ -655,6 +655,7 @@ async fn partial_token_file_is_replaced() {
 #[cfg(unix)]
 mod sessions {
     use super::*;
+    use std::collections::HashMap;
     use term_host::protocol::{decode_binary, encode_binary};
 
     const FLOOD_LIMIT: usize = 4 * 1024 * 1024;
@@ -973,6 +974,92 @@ mod sessions {
         ack(&mut silent, session, total).await;
         let target = total + FLOOD_LIMIT;
         read_acking(&mut silent, session, &mut total, target).await;
+    }
+
+    /// The `seq` lines from `from` to `to`, without the terminal's carriage returns.
+    fn seq_lines(prefix: &str, from: u32, to: u32) -> String {
+        (from..=to).map(|i| format!("{prefix}{i}\n")).collect()
+    }
+
+    /// The output as text without carriage returns, since a macOS terminal now and then
+    /// prints a newline as `\r\r\n` when a write crosses its buffer's end.
+    fn without_returns(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).replace('\r', "")
+    }
+
+    #[tokio::test]
+    async fn merged_output_arrives_whole_and_acks_still_count() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut total = attach(&mut ws, session).await.len();
+        // More than the flood limit, so it only gets through if acks of merged frames count.
+        type_line(&mut ws, session, "seq 1 700000; echo END$((1+1))").await;
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("END2") {
+            match hear_any(&mut ws, PATIENCE).await {
+                Some(Heard::Bytes(from, bytes)) => {
+                    assert_eq!(from, session);
+                    assert!(
+                        bytes.len() <= LARGEST_CHUNK,
+                        "a frame of {} bytes",
+                        bytes.len()
+                    );
+                    total += bytes.len();
+                    seen.extend(bytes);
+                    ack(&mut ws, session, total).await;
+                }
+                Some(Heard::Text(_)) => {}
+                None => panic!("the output stopped at {total} bytes"),
+            }
+        }
+        assert!(total > FLOOD_LIMIT, "only {total} bytes");
+        assert!(
+            without_returns(&seen).contains(&seq_lines("", 1, 700000)),
+            "the lines arrived out of order or with gaps"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sessions_never_share_a_frame() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let first = create(&mut ws).await;
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let second = reply["session"].as_u64().expect("a session number") as u32;
+        attach(&mut ws, first).await;
+        attach(&mut ws, second).await;
+
+        type_line(&mut ws, first, "seq -f 'a%g' 1 30000; echo AEND$((1+1))").await;
+        type_line(&mut ws, second, "seq -f 'b%g' 1 30000; echo BEND$((1+1))").await;
+        let mut seen: HashMap<u32, Vec<u8>> = HashMap::new();
+        let done = |seen: &HashMap<u32, Vec<u8>>, session, needle| {
+            seen.get(&session)
+                .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains(needle))
+        };
+        while !(done(&seen, first, "AEND2") && done(&seen, second, "BEND2")) {
+            match hear_any(&mut ws, PATIENCE).await {
+                Some(Heard::Bytes(from, bytes)) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let other = if from == first { "\nb" } else { "\na" };
+                    assert!(
+                        !text.contains(other),
+                        "session {from} got a frame with {text:?}"
+                    );
+                    seen.entry(from).or_default().extend(bytes);
+                }
+                Some(Heard::Text(_)) => {}
+                None => panic!("the output stopped"),
+            }
+        }
+        assert!(without_returns(&seen[&first]).contains(&seq_lines("a", 1, 30000)));
+        assert!(without_returns(&seen[&second]).contains(&seq_lines("b", 1, 30000)));
     }
 
     #[tokio::test]

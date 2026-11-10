@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use bytes::{Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -41,6 +42,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 // A stuck program must not grow the host without limit.
 const MAX_QUEUED_INPUT: usize = 16 * 1024 * 1024;
+// The most output one binary frame carries when waiting chunks are merged.
+const MERGED_OUTPUT_BYTES: usize = 64 * 1024;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 // How often a finished turn is checked for having waited long enough to show as done.
 const STATE_TICK: Duration = Duration::from_millis(250);
@@ -531,8 +534,10 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
         out,
         wanted,
     } = pumped;
+    // An event that was waiting but could not join merged output. It goes next.
+    let mut pending = None;
     loop {
-        let event = events.recv();
+        let event = pending.take().map_or_else(|| events.recv(), Ok);
         let mut wanted = lock(&wanted);
         if !*wanted {
             return;
@@ -547,7 +552,11 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
                 hand_text(&out, &attached);
                 hand_binary(&out, session, &bytes);
             }
-            Ok(ClientEvent::Output(bytes)) => hand_binary(&out, session, &bytes),
+            Ok(ClientEvent::Output(bytes)) => {
+                let (merged, next) = merge_waiting(bytes, || events.try_recv().ok());
+                pending = next;
+                hand_binary(&out, session, &merged);
+            }
             Ok(ClientEvent::Title(title)) => {
                 hand_text(&out, &HostFrame::Title { session, title });
             }
@@ -575,6 +584,34 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
                 hand_text(&out, &HostFrame::Detached { session });
                 return;
             }
+        }
+    }
+}
+
+/// Adds the output already waiting behind `first` to it, so a burst costs the client one frame
+/// per `MERGED_OUTPUT_BYTES` rather than one per terminal read. `next` must only take what is
+/// already there, never wait, so a lone chunk such as a key's echo goes out at once and as it
+/// is. Returns the first waiting event that could not join, which must be handled next.
+/// Acks count bytes, not frames, so merging leaves them as they were.
+fn merge_waiting(
+    first: Bytes,
+    mut next: impl FnMut() -> Option<ClientEvent>,
+) -> (Bytes, Option<ClientEvent>) {
+    let mut merged: Option<BytesMut> = None;
+    let mut len = first.len();
+    loop {
+        match next() {
+            Some(ClientEvent::Output(chunk)) if len + chunk.len() <= MERGED_OUTPUT_BYTES => {
+                len += chunk.len();
+                merged
+                    .get_or_insert_with(|| {
+                        let mut merged = BytesMut::with_capacity(MERGED_OUTPUT_BYTES);
+                        merged.extend_from_slice(&first);
+                        merged
+                    })
+                    .extend_from_slice(&chunk);
+            }
+            other => return (merged.map_or(first, BytesMut::freeze), other),
         }
     }
 }
@@ -1421,4 +1458,138 @@ async fn send_frame(ws: &mut Ws, frame: &HostFrame) -> Result<()> {
 
 async fn close(ws: &mut Ws) {
     let _ = timeout(CLOSE_TIMEOUT, ws.close(None)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn output(text: &str) -> ClientEvent {
+        ClientEvent::Output(Bytes::copy_from_slice(text.as_bytes()))
+    }
+
+    /// What a client is handed for `queued`, everything already waiting, the way
+    /// `pump_events` takes it.
+    fn pump(queued: Vec<ClientEvent>) -> Vec<ClientEvent> {
+        let mut queue = VecDeque::from(queued);
+        let mut handed = Vec::new();
+        let mut pending = None;
+        while let Some(event) = pending.take().or_else(|| queue.pop_front()) {
+            match event {
+                ClientEvent::Output(bytes) => {
+                    let (merged, next) = merge_waiting(bytes, || queue.pop_front());
+                    pending = next;
+                    handed.push(ClientEvent::Output(merged));
+                }
+                other => handed.push(other),
+            }
+        }
+        handed
+    }
+
+    fn payloads(handed: &[ClientEvent]) -> Vec<Vec<u8>> {
+        handed
+            .iter()
+            .map(|event| match event {
+                ClientEvent::Output(bytes) => bytes.to_vec(),
+                other => panic!("expected output, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lone_chunk_goes_out_as_it_is() {
+        let chunk = Bytes::from_static(b"a");
+        let mut asked = 0;
+        let (merged, next) = merge_waiting(chunk.clone(), || {
+            asked += 1;
+            None
+        });
+        assert_eq!(merged, chunk);
+        assert_eq!(
+            merged.as_ptr(),
+            chunk.as_ptr(),
+            "a lone chunk is not copied"
+        );
+        assert_eq!(next, None);
+        assert_eq!(asked, 1, "only one look at the queue, never a wait");
+    }
+
+    #[test]
+    fn queued_chunks_go_out_as_one_frame_in_order() {
+        let handed = pump(vec![output("one "), output("two "), output("three")]);
+        assert_eq!(payloads(&handed), vec![b"one two three".to_vec()]);
+    }
+
+    #[test]
+    fn merged_frame_stays_within_the_cap() {
+        // A macOS terminal read is about 1013 bytes.
+        let input: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let queued = input
+            .chunks(1013)
+            .map(|chunk| ClientEvent::Output(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let chunks = queued.len();
+        let frames = payloads(&pump(queued));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() <= MERGED_OUTPUT_BYTES),
+            "a frame went over {MERGED_OUTPUT_BYTES} bytes"
+        );
+        assert_eq!(frames.concat(), input);
+        assert!(
+            frames.len() < chunks / 10,
+            "{} frames for {chunks} chunks",
+            frames.len()
+        );
+    }
+
+    #[test]
+    fn chunk_that_would_go_over_waits_for_the_next_frame() {
+        let full = "x".repeat(MERGED_OUTPUT_BYTES - 1);
+        let handed = pump(vec![output(&full), output("ab"), output("c")]);
+        assert_eq!(payloads(&handed), vec![full.into_bytes(), b"abc".to_vec()]);
+    }
+
+    #[test]
+    fn other_events_keep_their_place() {
+        let title = ClientEvent::Title("t".to_string());
+        let cwd = ClientEvent::Cwd(PathBuf::from("/tmp"));
+        let exited = ClientEvent::Exited {
+            clean: true,
+            signal: None,
+        };
+        let handed = pump(vec![
+            output("a"),
+            output("b"),
+            title.clone(),
+            output("c"),
+            cwd.clone(),
+            cwd.clone(),
+            output("d"),
+            output("e"),
+            exited.clone(),
+        ]);
+        assert_eq!(
+            handed,
+            vec![
+                output("ab"),
+                title,
+                output("c"),
+                cwd.clone(),
+                cwd,
+                output("de"),
+                exited,
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_is_never_merged() {
+        let snapshot = ClientEvent::Snapshot(Bytes::from_static(b"screen"));
+        let handed = pump(vec![snapshot.clone(), output("a"), output("b")]);
+        assert_eq!(handed, vec![snapshot, output("ab")]);
+    }
 }
