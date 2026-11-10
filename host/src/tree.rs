@@ -1,8 +1,8 @@
 //! The tree the sidebar shows: groups of tabs, each tab a split of panes, and the rules for
 //! where a tab lands and when it moves. Pure: the only outside call is `project::resolve`, made
-//! only by the convenience calls (`add_session`, `on_cwd`, `apply`). The `_in` forms take the
-//! project already resolved, so a caller can look at the disk before it takes a lock. There
-//! is no clock, and the caller carries out the kills and spawns `apply` asks for.
+//! only by the convenience calls (`add_session`, `on_cwd`, `on_first_edit`, `apply`). The `_in`
+//! forms take the project already resolved, so a caller can look at the disk before it takes a
+//! lock. There is no clock, and the caller carries out the kills and spawns `apply` asks for.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -302,6 +302,29 @@ impl Tree {
             }
         }
         changed
+    }
+
+    /// Claude edited a file for the first time in this session. An ungrouped, unpinned tab
+    /// moves to the end of the file's git repo group, creating it. True when the tree changed.
+    pub fn on_first_edit(&mut self, session: &str, file: &Path) -> bool {
+        self.on_first_edit_in(session, &project::resolve(file.parent().unwrap_or(file)))
+    }
+
+    /// `on_first_edit` with the project of the edited file already resolved.
+    pub fn on_first_edit_in(&mut self, session: &str, project: &Project) -> bool {
+        let Some(spot) = self.find_session(session) else {
+            return false;
+        };
+        if spot.group.is_some() || self.tab(spot).pinned || !project.is_git {
+            return false;
+        }
+        let tab = self.ungrouped.remove(spot.index);
+        let index = match self.group_for(project) {
+            Some(index) => index,
+            None => self.create_group(project),
+        };
+        self.groups[index].tabs.push(tab);
+        true
     }
 
     /// Closes a tab and keeps it for `ReopenTab` with `panes`, what its sessions need to come

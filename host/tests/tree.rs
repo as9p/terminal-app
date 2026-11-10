@@ -833,3 +833,76 @@ fn set_sizes_rejects_single_child_node() {
     assert_eq!(lonely, Err(TreeError::BadOp));
     assert_eq!(tree, before);
 }
+
+#[test]
+fn first_edit_moves_ungrouped_tab() {
+    let root = Root::new();
+    let plain = root.plain("plain");
+    let app = root.repo("app");
+    let mut tree = Tree::default();
+    let id = shell(&mut tree, "a", &plain);
+
+    // An edit outside any repo has no group to go to.
+    assert!(!tree.on_first_edit("a", &plain.join("notes.txt")));
+    assert!(tree.groups.is_empty());
+
+    // The file may not exist yet, as with a new file from Write.
+    assert!(tree.on_first_edit("a", &app.join("src").join("new.rs")));
+    assert_eq!(
+        layout(&tree),
+        [
+            ("remote:github.com/owner/app".to_string(), vec![id.clone()]),
+            (String::new(), vec![]),
+        ]
+    );
+    assert_eq!(tree.groups[0].path, app);
+    assert_eq!(tree.groups[0].branch.as_deref(), Some("main"));
+    assert!(!tab(&tree, &id).pinned);
+
+    // An existing group takes it at the end.
+    let other = shell(&mut tree, "b", &plain);
+    let repo = Project {
+        key: "remote:github.com/owner/app".to_string(),
+        root: app.clone(),
+        is_git: true,
+        branch: Some("main".to_string()),
+    };
+    assert!(tree.on_first_edit_in("b", &repo));
+    assert_eq!(tree.groups.len(), 1);
+    assert_eq!(tree.groups[0].tabs[1].id, other);
+    assert!(tree.ungrouped.is_empty());
+}
+
+#[test]
+fn first_edit_leaves_grouped_tab() {
+    let root = Root::new();
+    let app = root.repo("app");
+    let lib = root.repo("lib");
+    let mut tree = Tree::default();
+    shell(&mut tree, "a", &app);
+    let before = tree.clone();
+
+    assert!(!tree.on_first_edit("a", &lib.join("lib.rs")));
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn first_edit_leaves_pinned_tab() {
+    let root = Root::new();
+    let plain = root.plain("plain");
+    let app = root.repo("app");
+    let mut tree = Tree::default();
+    let id = shell(&mut tree, "a", &plain);
+    ok(
+        &mut tree,
+        Op::PinTab {
+            tab: id,
+            pinned: true,
+        },
+    );
+    let before = tree.clone();
+
+    assert!(!tree.on_first_edit("a", &app.join("main.rs")));
+    assert_eq!(tree, before);
+    assert!(!tree.on_first_edit("nobody", &app.join("main.rs")));
+}

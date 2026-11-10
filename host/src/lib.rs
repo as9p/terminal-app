@@ -10,6 +10,7 @@ pub mod server;
 mod session;
 pub mod shellinit;
 pub mod state;
+pub mod states;
 pub mod tree;
 
 pub use env::clean_env;
