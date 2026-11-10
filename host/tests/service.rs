@@ -1,5 +1,9 @@
 //! The host as a launchd service: the plist text, and install, uninstall and status run
 //! against a temp home folder and a fake `launchctl` that records each call and runs nothing.
+//! launchd exists only on macOS (the CLI refuses elsewhere), and these paths and plist texts
+//! are macOS ones: `<` and `>` cannot even appear in a Windows file name.
+
+#![cfg(target_os = "macos")]
 
 use std::fs;
 use std::io;

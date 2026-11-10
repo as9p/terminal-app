@@ -585,11 +585,12 @@ async fn token_file_is_private() {
     };
     assert_eq!(mode(&host.dir.0), 0o700);
     assert_eq!(mode(&host.token_path()), 0o600);
-    // `shell` holds the shell hook, and may not be written yet.
+    // Only the token's own files count: the host writes others here (the shell hook, the
+    // Claude hook config, the ctl socket) in the background, so they may or may not exist yet.
     let names: Vec<_> = std::fs::read_dir(&host.dir.0)
         .expect("list the folder")
         .map(|entry| entry.expect("read an entry").file_name())
-        .filter(|name| name != "shell")
+        .filter(|name| name.to_string_lossy().starts_with("host-token"))
         .collect();
     assert_eq!(names, ["host-token"], "the temp file must not stay behind");
 
