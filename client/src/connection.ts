@@ -21,8 +21,7 @@ export type SessionItem = {
   rows: number;
 };
 
-// The tree of groups and tabs the host keeps, field for field as it sends it. Nothing uses it
-// yet: the sidebar that shows it comes later.
+// The tree of groups and tabs the host keeps, field for field as it sends it.
 
 export type Dir = "right" | "down";
 
@@ -137,6 +136,8 @@ export type ConnectionEvents = {
   onError(code: string, message: string): void;
   /** The shell of a session attached on this connection reported a new folder. */
   onCwd?(session: number, cwd: string): void;
+  /** The whole tree, as the answer to `treeGet` and after every later change to it. */
+  onTree?(tree: Tree): void;
 };
 
 type HostFrame =
@@ -161,6 +162,7 @@ type Waiting = {
 };
 
 const LIST_CODES: readonly string[] = [];
+const TREE_CODES: readonly string[] = [];
 const CREATE_CODES = ["bad_request", "bad_kind", "bad_cwd", "bad_size", "spawn_failed"];
 const ATTACH_CODES = ["no_session", "bad_size"];
 
@@ -257,9 +259,10 @@ export class Connection {
     cwd: string,
     cols: number,
     rows: number,
+    place?: Place,
   ): Promise<number> {
     return this.request(
-      { type: "create", uuid, kind, cwd, cols, rows } satisfies CreateFrame,
+      { type: "create", uuid, kind, cwd, cols, rows, place } satisfies CreateFrame,
       CREATE_CODES,
       (frame) => frame.type === "created" && frame.uuid === uuid,
       (frame, resolve: (session: number) => void) => {
@@ -288,6 +291,23 @@ export class Connection {
         }
       },
     );
+  }
+
+  /** Resolves with the tree, and joins this connection to every later push of it. */
+  treeGet(): Promise<Tree> {
+    return this.request(
+      { type: "tree_get" } satisfies TreeFrame,
+      TREE_CODES,
+      (frame) => frame.type === "tree",
+      (frame, resolve: (tree: Tree) => void) => {
+        if (frame.type === "tree") resolve(frame.tree);
+      },
+    );
+  }
+
+  /** The host answers with a pushed tree, or an `error` frame through `onError`. */
+  treeOp(op: Op): void {
+    this.sendText({ type: "tree_op", op } satisfies TreeFrame);
   }
 
   detach(session: number): void {
@@ -393,6 +413,9 @@ export class Connection {
         break;
       case "cwd":
         this.events.onCwd?.(frame.session, frame.cwd);
+        break;
+      case "tree":
+        this.events.onTree?.(frame.tree);
         break;
       case "exited": {
         const listener = this.listeners.get(frame.session);

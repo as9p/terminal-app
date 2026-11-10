@@ -1,0 +1,436 @@
+/* Every value here comes from docs/ui-review.md. The sidebar is the Mac theme, the default. */
+
+:root {
+  --background: #16141f;
+  --foreground: #cdd6f4;
+  --cursor: #f5e0dc;
+  --line: #45475a;
+  --accent: #89b4fa;
+  --text-strong: #cdd6f4;
+  --text-head: #bac2de;
+  --text-name: #a6adc8;
+  --text-dim: #585b70;
+  --hover: rgba(245, 224, 220, 0.06);
+  --gh-rule: rgba(205, 214, 244, 0.11);
+  --gh-fold: #7c87aa;
+  --mac-sel: rgba(205, 214, 244, 0.16);
+  --mac-hover: rgba(205, 214, 244, 0.06);
+  --mac-hair: rgba(205, 214, 244, 0.08);
+  --mono: "JetBrainsMono Nerd Font Mono", monospace;
+  --sys: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background);
+}
+
+#app {
+  display: flex;
+  height: 100%;
+}
+
+/* Sidebar */
+
+#sidebar {
+  --row-h: 28px;
+  --pad-l: 10px;
+  --pad-r: 16px;
+  --slot: 22px;
+  --sb-font: 13px;
+  --sb-small: 12px;
+  position: relative;
+  flex: none;
+  width: 240px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  /* The window drag strip. */
+  padding-top: 10px;
+  background: rgba(205, 214, 244, 0.034);
+  border-right: 1px solid var(--mac-hair);
+  /* Nothing inside the sidebar can make the terminal area lay out again. */
+  contain: strict;
+  font: normal var(--sb-font) var(--sys);
+  color: var(--text-name);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#sidebar[hidden] {
+  display: none;
+}
+
+#list {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+#list > * {
+  flex: none;
+}
+
+#list > .fill {
+  flex: 1 0 0;
+}
+
+#list::-webkit-scrollbar {
+  width: 6px;
+}
+
+#list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#list::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+/* One hairline above each group, never above the first thing in the list. */
+.group + .group,
+.loose + .group {
+  position: relative;
+  margin-top: 8px;
+  padding-top: 4px;
+}
+
+.group + .group::before,
+.loose + .group::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--gh-rule);
+}
+
+.slot {
+  flex: none;
+  width: var(--slot);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+}
+
+.ghead {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 var(--pad-r) 0 var(--pad-l);
+  cursor: default;
+  user-select: none;
+}
+
+.ghead:hover {
+  background: var(--hover);
+}
+
+.ghead:has(.slot:focus-visible) {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+button.slot {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: default;
+  outline: none;
+}
+
+.gfold {
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  overflow: visible;
+  color: var(--gh-fold);
+}
+
+.ghead:hover .gfold {
+  color: var(--text-strong);
+}
+
+/* The front flap is open while the group is expanded. */
+.gfold .ff {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  transform: skewX(-22deg) scaleY(0.7);
+  transition: transform 180ms var(--ease);
+}
+
+.collapsed .gfold .ff {
+  transform: none;
+}
+
+.gname {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.branch {
+  flex: 0 100000 auto;
+  min-width: 0;
+  margin-left: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gcount {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.roll {
+  flex: none;
+  box-sizing: border-box;
+  width: calc(var(--slot) + 6px);
+  margin-left: 0;
+  padding-left: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row,
+.pane-row {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+}
+
+/* Hover and selected: a rounded rect inset 8 px from both sidebar edges. */
+.row::before,
+.pane-row::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  right: 8px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.row:hover::before,
+.pane-row:hover::before {
+  background: var(--mac-hover);
+}
+
+.row.selected::before {
+  background: var(--mac-sel);
+}
+
+.row {
+  height: var(--row-h);
+  padding: 0 var(--pad-r) 0 var(--pad-l);
+  color: var(--text-name);
+}
+
+.row .body {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  display: flex;
+}
+
+.row .name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row.selected .name {
+  color: var(--text-strong);
+}
+
+.panes {
+  padding: 0 0 4px 0;
+}
+
+.pane-row {
+  height: 22px;
+  padding: 0 var(--pad-r) 0 calc(var(--pad-l) + var(--slot));
+  font-size: var(--sb-small);
+  color: var(--text-dim);
+}
+
+.pane-row.focused {
+  color: var(--text-name);
+}
+
+.pane-row .slot {
+  width: 18px;
+  height: 22px;
+}
+
+.pidx {
+  flex: none;
+  margin-left: 4px;
+  margin-right: 1ch;
+  color: var(--line);
+}
+
+.pname {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Holds its height so the list never shifts. The numbers are a later plan. */
+#usage {
+  flex: none;
+  display: block;
+  height: 28px;
+  line-height: 28px;
+  padding: 0 var(--pad-r) 0 calc(var(--pad-l) + var(--slot) + 4px);
+  color: var(--line);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The invisible handle on the right edge that resizes the sidebar. */
+.grip {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+
+/* Collapse motion. */
+.flip-run [data-key],
+.flip-out.flip-run > * {
+  transition:
+    transform 180ms var(--ease),
+    opacity 180ms var(--ease);
+}
+
+.flip-out {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.flip-out > * {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gfold .ff {
+    transition: none;
+  }
+}
+
+/* Terminal area */
+
+#main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#terminal {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  padding: 8px;
+}
+
+.pane,
+.split {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane {
+  position: relative;
+  overflow: hidden;
+}
+
+.split {
+  display: flex;
+}
+
+.split-col {
+  flex-direction: column;
+}
+
+.divider {
+  flex: none;
+  background: var(--line);
+}
+
+.split-row > .divider {
+  width: 1px;
+  margin: 0 8px;
+}
+
+.split-col > .divider {
+  height: 1px;
+  margin: 8px 0;
+}
+
+.parked {
+  display: none;
+}
+
+#status {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 2px 8px;
+  font: 12px/1.4 var(--mono);
+  pointer-events: none;
+}
