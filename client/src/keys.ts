@@ -33,8 +33,10 @@ export type Action =
 
 /**
  * Modifiers, then the key, joined by "+". A key with more than one binding lists them with ", ".
- * Keys are matched by place on the keyboard, so `=` with Shift is plus. Copy and paste stay with
- * the Edit menu and are not here.
+ * Keys are matched by what they type, as the menu bar does, so they follow the keyboard layout.
+ * A Shift binding of `[`, `]`, `=` or `-` also matches the character Shift gives on a US keyboard,
+ * so `Cmd+Shift+=` is plus, typed with or without Shift. Copy and paste stay with the Edit menu
+ * and are not here.
  */
 export const DEFAULT_KEYS: Record<Action, string> = {
   newTab: "Cmd+T",
@@ -82,39 +84,76 @@ export const ACTIONS = Object.keys(DEFAULT_KEYS) as Action[];
 // Held down, these repeat. The rest act once per press, so a held Cmd+T opens one tab.
 const REPEATS = new Set<Action>(["nextTab", "prevTab", "paneLeft", "paneRight", "paneUp", "paneDown", "zoomIn", "zoomOut"]);
 
-const NAMED_CODES: Record<string, string> = {
-  "[": "BracketLeft",
-  "]": "BracketRight",
-  "=": "Equal",
-  "-": "Minus",
-  Enter: "Enter",
-  Left: "ArrowLeft",
-  Right: "ArrowRight",
-  Up: "ArrowUp",
-  Down: "ArrowDown",
-};
+// The character Shift gives with each of these on a US keyboard.
+const US_SHIFTED: Record<string, string> = { "[": "{", "]": "}", "=": "+", "-": "_" };
 
-/** The `KeyboardEvent.code` a key name stands for. */
-export function codeOf(key: string): string | undefined {
-  if (/^[A-Z]$/.test(key)) return `Key${key}`;
-  if (/^[0-9]$/.test(key)) return `Digit${key}`;
-  return NAMED_CODES[key];
+// Characters matched by `e.key`, as typed. Digits are here too, for layouts that type them.
+const CHARS = new Set(["[", "]", "{", "}", "=", "+", "-", "_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+
+// Named keys by `e.key`, and the same names by `e.code` for when `e.key` cannot say.
+const NAMED = new Map([
+  ["Enter", "Enter"],
+  ["NumpadEnter", "Enter"],
+  ["ArrowLeft", "Left"],
+  ["ArrowRight", "Right"],
+  ["ArrowUp", "Up"],
+  ["ArrowDown", "Down"],
+]);
+
+// Only for a dead or unidentified key, whose `e.key` names no character.
+const CHAR_CODES = new Map([
+  ["BracketLeft", "["],
+  ["BracketRight", "]"],
+  ["Equal", "="],
+  ["Minus", "-"],
+]);
+
+const SPEC_NAMES = new Set([...CHARS, "Enter", "Left", "Right", "Up", "Down"]);
+
+/**
+ * The key name an event stands for, as written in a spec. Letters and characters come from
+ * `e.key`, case-folded, so they follow the layout. `e.code` stands in only where `e.key` cannot
+ * work: a digit row that needs Shift (French), arrows and Enter, and a dead or unidentified key.
+ */
+function nameOf(e: KeyboardEvent): string | undefined {
+  const { key, code } = e;
+  if (key.length === 1) {
+    if (/^[a-z]$/i.test(key)) return key.toUpperCase();
+    if (CHARS.has(key)) return key;
+  } else {
+    const named = NAMED.get(key);
+    if (named !== undefined) return named;
+  }
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (key === "Dead" || key === "Unidentified") {
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+    const char = CHAR_CODES.get(code);
+    if (char !== undefined) return char;
+  }
+  return NAMED.get(code);
 }
 
-function id(meta: boolean, ctrl: boolean, alt: boolean, shift: boolean, code: string): string {
-  return `${meta ? "C" : ""}${ctrl ? "T" : ""}${alt ? "O" : ""}${shift ? "S" : ""} ${code}`;
+function id(meta: boolean, ctrl: boolean, alt: boolean, shift: boolean, name: string): string {
+  return `${meta ? "C" : ""}${ctrl ? "T" : ""}${alt ? "O" : ""}${shift ? "S" : ""} ${name}`;
 }
 
 /** One id per binding in `spec`, the same for the same keys whatever order they are written in. */
 export function keyIds(spec: string): string[] {
-  return spec.split(",").map((binding) => {
+  return spec.split(",").flatMap((binding) => {
     const parts = binding.trim().split("+");
     // "Cmd+Shift+=" splits cleanly; the key is always the last part.
     const key = parts.pop() ?? "";
-    const code = codeOf(key);
-    if (code === undefined) throw new Error(`Unknown key ${key} in ${spec}`);
+    if (!/^[A-Z]$/.test(key) && !SPEC_NAMES.has(key)) throw new Error(`Unknown key ${key} in ${spec}`);
     const has = (name: string) => parts.includes(name);
-    return id(has("Cmd"), has("Ctrl"), has("Option"), has("Shift"), code);
+    const ids = [id(has("Cmd"), has("Ctrl"), has("Option"), has("Shift"), key)];
+    const shifted = US_SHIFTED[key];
+    if (has("Shift") && shifted !== undefined) {
+      // As a browser reports it on a US keyboard, and with no Shift where the layout types it
+      // unshifted (plus on a German keyboard).
+      ids.push(id(has("Cmd"), has("Ctrl"), has("Option"), true, shifted));
+      ids.push(id(has("Cmd"), has("Ctrl"), has("Option"), false, shifted));
+    }
+    return ids;
   });
 }
 
@@ -135,7 +174,9 @@ function tableFor(keys: Record<Action, string>): Map<string, Action> {
 export function matchKey(e: KeyboardEvent, keys: Record<Action, string>): Action | null {
   // Plain typing leaves here: no lookup, nothing made.
   if (!e.metaKey && !e.ctrlKey) return null;
-  return tableFor(keys).get(id(e.metaKey, e.ctrlKey, e.altKey, e.shiftKey, e.code)) ?? null;
+  const name = nameOf(e);
+  if (name === undefined) return null;
+  return tableFor(keys).get(id(e.metaKey, e.ctrlKey, e.altKey, e.shiftKey, name)) ?? null;
 }
 
 /** One capture listener on the window, ahead of the terminal. Returns the way to stop. */
@@ -157,7 +198,7 @@ export function installKeys(keys: Record<Action, string>, run: (action: Action) 
 
 export type ActionContext = {
   store: Store;
-  panes: Pick<Panes, "focusedSession" | "focusSession" | "viewFor" | "focusNeighbor" | "toggleFill">;
+  panes: Pick<Panes, "focusedSession" | "focusSession" | "viewFor" | "focusNeighbor" | "toggleFill" | "leaveFill">;
   connection: Pick<Connection, "treeOp" | "list" | "create" | "kill">;
   /** Where a new shell starts when the focused pane's folder is not known. */
   home: string;
@@ -255,13 +296,27 @@ function reopenTab(ctx: ActionContext): void {
   ctx.connection.treeOp({ type: "reopen_tab" });
 }
 
-/** The next or previous tab in sidebar order. Tabs of collapsed groups are not in that order. */
+/**
+ * The next or previous tab in sidebar order, wrapping. Tabs of collapsed groups are not in that
+ * order, so from a tab inside one the step starts at its group's header.
+ */
 function stepTab(ctx: ActionContext, step: 1 | -1): void {
-  const tabs = ctx.store.rows().flatMap((row) => (row.kind === "tab" ? [row.tab.id] : []));
-  if (tabs.length === 0) return;
-  const at = ctx.store.current === null ? -1 : tabs.indexOf(ctx.store.current);
-  const next = at < 0 ? (step === 1 ? 0 : tabs.length - 1) : (at + step + tabs.length) % tabs.length;
-  selectTab(ctx, tabs[next]);
+  const rows = ctx.store.rows();
+  const { current } = ctx.store;
+  let at = rows.findIndex((row) => row.kind === "tab" && row.tab.id === current);
+  if (at < 0 && current !== null) {
+    at = rows.findIndex((row) => row.kind === "group" && row.group.tabs.some((tab) => tab.id === current));
+  }
+  const n = rows.length;
+  // With no place to start from, next lands on the first tab and previous on the last.
+  const from = at >= 0 ? at : step === 1 ? n - 1 : 0;
+  for (let i = 1; i <= n; i++) {
+    const row = rows[(((from + step * i) % n) + n) % n];
+    if (row.kind === "tab") {
+      selectTab(ctx, row.tab.id);
+      return;
+    }
+  }
 }
 
 /** The tab last used in group `n`, counting from 1. Past the last group nothing happens. */
@@ -311,10 +366,13 @@ export function runAction(a: Action, ctx: ActionContext): void {
     case "newTab":
       void openShell(ctx);
       return;
+    // A pane filling the tab would hide the new one, so the split comes back first.
     case "splitRight":
+      ctx.panes.leaveFill();
       void openShell(ctx, "right");
       return;
     case "splitDown":
+      ctx.panes.leaveFill();
       void openShell(ctx, "down");
       return;
     case "closePane":

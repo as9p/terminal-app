@@ -4,7 +4,7 @@
 import type { AgentState, Group, Op, Tab } from "./connection";
 import { refocus } from "./focus";
 import { createMarker, markerState, showMarker, syncTick } from "./marker";
-import { RENAME_END, startRename } from "./rename";
+import { RENAME_END, renaming, startRename } from "./rename";
 import { type Row, type Store, findTab, leaves } from "./store";
 
 export const MIN_WIDTH = 168;
@@ -62,6 +62,8 @@ type Drag = {
   startX: number;
   startY: number;
   live: boolean;
+  // Esc ended it: nothing shows or drops, and the release is still swallowed.
+  cancelled?: boolean;
   ghost?: HTMLElement;
   // Measured once when the drag starts, so moving the pointer reads no layout.
   rects: { element: HTMLElement; top: number; bottom: number }[];
@@ -476,8 +478,13 @@ export class Sidebar {
       return;
     }
     const row = target?.closest<HTMLElement>(".row");
-    if (row?.dataset.tab) this.events.select(row.dataset.tab);
+    if (row?.dataset.tab) this.pick(row.dataset.tab);
   };
+
+  // Only a real change of tab is a use, so a double click sends one `used`, not two.
+  private pick(tab: string): void {
+    if (tab !== this.store.current) this.events.select(tab);
+  }
 
   private renameRow(row: HTMLElement): void {
     const tab = row.dataset.tab ? findTab(this.store.tree, row.dataset.tab) : undefined;
@@ -523,6 +530,8 @@ export class Sidebar {
     const pane = target?.closest<HTMLElement>(".pane-row") ?? undefined;
     if (pane === this.hovered) return;
     this.hovered = pane;
+    // A rename field keeps typing until Enter, Esc or a click elsewhere.
+    if (renaming()) return;
     if (pane?.dataset.tab && pane.dataset.session) this.events.hoverPane?.(pane.dataset.tab, pane.dataset.session);
   };
 
@@ -691,7 +700,7 @@ export class Sidebar {
 
   private readonly onDragMove = (event: PointerEvent): void => {
     const drag = this.drag;
-    if (!drag) return;
+    if (!drag || drag.cancelled) return;
     if (!drag.live) {
       if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_START_PX) return;
       this.beginDrag(drag);
@@ -705,6 +714,7 @@ export class Sidebar {
   private beginDrag(drag: Drag): void {
     drag.live = true;
     this.closeMenu();
+    window.addEventListener("keydown", this.onDragKey, true);
     const side = this.element.getBoundingClientRect();
     drag.sidebarTop = side.top;
     drag.sidebarLeft = side.left;
@@ -797,7 +807,7 @@ export class Sidebar {
 
   private readonly onDragUp = (event: PointerEvent): void => {
     const drag = this.drag;
-    const target = drag?.live ? drag.target : undefined;
+    const target = drag?.live && !drag.cancelled ? drag.target : undefined;
     this.dragged = drag?.live ?? false;
     this.endDrag();
     if (target?.kind === "join") {
@@ -817,10 +827,28 @@ export class Sidebar {
     window.removeEventListener("pointermove", this.onDragMove);
     window.removeEventListener("pointerup", this.onDragUp);
     window.removeEventListener("pointercancel", this.endDrag);
+    this.clearDrag(drag);
+  };
+
+  // Only while a drag is live: Esc ends it where it is, drops nothing, and never reaches the
+  // terminal. The press is still followed to its release, so the release clicks no row.
+  private readonly onDragKey = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const drag = this.drag;
+    if (!drag) return;
+    drag.cancelled = true;
+    this.clearDrag(drag);
+  };
+
+  private clearDrag(drag: Drag): void {
+    window.removeEventListener("keydown", this.onDragKey, true);
     drag.source.classList.remove("drag-src");
     drag.ghost?.remove();
+    drag.ghost = undefined;
     this.showTarget(drag, undefined);
-  };
+  }
 
   private toggle(fold: HTMLElement): void {
     const key = fold.parentElement?.dataset.group;
@@ -845,7 +873,7 @@ export class Sidebar {
     // Also keeps the folder button's own click from toggling a second time.
     event.preventDefault();
     if (target.classList.contains("slot")) this.toggle(target);
-    else if (target.dataset.tab) this.events.select(target.dataset.tab);
+    else if (target.dataset.tab) this.pick(target.dataset.tab);
     refocus();
   };
 

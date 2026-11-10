@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Group, Split, Tab, Tree } from "./connection";
-import { ACTIONS, type ActionContext, DEFAULT_KEYS, codeOf, keyIds, matchKey, runAction } from "./keys";
+import { ACTIONS, type ActionContext, DEFAULT_KEYS, installKeys, keyIds, matchKey, runAction } from "./keys";
 import { Store } from "./store";
 
 function leaf(session: string): Split {
@@ -31,6 +31,7 @@ function context(store: Store): ActionContext & { treeOp: ReturnType<typeof vi.f
       viewFor: () => undefined,
       focusNeighbor: vi.fn(),
       toggleFill: vi.fn(),
+      leaveFill: vi.fn(),
     },
     connection: { treeOp, list: vi.fn(async () => []), create: vi.fn(async () => 1), kill: vi.fn() },
     home: "/home",
@@ -38,17 +39,43 @@ function context(store: Store): ActionContext & { treeOp: ReturnType<typeof vi.f
   };
 }
 
-/** The key event a binding such as "Cmd+Shift+T" stands for. */
-function press(binding: string): KeyboardEvent {
-  const parts = binding.split("+");
-  const key = parts.pop() ?? "";
+// A US keyboard: what each key name types, without and with Shift, and where it sits.
+const US_SHIFTED: Record<string, string> = { "[": "{", "]": "}", "=": "+", "-": "_" };
+const US_CODES: Record<string, string> = { "[": "BracketLeft", "]": "BracketRight", "=": "Equal", "-": "Minus" };
+const US_DIGITS_SHIFTED = ")!@#$%^&*(";
+
+function us(name: string, shift: boolean): { key: string; code: string } {
+  if (/^[A-Z]$/.test(name)) return { key: shift ? name : name.toLowerCase(), code: `Key${name}` };
+  if (/^[0-9]$/.test(name)) return { key: shift ? US_DIGITS_SHIFTED[Number(name)] : name, code: `Digit${name}` };
+  if (name === "Enter") return { key: "Enter", code: "Enter" };
+  if (["Left", "Right", "Up", "Down"].includes(name)) return { key: `Arrow${name}`, code: `Arrow${name}` };
+  return { key: shift ? US_SHIFTED[name] : name, code: US_CODES[name] };
+}
+
+type Mods = { meta?: boolean; ctrl?: boolean; alt?: boolean; shift?: boolean };
+
+function keyEvent(key: string, code: string, mods: Mods = {}, repeat = false): KeyboardEvent {
   return new KeyboardEvent("keydown", {
-    code: codeOf(key),
-    metaKey: parts.includes("Cmd"),
-    ctrlKey: parts.includes("Ctrl"),
-    altKey: parts.includes("Option"),
-    shiftKey: parts.includes("Shift"),
+    key,
+    code,
+    metaKey: mods.meta ?? false,
+    ctrlKey: mods.ctrl ?? false,
+    altKey: mods.alt ?? false,
+    shiftKey: mods.shift ?? false,
+    repeat,
+    bubbles: true,
+    cancelable: true,
   });
+}
+
+/** The key event a binding such as "Cmd+Shift+T" stands for, typed on a US keyboard. */
+function press(binding: string, repeat = false): KeyboardEvent {
+  const parts = binding.split("+");
+  const name = parts.pop() ?? "";
+  const shift = parts.includes("Shift");
+  const { key, code } = us(name, shift);
+  const mods = { meta: parts.includes("Cmd"), ctrl: parts.includes("Ctrl"), alt: parts.includes("Option"), shift };
+  return keyEvent(key, code, mods, repeat);
 }
 
 describe("keys", () => {
@@ -123,6 +150,147 @@ describe("keys", () => {
     runAction("group5", ctx);
     expect(store.current).toBe("b1");
     expect(ctx.treeOp).not.toHaveBeenCalled();
+  });
+
+  it("next_tab_from_a_tab_in_a_collapsed_group_steps_from_that_group", () => {
+    const store = new Store();
+    store.setTree(tree([group("a", [tab("a1"), tab("a2")]), group("b", [tab("b1")], true), group("c", [tab("c1"), tab("c2")])]));
+    store.select("b1");
+    const ctx = context(store);
+    runAction("nextTab", ctx);
+    expect(store.current).toBe("c1");
+    store.select("b1");
+    runAction("prevTab", ctx);
+    expect(store.current).toBe("a2");
+  });
+
+  it("stepping_from_a_collapsed_group_wraps", () => {
+    const store = new Store();
+    store.setTree(tree([group("a", [tab("a1")], true), group("b", [tab("b1"), tab("b2")])]));
+    store.select("a1");
+    const ctx = context(store);
+    runAction("prevTab", ctx);
+    expect(store.current).toBe("b2");
+    store.setTree(tree([group("b", [tab("b1"), tab("b2")]), group("a", [tab("a1")], true)]));
+    store.select("a1");
+    runAction("nextTab", ctx);
+    expect(store.current).toBe("b1");
+  });
+
+  it("split_while_one_pane_fills_the_tab_leaves_fill_first", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    const ctx = context(store);
+    runAction("splitRight", ctx);
+    runAction("splitDown", ctx);
+    expect(ctx.panes.leaveFill).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("keyboard layouts", () => {
+  it("shift_does_not_break_letters", () => {
+    expect(matchKey(keyEvent("t", "KeyT", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("reopenTab");
+    expect(matchKey(keyEvent("T", "KeyT", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("reopenTab");
+    expect(matchKey(keyEvent("T", "KeyT", { meta: true }), DEFAULT_KEYS)).toBe("newTab");
+  });
+
+  it("us_brackets_and_plus_match_with_shift_as_typed", () => {
+    expect(matchKey(keyEvent("}", "BracketRight", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("nextTab");
+    expect(matchKey(keyEvent("]", "BracketRight", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("nextTab");
+    expect(matchKey(keyEvent("{", "BracketLeft", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("prevTab");
+    expect(matchKey(keyEvent("+", "Equal", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("zoomIn");
+    expect(matchKey(keyEvent("=", "Equal", { meta: true }), DEFAULT_KEYS)).toBe("zoomIn");
+    expect(matchKey(keyEvent("]", "BracketRight", { meta: true }), DEFAULT_KEYS)).toBeNull();
+  });
+
+  it("dvorak_letters_follow_the_label_not_the_place", () => {
+    // On Dvorak the key labeled W sits where US has the comma, and US W types a comma.
+    expect(matchKey(keyEvent("w", "Comma", { meta: true }), DEFAULT_KEYS)).toBe("closePane");
+    expect(matchKey(keyEvent(",", "KeyW", { meta: true }), DEFAULT_KEYS)).toBeNull();
+    expect(matchKey(keyEvent("t", "KeyK", { meta: true }), DEFAULT_KEYS)).toBe("newTab");
+    expect(matchKey(keyEvent("d", "KeyH", { meta: true }), DEFAULT_KEYS)).toBe("splitRight");
+  });
+
+  it("german_plus_and_minus_zoom", () => {
+    expect(matchKey(keyEvent("+", "BracketRight", { meta: true }), DEFAULT_KEYS)).toBe("zoomIn");
+    expect(matchKey(keyEvent("-", "Slash", { meta: true }), DEFAULT_KEYS)).toBe("zoomOut");
+    expect(matchKey(keyEvent("=", "Digit0", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("zoomIn");
+  });
+
+  it("french_digits_fall_back_to_the_place", () => {
+    expect(matchKey(keyEvent("&", "Digit1", { meta: true }), DEFAULT_KEYS)).toBe("group1");
+    expect(matchKey(keyEvent("é", "Digit2", { ctrl: true }), DEFAULT_KEYS)).toBe("tab2");
+    expect(matchKey(keyEvent("ç", "Digit9", { meta: true }), DEFAULT_KEYS)).toBe("group9");
+    expect(matchKey(keyEvent("à", "Digit0", { meta: true }), DEFAULT_KEYS)).toBe("zoomReset");
+  });
+
+  it("dead_or_unidentified_keys_fall_back_to_the_place", () => {
+    expect(matchKey(keyEvent("Dead", "KeyT", { meta: true }), DEFAULT_KEYS)).toBe("newTab");
+    expect(matchKey(keyEvent("Unidentified", "KeyB", { meta: true }), DEFAULT_KEYS)).toBe("toggleSidebar");
+    expect(matchKey(keyEvent("Dead", "Equal", { meta: true }), DEFAULT_KEYS)).toBe("zoomIn");
+  });
+
+  it("option_arrows_and_enter_match", () => {
+    expect(matchKey(keyEvent("ArrowLeft", "ArrowLeft", { meta: true, alt: true }), DEFAULT_KEYS)).toBe("paneLeft");
+    expect(matchKey(keyEvent("ArrowDown", "ArrowDown", { meta: true, alt: true }), DEFAULT_KEYS)).toBe("paneDown");
+    expect(matchKey(keyEvent("Enter", "Enter", { meta: true, shift: true }), DEFAULT_KEYS)).toBe("fillTab");
+  });
+});
+
+describe("installKeys", () => {
+  function setup() {
+    const run = vi.fn();
+    const terminal = document.createElement("textarea");
+    document.body.append(terminal);
+    const seen = vi.fn();
+    terminal.addEventListener("keydown", seen);
+    const stop = installKeys(DEFAULT_KEYS, run);
+    const send = (event: KeyboardEvent) => {
+      terminal.dispatchEvent(event);
+      return event;
+    };
+    const done = () => {
+      stop();
+      terminal.remove();
+    };
+    return { run, seen, send, done };
+  }
+
+  it("cmd_shortcut_is_stopped_before_the_terminal", () => {
+    const { run, seen, send, done } = setup();
+    const event = send(press("Cmd+T"));
+    expect(run).toHaveBeenCalledWith("newTab");
+    expect(seen).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    done();
+  });
+
+  it("plain_key_is_never_stopped_or_prevented", () => {
+    const { run, seen, send, done } = setup();
+    for (const event of [keyEvent("t", "KeyT"), keyEvent("T", "KeyT", { shift: true }), keyEvent("Escape", "Escape")]) {
+      send(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    // Cmd+C is not an app key, so the terminal and the Edit menu get it.
+    const copy = send(press("Cmd+C"));
+    expect(copy.defaultPrevented).toBe(false);
+    expect(seen).toHaveBeenCalledTimes(4);
+    expect(run).not.toHaveBeenCalled();
+    done();
+  });
+
+  it("repeat_is_filtered_only_for_actions_that_ignore_it", () => {
+    const { run, seen, send, done } = setup();
+    const held = send(press("Cmd+T", true));
+    expect(run).not.toHaveBeenCalled();
+    // Still the app's key: a held Cmd+T never types into the terminal.
+    expect(held.defaultPrevented).toBe(true);
+    send(press("Cmd+=", true));
+    send(press("Cmd+Shift+]", true));
+    send(press("Cmd+Option+Left", true));
+    expect(run.mock.calls.map(([action]) => action)).toEqual(["zoomIn", "nextTab", "paneLeft"]);
+    expect(seen).not.toHaveBeenCalled();
+    done();
   });
 });
 

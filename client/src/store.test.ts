@@ -1,7 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Group, Split, Tab, Tree } from "./connection";
-import { Store, leaves, nextCurrent, roundToCells, tabAt, withCollapsed, withSizesAt } from "./store";
+import {
+  MIN_PANE_COLS,
+  MIN_PANE_ROWS,
+  Store,
+  clampPair,
+  leaves,
+  neighborOf,
+  nextCurrent,
+  paneFloor,
+  roundToCells,
+  tabAt,
+  withCollapsed,
+  withSizesAt,
+} from "./store";
 
 function leaf(session: string): Split {
   return { type: "leaf", session };
@@ -146,18 +159,88 @@ describe("store", () => {
   });
   it("resize_rounds_to_whole_cells", () => {
     const cell = 8.4;
-    const sizes = roundToCells([100, 205], cell);
-    // 100 px is 11.9 cells, so the first pane takes 12 and the last keeps the rest.
+    const sizes = roundToCells([100, 205], 0, cell);
+    // 100 px is 11.9 cells, so the first pane takes 12 and the second keeps the rest.
     expect(sizes[0]).toBeCloseTo(12 * cell);
     expect(sizes[0] + sizes[1]).toBeCloseTo(305);
     // A pane dragged to nothing still keeps one cell.
-    expect(roundToCells([1, 300], cell)[0]).toBeCloseTo(cell);
+    expect(roundToCells([1, 300], 0, cell)[0]).toBeCloseTo(cell);
     const split: Split = { type: "row", children: [leaf("a"), { type: "col", children: [leaf("b"), leaf("c")], sizes: [1, 1] }], sizes: [1, 1] };
     expect(withSizesAt(split, [1], [3, 5])).toEqual({
       type: "row",
       children: [leaf("a"), { type: "col", children: [leaf("b"), leaf("c")], sizes: [3, 5] }],
       sizes: [1, 1],
     });
+  });
+});
+
+describe("divider drag", () => {
+  it("rounding_stays_between_the_two_panes_beside_the_divider", () => {
+    const cell = 8.4;
+    // The divider between panes 0 and 1 of three: pane 2 keeps its size to the last decimal.
+    const sizes = roundToCells([100.3, 205.1, 333.7], 0, cell);
+    expect(sizes[0]).toBeCloseTo(12 * cell);
+    expect(sizes[0] + sizes[1]).toBeCloseTo(305.4);
+    expect(sizes[2]).toBe(333.7);
+    // The divider between panes 1 and 2: pane 0 is left alone.
+    const later = roundToCells([100.3, 205.1, 333.7], 1, cell);
+    expect(later[0]).toBe(100.3);
+    expect(later[1]).toBeCloseTo(24 * cell);
+    expect(later[1] + later[2]).toBeCloseTo(538.8);
+  });
+
+  it("rounding_keeps_each_pane_at_its_floor", () => {
+    const cell = 8;
+    const floor = [paneFloor(400, MIN_PANE_COLS, cell), paneFloor(400, MIN_PANE_COLS, cell)] as const;
+    expect(roundToCells([75, 725], 0, cell, floor)).toEqual([80, 720]);
+    expect(roundToCells([725, 75], 0, cell, floor)).toEqual([720, 80]);
+  });
+
+  it("drag_stops_at_10_columns_and_3_rows", () => {
+    expect(MIN_PANE_COLS).toBe(10);
+    expect(MIN_PANE_ROWS).toBe(3);
+    const cols = [paneFloor(400, MIN_PANE_COLS, 8), paneFloor(400, MIN_PANE_COLS, 8)] as const;
+    expect(clampPair(10, 800, cols)).toBe(80);
+    expect(clampPair(795, 800, cols)).toBe(720);
+    expect(clampPair(300, 800, cols)).toBe(300);
+    const rows = [paneFloor(300, MIN_PANE_ROWS, 17), paneFloor(300, MIN_PANE_ROWS, 17)] as const;
+    expect(clampPair(0, 600, rows)).toBe(51);
+    expect(clampPair(600, 600, rows)).toBe(549);
+  });
+
+  it("a_pane_already_under_the_minimum_may_only_grow", () => {
+    // A tiny window: pane 0 is 40 px, under 10 columns of 8 px.
+    const floor = [paneFloor(40, MIN_PANE_COLS, 8), paneFloor(400, MIN_PANE_COLS, 8)] as const;
+    expect(floor[0]).toBe(40);
+    expect(clampPair(20, 440, floor)).toBe(40);
+    expect(clampPair(60, 440, floor)).toBe(60);
+    expect(roundToCells([40, 400], 0, 8, floor)).toEqual([40, 400]);
+  });
+});
+
+describe("pane neighbors", () => {
+  const row: Split = { type: "row", children: [leaf("a"), leaf("b"), leaf("c")], sizes: [1, 1, 1] };
+
+  it("closing_a_pane_hands_typing_to_the_one_before_it", () => {
+    expect(neighborOf(row, "c")).toBe("b");
+    expect(neighborOf(row, "b")).toBe("a");
+  });
+
+  it("closing_the_first_pane_hands_typing_to_the_next", () => {
+    expect(neighborOf(row, "a")).toBe("b");
+  });
+
+  it("neighbor_is_found_in_a_nested_split", () => {
+    const nested: Split = {
+      type: "row",
+      children: [{ type: "col", children: [leaf("a"), leaf("b")], sizes: [1, 1] }, leaf("c")],
+      sizes: [1, 1],
+    };
+    expect(neighborOf(nested, "b")).toBe("a");
+    // Before c is the column; its pane nearest to c in order is b.
+    expect(neighborOf(nested, "c")).toBe("b");
+    expect(neighborOf(nested, "x")).toBeUndefined();
+    expect(neighborOf(leaf("a"), "a")).toBeUndefined();
   });
 });
 

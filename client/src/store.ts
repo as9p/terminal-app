@@ -46,17 +46,59 @@ export function nextCurrent(tree: Tree, closed: string, before: Tree): string | 
   return allTabs(tree)[0]?.id ?? null;
 }
 
+/** The fewest columns and rows a divider drag leaves a pane with. */
+export const MIN_PANE_COLS = 10;
+export const MIN_PANE_ROWS = 3;
+
 /**
- * Pane sizes in pixels along a split, after a divider drag, made whole numbers of `cell` so no
- * pane ends in a sliver of a column or row. Each pane but the last is rounded and keeps at least
- * one cell; the last takes what is left, so the total stays the same.
+ * The least a pane may be dragged to: `cells` cells of `cell` pixels, or its size when the drag
+ * started if that is already less (a tiny window), so such a pane may only grow.
  */
-export function roundToCells(px: number[], cell: number): number[] {
-  if (px.length === 0 || !(cell > 0)) return px.slice();
-  const total = px.reduce((sum, size) => sum + size, 0);
-  const sizes = px.slice(0, -1).map((size) => Math.max(1, Math.round(size / cell)) * cell);
-  const used = sizes.reduce((sum, size) => sum + size, 0);
-  return [...sizes, Math.max(cell, total - used)];
+export function paneFloor(start: number, cells: number, cell: number): number {
+  return Math.min(start, Math.max(1, cells * cell));
+}
+
+/** The size of the first of two panes sharing `pair` pixels, kept so neither drops under its floor. */
+export function clampPair(wanted: number, pair: number, floor: readonly [number, number]): number {
+  return Math.min(pair - floor[1], Math.max(floor[0], wanted));
+}
+
+/**
+ * Pane sizes in pixels along a split, after a drag on the divider between panes `a` and `a + 1`.
+ * Pane `a` becomes a whole number of `cell`, so it ends in no sliver of a column or row, and
+ * pane `a + 1` takes the rest of the pair, each kept at its floor. Every other pane keeps its size
+ * exactly, so the rounding never moves a divider that was not dragged.
+ */
+export function roundToCells(
+  px: number[],
+  a: number,
+  cell: number,
+  floor: readonly [number, number] = [cell, cell],
+): number[] {
+  const sizes = px.slice();
+  if (!(cell > 0) || a < 0 || a + 1 >= px.length) return sizes;
+  const pair = px[a] + px[a + 1];
+  sizes[a] = clampPair(Math.round(px[a] / cell) * cell, pair, floor);
+  sizes[a + 1] = pair - sizes[a];
+  return sizes;
+}
+
+/** The pane beside `session` in its own split: the one before it, else the one after it. */
+export function neighborOf(split: Split, session: string): string | undefined {
+  if (split.type === "leaf") return undefined;
+  const at = split.children.findIndex((child) => child.type === "leaf" && child.session === session);
+  if (at < 0) {
+    for (const child of split.children) {
+      const found = neighborOf(child, session);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  const other = split.children[at > 0 ? at - 1 : at + 1];
+  if (!other) return undefined;
+  const near = leaves(other);
+  // The pane of a nested split that sits closest to the closed one.
+  return at > 0 ? near[near.length - 1] : near[0];
 }
 
 /** A copy of `split` with new sizes on the box at `path` (child indexes from the top). */

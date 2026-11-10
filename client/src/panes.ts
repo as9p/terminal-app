@@ -2,8 +2,9 @@
 // kept, hidden, while another tab is on screen. A tab's split becomes nested flex boxes.
 
 import type { Split, Tab } from "./connection";
-import { leaves, roundToCells, withSizesAt } from "./store";
+import { MIN_PANE_COLS, MIN_PANE_ROWS, clampPair, leaves, neighborOf, paneFloor, roundToCells, withSizesAt } from "./store";
 import { type MarkerState, showMarker } from "./marker";
+import { renaming } from "./rename";
 import type { TerminalView } from "./terminal";
 
 /** Makes the view for `session` inside `container`, which is already in the page. */
@@ -92,7 +93,11 @@ export class Panes {
 
   /** Puts `tab` on screen. The same tab with the same split changes nothing in the page. */
   show(tab: Tab | undefined): void {
+    const before = this.tab;
     this.tab = tab;
+    if (before && tab && before.id === tab.id && before.split !== tab.split) {
+      this.keepFocusNear(tab.id, before.split, tab.split);
+    }
     if (this.filled && (!tab || tab.id !== this.filled.tab || !leaves(tab.split).includes(this.filled.session))) {
       this.filled = undefined;
     }
@@ -166,6 +171,11 @@ export class Panes {
     }
     const next = pickNeighbor(start, others, direction);
     if (next !== undefined) this.focusSession(next);
+  }
+
+  /** Brings the split back if one pane fills the tab, so a new pane has somewhere to show. */
+  leaveFill(): void {
+    if (this.filled) this.toggleFill();
   }
 
   /** One pane fills the tab, or the split comes back. Nothing is sent to the host. */
@@ -251,6 +261,19 @@ export class Panes {
       entry.element.remove();
       this.entries.delete(session);
     }
+    for (const [tab, session] of this.focused) {
+      if (!alive.has(session)) this.focused.delete(tab);
+    }
+  }
+
+  // A pane that had typing closed: its neighbour takes over, not the first pane of the tab.
+  private keepFocusNear(tab: string, before: Split, after: Split): void {
+    const was = this.focused.get(tab) ?? leaves(before)[0];
+    const left = leaves(after);
+    if (was === undefined || left.includes(was)) return;
+    const near = neighborOf(before, was);
+    if (near !== undefined && left.includes(near)) this.focused.set(tab, near);
+    else this.focused.delete(tab);
   }
 
   // Never runs with the setting off, so the default costs nothing on a focus change.
@@ -311,11 +334,12 @@ export class Panes {
     const focused = this.focusedSession();
     const cellBox = (focused !== undefined ? this.viewFor(focused) : this.all()[0])?.cellSize();
     const cell = cellBox ? (across ? cellBox.width : cellBox.height) : 0;
-    const least = Math.max(cell, 1);
     const start = across ? event.clientX : event.clientY;
     const a = index - 1;
     const b = index;
     const pair = sizes[a] + sizes[b];
+    const cells = across ? MIN_PANE_COLS : MIN_PANE_ROWS;
+    const floor = [paneFloor(sizes[a], cells, cell), paneFloor(sizes[b], cells, cell)] as const;
     // In pixels from here on, so the two panes move exactly with the pointer.
     kids.forEach((kid, i) => {
       kid.style.flexGrow = String(sizes[i]);
@@ -324,7 +348,7 @@ export class Panes {
     const startA = sizes[a];
     const move = (moveEvent: PointerEvent) => {
       const delta = (across ? moveEvent.clientX : moveEvent.clientY) - start;
-      sizes[a] = Math.min(pair - least, Math.max(least, startA + delta));
+      sizes[a] = clampPair(startA + delta, pair, floor);
       sizes[b] = pair - sizes[a];
       kids[a].style.flexGrow = String(sizes[a]);
       kids[b].style.flexGrow = String(sizes[b]);
@@ -333,7 +357,7 @@ export class Panes {
       divider.removeEventListener("pointermove", move);
       divider.removeEventListener("pointerup", up);
       divider.removeEventListener("pointercancel", up);
-      const rounded = roundToCells(sizes, cell);
+      const rounded = roundToCells(sizes, a, cell, floor);
       kids.forEach((kid, i) => {
         kid.style.flexGrow = String(rounded[i]);
       });
@@ -359,8 +383,8 @@ export class Panes {
       });
       element.addEventListener("mouseenter", () => {
         if (!this.followMouse || session === this.focusedSession()) return;
-        // A rename field keeps typing until Enter or Esc.
-        if (document.activeElement instanceof HTMLInputElement) return;
+        // A rename field keeps typing until Enter, Esc or a click elsewhere.
+        if (renaming() || document.activeElement instanceof HTMLInputElement) return;
         this.entries.get(session)?.view?.focus();
       });
       entry = { element, view: undefined };

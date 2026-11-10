@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { Group, Tab, Tree } from "./connection";
+import type { Group, Split, Tab, Tree } from "./connection";
 import { refocus } from "./focus";
-import { MAX_WIDTH, MIN_WIDTH, Sidebar, clampWidth, fitWidth } from "./sidebar";
+import { MAX_WIDTH, MIN_WIDTH, Sidebar, type SidebarEvents, clampWidth, fitWidth } from "./sidebar";
 import { Store } from "./store";
 import css from "./styles.css?raw";
 
-vi.mock("./focus", () => ({ refocus: vi.fn() }));
+vi.mock("./focus", () => ({ refocus: vi.fn(), holdFocus: (field: HTMLElement) => field.focus() }));
 
-function tab(id: string, name: string | null = null): Tab {
-  return { id, name, pinned: false, split: { type: "leaf", session: `s-${id}` }, last_used: 0 };
+function tab(id: string, name: string | null = null, split: Split = { type: "leaf", session: `s-${id}` }): Tab {
+  return { id, name, pinned: false, split, last_used: 0 };
 }
 
 function group(key: string, tabs: Tab[], collapsed = false): Group {
@@ -20,7 +20,7 @@ function tree(groups: Group[], ungrouped: Tab[] = []): Tree {
   return { groups, ungrouped, closed: [], defaults: {} };
 }
 
-function mount(t: Tree) {
+function mount(t: Tree, extra: Partial<SidebarEvents> = {}) {
   const element = document.createElement("aside");
   document.body.append(element);
   const store = new Store();
@@ -34,6 +34,7 @@ function mount(t: Tree) {
     focusPane: vi.fn(),
     title: () => undefined,
     resized,
+    ...extra,
   });
   sidebar.render();
   return { element, store, sidebar, select, collapse, resized };
@@ -195,6 +196,94 @@ describe("sidebar", () => {
     key(fold, " ");
     expect(collapse).toHaveBeenCalledWith("a", true);
     expect(refocus).toHaveBeenCalledTimes(3);
+  });
+
+  it("double_click_on_a_tab_row_sends_used_once", () => {
+    let store: Store | undefined;
+    // As main.ts does: selecting makes the tab current.
+    const select = vi.fn((id: string) => store?.select(id));
+    const mounted = mount(tree([], [tab("a"), tab("b")]), { select });
+    store = mounted.store;
+    const { element } = mounted;
+    const row = element.querySelector<HTMLElement>('[data-tab="b"]');
+    row?.click();
+    row?.click();
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(select).toHaveBeenCalledWith("b");
+  });
+
+  it("pointing_at_a_pane_row_does_not_take_focus_while_a_rename_is_open", () => {
+    const split: Split = {
+      type: "row",
+      children: [{ type: "leaf", session: "p1" }, { type: "leaf", session: "p2" }],
+      sizes: [1, 1],
+    };
+    const hoverPane = vi.fn();
+    const { element, sidebar } = mount(tree([], [tab("t", null, split)]), { hoverPane });
+    const over = (session: string) =>
+      element.querySelector(`.pane-row[data-session="${session}"]`)?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    over("p1");
+    expect(hoverPane).toHaveBeenCalledTimes(1);
+    sidebar.renameCurrent();
+    expect(element.querySelector("input.rename")).not.toBeNull();
+    over("p2");
+    expect(hoverPane).toHaveBeenCalledTimes(1);
+    element.querySelector("input.rename")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+
+  describe("row drag", () => {
+    function dragSetup() {
+      const op = vi.fn();
+      const { element, select } = mount(tree([], [tab("a"), tab("b"), tab("c")]), { op });
+      element.querySelectorAll<HTMLElement>(".row").forEach((row, i) => {
+        row.getBoundingClientRect = () =>
+          ({ top: i * 26, bottom: (i + 1) * 26, left: 0, right: 200, width: 200, height: 26, x: 0, y: i * 26 }) as DOMRect;
+      });
+      const rowA = element.querySelector<HTMLElement>('[data-tab="a"]');
+      if (!rowA) throw new Error("no row");
+      const pointer = (type: string, clientY: number, target: EventTarget = window) =>
+        target.dispatchEvent(new MouseEvent(type, { button: 0, clientX: 20, clientY, bubbles: true, cancelable: true }));
+      // Onto the middle of row b: a join.
+      pointer("pointerdown", 5, rowA);
+      pointer("pointermove", 39);
+      const terminal = document.createElement("textarea");
+      document.body.append(terminal);
+      const typed = vi.fn();
+      terminal.addEventListener("keydown", typed);
+      const esc = () => {
+        const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+        terminal.dispatchEvent(event);
+        return event;
+      };
+      return { element, op, select, rowA, pointer, esc, typed, terminal };
+    }
+
+    it("a_drag_drops_on_release", () => {
+      const { op, pointer, terminal } = dragSetup();
+      pointer("pointerup", 39);
+      expect(op).toHaveBeenCalledWith({ type: "join_tabs", tab: "a", into: "b", dir: "right" });
+      terminal.remove();
+    });
+
+    it("esc_ends_a_drag_with_no_drop_and_never_reaches_the_terminal", () => {
+      const { element, op, select, rowA, pointer, esc, typed, terminal } = dragSetup();
+      expect(element.querySelector(".drag-src")).not.toBeNull();
+      const event = esc();
+      expect(event.defaultPrevented).toBe(true);
+      expect(typed).not.toHaveBeenCalled();
+      expect(element.querySelector(".drag-src, .join")).toBeNull();
+      expect(element.querySelector(".ghost")).toBeNull();
+      // Moving on and letting go drops nothing, and the click that follows is not a row click.
+      pointer("pointermove", 60);
+      pointer("pointerup", 60);
+      rowA.click();
+      expect(op).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      // The Esc listener lived only as long as the drag.
+      expect(esc().defaultPrevented).toBe(false);
+      expect(typed).toHaveBeenCalledTimes(1);
+      terminal.remove();
+    });
   });
 
   it("no_sticky_headers", () => {
