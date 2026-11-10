@@ -125,3 +125,31 @@ describe("keys", () => {
     expect(ctx.treeOp).not.toHaveBeenCalled();
   });
 });
+
+describe("jump to blocked", () => {
+  it("jump_key_is_cmd_shift_u", () => {
+    expect(matchKey(press("Cmd+Shift+U"), DEFAULT_KEYS)).toBe("jumpBlocked");
+  });
+
+  it("jump_expands_a_collapsed_group", () => {
+    const store = new Store();
+    store.setTree(tree([group("g", [tab("g1")], true)], [tab("a")]));
+    store.setStates([{ session: "s-g1", state: "blocked", since_ms: 1 }]);
+    const ctx = context(store);
+    runAction("jumpBlocked", ctx);
+    expect(store.current).toBe("g1");
+    expect(store.tree.groups[0].collapsed).toBe(false);
+    expect(ctx.treeOp).toHaveBeenCalledWith({ type: "collapse_group", group: "g", collapsed: false });
+    expect(ctx.treeOp).toHaveBeenCalledWith({ type: "used", tab: "g1" });
+  });
+
+  it("jump_with_nothing_blocked_leaves_the_tab_alone", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a"), tab("b")]));
+    store.select("b");
+    const ctx = context(store);
+    runAction("jumpBlocked", ctx);
+    expect(store.current).toBe("b");
+    expect(ctx.treeOp).not.toHaveBeenCalled();
+  });
+});

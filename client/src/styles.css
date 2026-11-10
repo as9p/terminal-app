@@ -642,3 +642,276 @@ button.slot {
 .dim-panes .pane.dim .xterm-screen {
   opacity: 0.58;
 }
+
+/* State markers, set a (docs/ui-review.md "State markers" and "Marker morph", mock 116-140,
+   520-630). Every marker is one rig of six strokes in a 13 px SVG; a state is a pose. A new pose
+   class makes every stroke travel to its new place, 18 ms after the one before. Transform and
+   opacity only. Two copies of the rig hold the same pose: the old color stays underneath while
+   the new one fades in on top. The flake ticks on .fspin; .fset takes over its turn at a change. */
+
+:root {
+  --red: #f38ba8;
+  --green: #a6e3a1;
+  --yellow: #f9e2af;
+  --blue: #89b4fa;
+  --bright-black: #585b70;
+}
+
+:root { --mo-ms: 320ms; --mo-step: 18ms; --mo-ease: cubic-bezier(0.34, 1.4, 0.64, 1); }
+
+.mk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-style: normal;
+  line-height: 1;
+}
+
+.mk.a {
+  font-size: 15px;
+  width: 14px;
+}
+
+/* Working is blue (work=blue); blocked stays the loudest. */
+.mk.a.s-working { color: var(--blue); }
+.mk.a.s-blocked { color: var(--red); }
+.mk.a.s-done { color: var(--green); }
+.mk.a.s-idle { color: var(--bright-black); }
+.mk.a.s-handoff { color: var(--yellow); }
+.mk.a.s-failed { color: var(--red); }
+
+/* The margin-right keeps the vertical stroke on a half pixel, so it stays crisp. */
+.mk.a .fset {
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-right: 1px;
+  transform-origin: 50% 50%;
+  transition: transform var(--mo-ms) var(--mo-ease);
+}
+
+.mk.a .fspin {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  transform-origin: 50% 50%;
+}
+
+.mk.a .fset > .fspin { margin-right: 0; }
+
+/* Tick: a 15 degree nudge every second with a soft spring settle; the star repeats every 60
+   degrees, so the 4 s loop is seamless. The script starts it from the clock so all turn in step. */
+@keyframes fl-tick {
+  0.000% { transform: rotate(0.00deg); }
+  1.000% { transform: rotate(1.86deg); }
+  2.000% { transform: rotate(5.73deg); }
+  3.000% { transform: rotate(9.77deg); }
+  4.000% { transform: rotate(13.00deg); }
+  5.000% { transform: rotate(15.09deg); }
+  6.250% { transform: rotate(16.27deg); }
+  7.500% { transform: rotate(16.37deg); }
+  9.000% { transform: rotate(15.88deg); }
+  10.750% { transform: rotate(15.26deg); }
+  12.750% { transform: rotate(14.91deg); }
+  15.000% { transform: rotate(14.88deg); }
+  17.500% { transform: rotate(15.00deg); }
+  25.000% { transform: rotate(15.00deg); }
+  26.000% { transform: rotate(16.86deg); }
+  27.000% { transform: rotate(20.73deg); }
+  28.000% { transform: rotate(24.77deg); }
+  29.000% { transform: rotate(28.00deg); }
+  30.000% { transform: rotate(30.09deg); }
+  31.250% { transform: rotate(31.27deg); }
+  32.500% { transform: rotate(31.37deg); }
+  34.000% { transform: rotate(30.88deg); }
+  35.750% { transform: rotate(30.26deg); }
+  37.750% { transform: rotate(29.91deg); }
+  40.000% { transform: rotate(29.88deg); }
+  42.500% { transform: rotate(30.00deg); }
+  50.000% { transform: rotate(30.00deg); }
+  51.000% { transform: rotate(31.86deg); }
+  52.000% { transform: rotate(35.73deg); }
+  53.000% { transform: rotate(39.77deg); }
+  54.000% { transform: rotate(43.00deg); }
+  55.000% { transform: rotate(45.09deg); }
+  56.250% { transform: rotate(46.27deg); }
+  57.500% { transform: rotate(46.37deg); }
+  59.000% { transform: rotate(45.88deg); }
+  60.750% { transform: rotate(45.26deg); }
+  62.750% { transform: rotate(44.91deg); }
+  65.000% { transform: rotate(44.88deg); }
+  67.500% { transform: rotate(45.00deg); }
+  75.000% { transform: rotate(45.00deg); }
+  76.000% { transform: rotate(46.86deg); }
+  77.000% { transform: rotate(50.73deg); }
+  78.000% { transform: rotate(54.77deg); }
+  79.000% { transform: rotate(58.00deg); }
+  80.000% { transform: rotate(60.09deg); }
+  81.250% { transform: rotate(61.27deg); }
+  82.500% { transform: rotate(61.37deg); }
+  84.000% { transform: rotate(60.88deg); }
+  85.750% { transform: rotate(60.26deg); }
+  87.750% { transform: rotate(59.91deg); }
+  90.000% { transform: rotate(59.88deg); }
+  92.500% { transform: rotate(60.00deg); }
+  100.000% { transform: rotate(60.00deg); }
+}
+
+.mk.a .fspin { animation: fl-tick 4s linear infinite; will-change: transform; }
+.mk.a.mo:not(.s-working) .fspin { animation: none; }
+/* Scrolled out of the list: no tick (the sidebar's IntersectionObserver sets .off). */
+.mk.a.off .fspin { animation: none; }
+.win-unfocused .mk.a .fspin { animation-play-state: paused; }
+
+.mrig { display: block; overflow: visible; }
+.mrig .sk, .mrig .sa, .mrig .sb, .mrig .tw, .mrig .fl {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transition:
+    transform var(--mo-ms) var(--mo-ease) calc(var(--i, 0) * var(--mo-step)),
+    opacity var(--mo-ms) ease calc(var(--i, 0) * var(--mo-step));
+}
+.mrig .tw { transform: translate(0.85px, 0px) scale(0); opacity: 0; }
+.mrig.p-working .tw { transform: translate(0.85px, 0px) scale(1); opacity: 1; }
+.mrig .ly0 { opacity: 0; }
+.mo-hold .mrig .ly0 { opacity: 1; }
+.mrig .ly1 { transition: opacity var(--mo-ms) ease; }
+.mo-from .mrig .ly1 { opacity: 0; }
+.mo-snap, .mo-snap * { transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mk.a .fspin { animation: none !important; }
+  .mk.a .fset, .mk.a.mo, .mrig * { transition: none !important; }
+}
+
+/* Poses in viewBox units (16 units = 13 px, y down), copied from the mock (mock 552-629). Spare
+   strokes lie on another stroke or inside the filled diamond. */
+.mrig.p-working .k0 { transform: translate(0px, -3.25px) rotate(-90deg); }
+.mrig.p-working .k0 .sa { transform: translateX(-0.95px); } .mrig.p-working .k0 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k1 { transform: translate(2.815px, -1.625px) rotate(-30deg); }
+.mrig.p-working .k1 .sa { transform: translateX(-0.95px); } .mrig.p-working .k1 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k2 { transform: translate(2.815px, 1.625px) rotate(30deg); }
+.mrig.p-working .k2 .sa { transform: translateX(-0.95px); } .mrig.p-working .k2 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k3 { transform: translate(0px, 3.25px) rotate(90deg); }
+.mrig.p-working .k3 .sa { transform: translateX(-0.95px); } .mrig.p-working .k3 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k4 { transform: translate(-2.815px, 1.625px) rotate(150deg); }
+.mrig.p-working .k4 .sa { transform: translateX(-0.95px); } .mrig.p-working .k4 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k5 { transform: translate(-2.815px, -1.625px) rotate(210deg); }
+.mrig.p-working .k5 .sa { transform: translateX(-0.95px); } .mrig.p-working .k5 .sb { transform: translateX(0.95px); }
+.mrig.p-working .fl { transform: translate(0px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-blocked .k0 { transform: translate(0.615px, 0px) rotate(-90deg); }
+.mrig.p-blocked .k0 .sa { transform: translateX(0px); } .mrig.p-blocked .k0 .sb { transform: translateX(0px); }
+.mrig.p-blocked .k1 { transform: translate(3.173px, -2.557px) rotate(45deg); }
+.mrig.p-blocked .k1 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k1 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k2 { transform: translate(3.173px, 2.557px) rotate(-45deg); }
+.mrig.p-blocked .k2 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k2 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k3 { transform: translate(0.615px, 0px) rotate(90deg); }
+.mrig.p-blocked .k3 .sa { transform: translateX(0px); } .mrig.p-blocked .k3 .sb { transform: translateX(0px); }
+.mrig.p-blocked .k4 { transform: translate(-1.942px, 2.557px) rotate(225deg); }
+.mrig.p-blocked .k4 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k4 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k5 { transform: translate(-1.942px, -2.557px) rotate(135deg); }
+.mrig.p-blocked .k5 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k5 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0.84); opacity: 1; }
+.mrig.p-idle .k0 { transform: translate(0.615px, 0px) rotate(-90deg); }
+.mrig.p-idle .k0 .sa { transform: translateX(0px); } .mrig.p-idle .k0 .sb { transform: translateX(0px); }
+.mrig.p-idle .k1 { transform: translate(2.215px, -1.6px) rotate(45deg); }
+.mrig.p-idle .k1 .sa { transform: translateX(0px); } .mrig.p-idle .k1 .sb { transform: translateX(0px); }
+.mrig.p-idle .k2 { transform: translate(2.215px, 1.6px) rotate(-45deg); }
+.mrig.p-idle .k2 .sa { transform: translateX(0px); } .mrig.p-idle .k2 .sb { transform: translateX(0px); }
+.mrig.p-idle .k3 { transform: translate(0.615px, 0px) rotate(90deg); }
+.mrig.p-idle .k3 .sa { transform: translateX(0px); } .mrig.p-idle .k3 .sb { transform: translateX(0px); }
+.mrig.p-idle .k4 { transform: translate(-0.985px, 1.6px) rotate(225deg); }
+.mrig.p-idle .k4 .sa { transform: translateX(0px); } .mrig.p-idle .k4 .sb { transform: translateX(0px); }
+.mrig.p-idle .k5 { transform: translate(-0.985px, -1.6px) rotate(135deg); }
+.mrig.p-idle .k5 .sa { transform: translateX(0px); } .mrig.p-idle .k5 .sb { transform: translateX(0px); }
+.mrig.p-idle .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(1); opacity: 1; }
+.mrig.p-done .k0 { transform: translate(1.834px, -0.843px) rotate(-55.864deg); }
+.mrig.p-done .k0 .sa { transform: translateX(-1.833px); } .mrig.p-done .k0 .sb { transform: translateX(1.833px); }
+.mrig.p-done .k1 { transform: translate(2.244px, 0px) rotate(-55.864deg); }
+.mrig.p-done .k1 .sa { transform: translateX(-2.3px); } .mrig.p-done .k1 .sb { transform: translateX(2.3px); }
+.mrig.p-done .k2 { transform: translate(0.954px, 1.903px) rotate(-55.864deg); }
+.mrig.p-done .k2 .sa { transform: translateX(0px); } .mrig.p-done .k2 .sb { transform: translateX(0px); }
+.mrig.p-done .k3 { transform: translate(0.806px, 0.674px) rotate(124.136deg); }
+.mrig.p-done .k3 .sa { transform: translateX(0px); } .mrig.p-done .k3 .sb { transform: translateX(0px); }
+.mrig.p-done .k4 { transform: translate(-2.067px, 2.155px) rotate(224.692deg); }
+.mrig.p-done .k4 .sa { transform: translateX(-0.099px); } .mrig.p-done .k4 .sb { transform: translateX(0.099px); }
+.mrig.p-done .k5 { transform: translate(-1.566px, 1.508px) rotate(224.692deg); }
+.mrig.p-done .k5 .sa { transform: translateX(0px); } .mrig.p-done .k5 .sb { transform: translateX(0px); }
+.mrig.p-done .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-failed .k0 { transform: translate(0.615px, 0.628px) rotate(-45deg); }
+.mrig.p-failed .k0 .sa { transform: translateX(0px); } .mrig.p-failed .k0 .sb { transform: translateX(0px); }
+.mrig.p-failed .k1 { transform: translate(0.354px, 0.367px) rotate(-45deg); }
+.mrig.p-failed .k1 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k1 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k2 { transform: translate(0.354px, 0.889px) rotate(45deg); }
+.mrig.p-failed .k2 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k2 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k3 { transform: translate(0.615px, 0.628px) rotate(45deg); }
+.mrig.p-failed .k3 .sa { transform: translateX(0px); } .mrig.p-failed .k3 .sb { transform: translateX(0px); }
+.mrig.p-failed .k4 { transform: translate(0.876px, 0.889px) rotate(135deg); }
+.mrig.p-failed .k4 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k4 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k5 { transform: translate(0.876px, 0.367px) rotate(225deg); }
+.mrig.p-failed .k5 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k5 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-handoff .k0 { transform: translate(2.862px, -3.902px) rotate(-136.827deg); }
+.mrig.p-handoff .k0 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k0 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k1 { transform: translate(2.862px, -3.902px) rotate(43.173deg); }
+.mrig.p-handoff .k1 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k1 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k2 { transform: translate(2.862px, -0.726px) rotate(-43.173deg); }
+.mrig.p-handoff .k2 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k2 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k3 { transform: translate(-1.131px, 0.862px) rotate(0deg); }
+.mrig.p-handoff .k3 .sa { transform: translateX(0px); } .mrig.p-handoff .k3 .sb { transform: translateX(0px); }
+.mrig.p-handoff .k4 { transform: translate(-1.954px, 2.653px) rotate(231.147deg); }
+.mrig.p-handoff .k4 .sa { transform: translateX(0px); } .mrig.p-handoff .k4 .sb { transform: translateX(0px); }
+.mrig.p-handoff .k5 { transform: translate(-1.954px, -0.93px) rotate(128.853deg); }
+.mrig.p-handoff .k5 .sa { transform: translateX(0px); } .mrig.p-handoff .k5 .sb { transform: translateX(0px); }
+.mrig.p-handoff .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+
+/* A blocked or done compact row: the name line, then one dim line with the session's title
+   (46 px in the Mac theme: name 28, sub margin-top -4, sub 16, padding-bottom 6). */
+.row.has-sub {
+  height: auto;
+  align-items: flex-start;
+}
+
+.row.has-sub .slot {
+  height: var(--row-h);
+}
+
+.row.has-sub .body {
+  flex-direction: column;
+}
+
+.row.has-sub .name {
+  height: var(--row-h);
+  line-height: var(--row-h);
+}
+
+.row .sub {
+  display: block;
+  margin-top: -4px;
+  padding-bottom: 6px;
+  font-size: var(--sb-small);
+  line-height: 16px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The same marker as the pane's sidebar row, in the pane's top right corner (mock 305). */
+.pane-mk {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 5;
+  width: 22px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  background: var(--background);
+  pointer-events: none;
+}

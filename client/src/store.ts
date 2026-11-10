@@ -1,6 +1,6 @@
 // The tree as the window sees it, and which tab is on screen. Knows nothing about the DOM.
 
-import type { Group, Split, Tab, Tree } from "./connection";
+import type { AgentState, Group, Split, StateItem, Tab, Tree } from "./connection";
 
 export type Row =
   | { kind: "group"; group: Group }
@@ -8,6 +8,9 @@ export type Row =
   | { kind: "pane"; session: string; tab: string };
 
 const EMPTY: Tree = { groups: [], ungrouped: [], closed: [], defaults: {} };
+
+// A tab shows the loudest state of its panes, in this order.
+const LOUDNESS: readonly AgentState[] = ["blocked", "done", "working", "idle"];
 
 /** Session uuids left to right, top to bottom. */
 export function leaves(split: Split): string[] {
@@ -79,6 +82,10 @@ export class Store {
   tree: Tree = EMPTY;
   current: string | null = null;
   private readonly listeners = new Set<() => void>();
+  private states = new Map<string, { state: AgentState; since: number }>();
+  private readonly stateListeners = new Set<() => void>();
+  // Sessions a `seen` went out for, with the `since_ms` of the done it was for.
+  private readonly seenSent = new Map<string, number>();
 
   /** Takes a pushed tree. The current tab stays wherever it moved to, or a neighbor takes over. */
   setTree(tree: Tree): void {
@@ -115,6 +122,83 @@ export class Store {
       if (!group.collapsed) for (const tab of group.tabs) addTab(tab, 1);
     }
     return rows;
+  }
+
+  /** Takes the host's states. Tells only the state listeners, so no row or pane is built again. */
+  setStates(items: StateItem[]): void {
+    const states = new Map<string, { state: AgentState; since: number }>();
+    for (const item of items) {
+      const state = LOUDNESS.find((known) => known === item.state);
+      if (state) states.set(item.session, { state, since: item.since_ms });
+    }
+    this.states = states;
+    for (const session of this.seenSent.keys()) {
+      if (states.get(session)?.state !== "done") this.seenSent.delete(session);
+    }
+    for (const fn of this.stateListeners) fn();
+  }
+
+  /** A session's state. Null for a session with no hook event, or one the host did not name. */
+  stateOf(session: string): AgentState | null {
+    return this.states.get(session)?.state ?? null;
+  }
+
+  /** The loudest state of a tab's panes: blocked, then done, then working, then idle. */
+  tabState(tab: Tab): AgentState | null {
+    let best = LOUDNESS.length;
+    for (const session of leaves(tab.split)) {
+      const state = this.stateOf(session);
+      if (state) best = Math.min(best, LOUDNESS.indexOf(state));
+    }
+    return LOUDNESS[best] ?? null;
+  }
+
+  /** True when any session in the group is blocked, collapsed or not. */
+  groupBlocked(group: Group): boolean {
+    return group.tabs.some((tab) => this.tabState(tab) === "blocked");
+  }
+
+  /**
+   * The blocked tab after `after`, oldest blocked first, wrapping round. A tab that is not
+   * blocked, or null, gives the oldest. Null when nothing is blocked.
+   */
+  nextBlocked(after: string | null): string | null {
+    const blocked: { id: string; since: number }[] = [];
+    for (const tab of allTabs(this.tree)) {
+      let since = Infinity;
+      for (const session of leaves(tab.split)) {
+        const entry = this.states.get(session);
+        if (entry?.state === "blocked") since = Math.min(since, entry.since);
+      }
+      if (since !== Infinity) blocked.push({ id: tab.id, since });
+    }
+    // Sorting keeps sidebar order between tabs blocked at the same moment.
+    blocked.sort((a, b) => a.since - b.since);
+    if (blocked.length === 0) return null;
+    const at = blocked.findIndex((entry) => entry.id === after);
+    return blocked[(at + 1) % blocked.length].id;
+  }
+
+  /**
+   * The done sessions of the current tab to send `seen` for, each once per done. Nothing while
+   * the window does not have focus, since nobody is looking.
+   */
+  seenToSend(windowFocused: boolean): string[] {
+    const tab = this.currentTab();
+    if (!windowFocused || !tab) return [];
+    const out: string[] = [];
+    for (const session of leaves(tab.split)) {
+      const entry = this.states.get(session);
+      if (entry?.state !== "done" || this.seenSent.get(session) === entry.since) continue;
+      this.seenSent.set(session, entry.since);
+      out.push(session);
+    }
+    return out;
+  }
+
+  subscribeStates(fn: () => void): () => void {
+    this.stateListeners.add(fn);
+    return () => this.stateListeners.delete(fn);
   }
 
   subscribe(fn: () => void): () => void {

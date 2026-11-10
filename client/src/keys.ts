@@ -4,7 +4,7 @@
 
 import type { Connection, Dir, Place, Tab } from "./connection";
 import type { Panes, PaneDirection } from "./panes";
-import { type Store, allTabs, findTab } from "./store";
+import { type Store, allTabs, findTab, withCollapsed } from "./store";
 
 type Digit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 
@@ -28,7 +28,8 @@ export type Action =
   | "rename"
   | "zoomIn"
   | "zoomOut"
-  | "zoomReset";
+  | "zoomReset"
+  | "jumpBlocked";
 
 /**
  * Modifiers, then the key, joined by "+". A key with more than one binding lists them with ", ".
@@ -73,6 +74,7 @@ export const DEFAULT_KEYS: Record<Action, string> = {
   zoomIn: "Cmd+=, Cmd+Shift+=",
   zoomOut: "Cmd+-",
   zoomReset: "Cmd+0",
+  jumpBlocked: "Cmd+Shift+U",
 };
 
 export const ACTIONS = Object.keys(DEFAULT_KEYS) as Action[];
@@ -280,6 +282,19 @@ function jumpToTab(ctx: ActionContext, n: number): void {
   if (tab) selectTab(ctx, tab.id);
 }
 
+/** The next blocked tab, oldest first. A collapsed group it is in opens first. */
+function jumpBlocked(ctx: ActionContext): void {
+  const id = ctx.store.nextBlocked(ctx.store.current);
+  if (id === null) return;
+  const group = ctx.store.tree.groups.find((g) => g.tabs.some((tab) => tab.id === id));
+  if (group?.collapsed) {
+    // Shown at once, as a click on the folder does, then the host's pushed tree says the same.
+    ctx.store.setTree(withCollapsed(ctx.store.tree, group.key, false));
+    ctx.connection.treeOp({ type: "collapse_group", group: group.key, collapsed: false });
+  }
+  selectTab(ctx, id);
+}
+
 const PANE_DIRECTIONS: Partial<Record<Action, PaneDirection>> = {
   paneLeft: "left",
   paneRight: "right",
@@ -334,6 +349,9 @@ export function runAction(a: Action, ctx: ActionContext): void {
       return;
     case "zoomReset":
       ctx.ui.zoom(0);
+      return;
+    case "jumpBlocked":
+      jumpBlocked(ctx);
       return;
   }
 }

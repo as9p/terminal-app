@@ -1,8 +1,9 @@
 // The sidebar: one scrolling list of ungrouped tabs, then each group's header and tabs. Every
 // size and color is in styles.css, taken from docs/ui-review.md.
 
-import type { Group, Op, Tab } from "./connection";
+import type { AgentState, Group, Op, Tab } from "./connection";
 import { refocus } from "./focus";
+import { createMarker, markerState, showMarker, syncTick } from "./marker";
 import { RENAME_END, startRename } from "./rename";
 import { type Row, type Store, findTab, leaves } from "./store";
 
@@ -105,6 +106,8 @@ export class Sidebar {
   private drag: Drag | undefined;
   private dragged = false;
   private hovered: HTMLElement | undefined;
+  // Stops the working tick of markers scrolled out of the list (absent in tests).
+  private ticks: IntersectionObserver | undefined;
 
   constructor(element: HTMLElement, store: Store, events: SidebarEvents, rowStyle: RowStyle = "compact") {
     this.element = element;
@@ -133,6 +136,18 @@ export class Sidebar {
     this.list.addEventListener(RENAME_END, this.onRenameEnd);
     grip.addEventListener("pointerdown", this.onGripDown);
     window.addEventListener("resize", this.onWindowResize);
+    if (typeof IntersectionObserver !== "undefined") {
+      this.ticks = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const mk = entry.target as HTMLElement;
+            mk.classList.toggle("off", !entry.isIntersecting);
+            if (entry.isIntersecting) syncTick(mk);
+          }
+        },
+        { root: this.list },
+      );
+    }
     this.applyWidth();
   }
 
@@ -191,7 +206,9 @@ export class Sidebar {
     const fill = document.createElement("div");
     fill.className = "fill";
     fill.setAttribute("data-tauri-drag-region", "");
+    this.ticks?.disconnect();
     this.list.replaceChildren(...sections, fill);
+    for (const mk of this.list.querySelectorAll<HTMLElement>(".mk")) this.ticks?.observe(mk);
     this.rove(this.list.querySelector<HTMLElement>(".row.selected") ?? this.items()[0]);
     if (kept !== undefined) {
       this.items()
@@ -211,6 +228,79 @@ export class Sidebar {
         name.closest(".row")?.setAttribute("aria-label", text);
       }
     }
+    for (const row of this.list.querySelectorAll<HTMLElement>(".row[data-tab]")) {
+      const tab = findTab(this.store.tree, row.dataset.tab ?? "");
+      if (tab) this.applySub(row, tab, this.store.tabState(tab));
+    }
+  }
+
+  /**
+   * Shows new session states on the markers already in the list, in place, so each one morphs.
+   * Builds no row and reads no layout.
+   */
+  updateStates(): void {
+    for (const row of this.list.querySelectorAll<HTMLElement>(".row[data-tab]")) {
+      const tab = findTab(this.store.tree, row.dataset.tab ?? "");
+      const slot = row.querySelector<HTMLElement>(":scope > .slot");
+      if (!tab || !slot) continue;
+      const state = this.store.tabState(tab);
+      this.watch(showMarker(slot, state));
+      this.applySub(row, tab, state);
+    }
+    for (const row of this.list.querySelectorAll<HTMLElement>(".pane-row")) {
+      const slot = row.querySelector<HTMLElement>(":scope > .slot");
+      if (slot) this.watch(showMarker(slot, this.store.stateOf(row.dataset.session ?? "")));
+    }
+    for (const head of this.list.querySelectorAll<HTMLElement>(".ghead")) {
+      const group = this.store.tree.groups.find((g) => g.key === head.dataset.group);
+      if (group) this.applyRoll(head, group);
+    }
+  }
+
+  private watch(mk: HTMLElement | null): void {
+    if (mk) this.ticks?.observe(mk);
+  }
+
+  // A collapsed group with a blocked session shows the blocked marker after its count (mock
+  // 1224). Without one there is no roll slot, so the count sits at the right edge.
+  private applyRoll(head: HTMLElement, group: Group): void {
+    const want = group.collapsed && this.store.groupBlocked(group);
+    const roll = head.querySelector(":scope > .roll");
+    if (want && !roll) {
+      const made = document.createElement("span");
+      made.className = "roll";
+      made.title = "A session in this group is waiting on you";
+      made.append(createMarker("blocked"));
+      head.append(made);
+    } else if (!want && roll) {
+      roll.remove();
+    }
+  }
+
+  // A blocked or done row gets a dim second line with the title of the session in that state.
+  // It is left out when it would only repeat the row's name.
+  private applySub(row: HTMLElement, tab: Tab, state: AgentState | null): void {
+    const body = row.querySelector<HTMLElement>(":scope > .body");
+    if (!body) return;
+    let text = "";
+    if (state === "blocked" || state === "done") {
+      const session = leaves(tab.split).find((s) => this.store.stateOf(s) === state);
+      text = (session !== undefined ? this.events.title(session) : undefined) ?? "";
+      if (text === body.querySelector(".name")?.textContent) text = "";
+    }
+    let sub = body.querySelector<HTMLElement>(":scope > .sub");
+    if (text === "") {
+      sub?.remove();
+      row.classList.remove("has-sub");
+      return;
+    }
+    if (!sub) {
+      sub = document.createElement("span");
+      sub.className = "sub";
+      body.append(sub);
+      row.classList.add("has-sub");
+    }
+    if (sub.textContent !== text) sub.textContent = text;
   }
 
   /** Opens the rename field on the selected tab's row (Cmd+Shift+R). */
@@ -311,9 +401,7 @@ export class Sidebar {
     count.className = "gcount";
     count.textContent = String(this.count(group));
     head.append(count);
-    // The rolled-up blocked marker of a collapsed group goes after the count in a `span.roll`,
-    // from the state markers task. It is added only when there is a marker, so without one the
-    // count sits at the right edge (mock 1224).
+    this.applyRoll(head, group);
     return head;
   }
 
@@ -325,9 +413,11 @@ export class Sidebar {
     row.dataset.tab = tab.id;
     row.setAttribute("role", "button");
     if (selected) row.setAttribute("aria-current", "true");
-    // The state marker goes here, from the state markers task. Empty, it still keeps its width.
+    // The state marker. Empty, the slot still keeps its width.
     const slot = document.createElement("span");
     slot.className = "slot";
+    const state = this.store.tabState(tab);
+    showMarker(slot, state);
     const body = document.createElement("span");
     body.className = "body";
     const name = document.createElement("span");
@@ -344,6 +434,7 @@ export class Sidebar {
     body.append(name);
     row.setAttribute("aria-label", name.textContent ?? "");
     row.append(slot, body);
+    this.applySub(row, tab, state);
     return row;
   }
 
@@ -362,6 +453,7 @@ export class Sidebar {
     name.className = "pname";
     name.dataset.auto = session;
     name.textContent = this.autoName(session, undefined);
+    showMarker(slot, this.store.stateOf(session));
     row.append(slot, pidx, name);
     return row;
   }
@@ -625,6 +717,9 @@ export class Sidebar {
     ghost.className = "ghost";
     const slot = document.createElement("span");
     slot.className = "slot";
+    const shown = drag.source.querySelector(":scope > .slot > .mk");
+    const state = shown ? markerState(shown) : null;
+    if (state) slot.append(createMarker(state));
     const name = document.createElement("span");
     name.className = "gtext";
     name.textContent =

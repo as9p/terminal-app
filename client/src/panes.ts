@@ -3,6 +3,7 @@
 
 import type { Split, Tab } from "./connection";
 import { leaves, roundToCells, withSizesAt } from "./store";
+import { type MarkerState, showMarker } from "./marker";
 import type { TerminalView } from "./terminal";
 
 /** Makes the view for `session` inside `container`, which is already in the page. */
@@ -72,6 +73,7 @@ export class Panes {
   private filled: { tab: string; session: string } | undefined;
   private followMouse = false;
   private dim = false;
+  private stateOf: (session: string) => MarkerState | null = () => null;
 
   constructor(
     root: HTMLElement,
@@ -122,6 +124,7 @@ export class Panes {
     } else {
       this.root.replaceChildren(this.parked);
     }
+    this.updateStates();
     // Made once their boxes are in the page, so the first fit measures the real size.
     for (const session of fresh) {
       const entry = this.entries.get(session);
@@ -194,6 +197,37 @@ export class Panes {
       this.updateDim();
     } else {
       for (const view of this.all()) view.setDimmed(false);
+    }
+  }
+
+  /** Where the corner markers read each session's state from. */
+  setStateSource(stateOf: (session: string) => MarkerState | null): void {
+    this.stateOf = stateOf;
+    this.updateStates();
+  }
+
+  /**
+   * Puts each shown pane's state in its top right corner, in place, so it morphs as the sidebar's
+   * does. Only a split shows them, as only a split lists its panes in the sidebar. No terminal
+   * is touched.
+   */
+  updateStates(): void {
+    const split = this.layout?.classList.contains("split") === true;
+    for (const [session, entry] of this.entries) {
+      const corner = entry.element.querySelector<HTMLElement>(":scope > .pane-mk");
+      const state = split && entry.element.parentElement !== this.parked ? this.stateOf(session) : null;
+      if (state === null) {
+        corner?.remove();
+        continue;
+      }
+      if (corner) {
+        showMarker(corner, state);
+        continue;
+      }
+      const made = document.createElement("span");
+      made.className = "pane-mk";
+      showMarker(made, state);
+      entry.element.append(made);
     }
   }
 

@@ -57,6 +57,12 @@ export type SavedSession = {
 
 export type ClosedTab = { tab: Tab; group: string | null; index: number; panes: SavedSession[] };
 
+/** A Claude session's state, as the host names it. */
+export type AgentState = "working" | "blocked" | "done" | "idle";
+
+/** One session's state. `state` is null for a session that has had no hook event. */
+export type StateItem = { session: string; state: string | null; since_ms: number };
+
 export type GroupDefaults = { name: string | null; collapsed: boolean };
 
 export type Tree = {
@@ -138,6 +144,8 @@ export type ConnectionEvents = {
   onCwd?(session: number, cwd: string): void;
   /** The whole tree, as the answer to `treeGet` and after every later change to it. */
   onTree?(tree: Tree): void;
+  /** Every session's Claude state, with the tree after `treeGet` and after every change. */
+  onStates?(items: StateItem[]): void;
 };
 
 type HostFrame =
@@ -150,6 +158,7 @@ type HostFrame =
   | { type: "exited"; session: number; clean: boolean }
   | { type: "detached"; session: number }
   | { type: "tree"; tree: Tree }
+  | { type: "states"; items: StateItem[] }
   | { type: "error"; code: string; message: string };
 
 type Waiting = {
@@ -328,6 +337,11 @@ export class Connection {
     this.sendText({ type: "ack", session, bytes });
   }
 
+  /** The user has seen the session's tab, which turns a done session idle. */
+  seen(session: string): void {
+    this.sendText({ type: "seen", session });
+  }
+
   /** Sends typed text as UTF-8, synchronously. Dropped if the socket is not open. */
   sendInput(session: number, text: string): void {
     const ws = this.ws;
@@ -416,6 +430,9 @@ export class Connection {
         break;
       case "tree":
         this.events.onTree?.(frame.tree);
+        break;
+      case "states":
+        this.events.onStates?.(frame.items);
         break;
       case "exited": {
         const listener = this.listeners.get(frame.session);

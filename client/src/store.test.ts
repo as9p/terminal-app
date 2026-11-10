@@ -160,3 +160,109 @@ describe("store", () => {
     });
   });
 });
+
+describe("session states", () => {
+  it("tab_state_is_blocked_if_any_pane_is_blocked", () => {
+    const store = new Store();
+    const split = tab("t", { type: "row", children: [leaf("a"), leaf("b"), leaf("c")], sizes: [1, 1, 1] });
+    store.setTree(tree([], [split]));
+    store.setStates([
+      { session: "a", state: "working", since_ms: 1 },
+      { session: "b", state: "blocked", since_ms: 2 },
+      { session: "c", state: "idle", since_ms: 3 },
+    ]);
+    expect(store.tabState(split)).toBe("blocked");
+    expect(store.stateOf("a")).toBe("working");
+    expect(store.stateOf("nobody")).toBeNull();
+  });
+
+  it("tab_state_order_is_blocked_then_done_then_working_then_idle", () => {
+    const store = new Store();
+    const split = tab("t", { type: "row", children: [leaf("a"), leaf("b")], sizes: [1, 1] });
+    store.setTree(tree([], [split]));
+    const pair = (a: string | null, b: string | null) => {
+      store.setStates([
+        { session: "a", state: a, since_ms: 1 },
+        { session: "b", state: b, since_ms: 1 },
+      ]);
+      return store.tabState(split);
+    };
+    expect(pair("idle", "blocked")).toBe("blocked");
+    expect(pair("done", "blocked")).toBe("blocked");
+    expect(pair("working", "done")).toBe("done");
+    expect(pair("idle", "working")).toBe("working");
+    expect(pair("idle", null)).toBe("idle");
+    expect(pair(null, null)).toBeNull();
+    // A state this client does not know yet counts as none.
+    expect(pair("dreaming", null)).toBeNull();
+  });
+
+  it("collapsed_group_still_reports_blocked", () => {
+    const store = new Store();
+    const closed = group("g", [tab("g1"), tab("g2")], true);
+    store.setTree(tree([closed, group("h", [tab("h1")])]));
+    store.setStates([{ session: "s-g2", state: "blocked", since_ms: 5 }]);
+    expect(store.groupBlocked(closed)).toBe(true);
+    expect(store.groupBlocked(store.tree.groups[1])).toBe(false);
+  });
+
+  it("jump_goes_oldest_first_and_wraps", () => {
+    const store = new Store();
+    store.setTree(tree([group("g", [tab("b"), tab("c")])], [tab("a"), tab("quiet")]));
+    store.setStates([
+      { session: "s-a", state: "blocked", since_ms: 30 },
+      { session: "s-b", state: "blocked", since_ms: 10 },
+      { session: "s-c", state: "blocked", since_ms: 20 },
+      { session: "s-quiet", state: "working", since_ms: 1 },
+    ]);
+    expect(store.nextBlocked(null)).toBe("b");
+    expect(store.nextBlocked("quiet")).toBe("b");
+    expect(store.nextBlocked("b")).toBe("c");
+    expect(store.nextBlocked("c")).toBe("a");
+    expect(store.nextBlocked("a")).toBe("b");
+  });
+
+  it("jump_with_nothing_blocked_does_nothing", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    store.setStates([{ session: "s-a", state: "done", since_ms: 1 }]);
+    expect(store.nextBlocked("a")).toBeNull();
+    expect(store.nextBlocked(null)).toBeNull();
+  });
+
+  it("seen_sent_when_done_tab_becomes_current", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a"), tab("b")]));
+    store.setStates([{ session: "s-b", state: "done", since_ms: 7 }]);
+    expect(store.current).toBe("a");
+    expect(store.seenToSend(true)).toEqual([]);
+    store.select("b");
+    expect(store.seenToSend(true)).toEqual(["s-b"]);
+    // Once per done: the host's answer is on its way.
+    expect(store.seenToSend(true)).toEqual([]);
+    // A later done of the same session counts again.
+    store.setStates([{ session: "s-b", state: "done", since_ms: 9 }]);
+    expect(store.seenToSend(true)).toEqual(["s-b"]);
+  });
+
+  it("seen_not_sent_while_window_is_unfocused", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a"), tab("b")]));
+    store.setStates([{ session: "s-b", state: "done", since_ms: 7 }]);
+    store.select("b");
+    expect(store.seenToSend(false)).toEqual([]);
+    expect(store.seenToSend(true)).toEqual(["s-b"]);
+  });
+
+  it("states_tell_their_own_listeners_not_the_tree_listeners", () => {
+    const store = new Store();
+    store.setTree(tree([], [tab("a")]));
+    const tree_ = vi.fn();
+    const states = vi.fn();
+    store.subscribe(tree_);
+    store.subscribeStates(states);
+    store.setStates([{ session: "s-a", state: "working", since_ms: 1 }]);
+    expect(states).toHaveBeenCalledTimes(1);
+    expect(tree_).not.toHaveBeenCalled();
+  });
+});

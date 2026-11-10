@@ -270,6 +270,7 @@ async function main(): Promise<void> {
       );
     },
   });
+  panes.setStateSource((session) => store.stateOf(session));
   sidebar.setWidth(clampWidth(settings.sidebarWidth));
   sidebarElement.hidden = !settings.sidebarShown;
 
@@ -278,10 +279,37 @@ async function main(): Promise<void> {
     panes.prune(sessionsIn(store.tree));
     if (store.current !== null) rememberTab(store.current);
     sidebar.render();
+    sendSeen();
     // Someone moving through the rows with the keyboard, or typing a name, keeps their place.
     if (!sidebarElement.contains(document.activeElement)) refocus();
   });
   installFocusRule(document.body, panes);
+  // States change only markers, in place: no row is built again and no terminal is touched.
+  store.subscribeStates(() => {
+    sidebar.updateStates();
+    panes.updateStates();
+    sendSeen();
+  });
+
+  // Nobody is looking at a done tab while the window is behind another app, and the working
+  // tick rests meanwhile (`.win-unfocused` in styles.css).
+  let windowFocused = document.hasFocus();
+  document.body.classList.toggle("win-unfocused", !windowFocused);
+  window.addEventListener("focus", () => {
+    windowFocused = true;
+    document.body.classList.remove("win-unfocused");
+    sendSeen();
+  });
+  window.addEventListener("blur", () => {
+    windowFocused = false;
+    document.body.classList.add("win-unfocused");
+  });
+
+  /** Tells the host the done sessions on screen have been seen, which turns them idle. */
+  function sendSeen(): void {
+    if (!connection) return;
+    for (const session of store.seenToSend(windowFocused)) connection.seen(session);
+  }
 
   function save(patch: Parameters<typeof saveSettings>[0]): void {
     saveSettings(patch).catch((error: unknown) => bar.note(`Could not save the settings: ${error}`));
@@ -358,6 +386,9 @@ async function main(): Promise<void> {
           },
           onTree: (tree) => {
             if (connection === next) onTree(tree);
+          },
+          onStates: (items) => {
+            if (connection === next) store.setStates(items);
           },
         });
         connection = next;
