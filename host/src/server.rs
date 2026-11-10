@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::mem;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -27,13 +28,17 @@ use crate::auth;
 use crate::protocol::{
     ClientFrame, HostFrame, PROTO, SessionItem, code, decode_binary, encode_binary,
 };
-use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec};
+use crate::state::{self, SavedSession, State};
+use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec, Status};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 // A stuck program must not grow the host without limit.
 const MAX_QUEUED_INPUT: usize = 16 * 1024 * 1024;
+const SAVE_EVERY: Duration = Duration::from_secs(2);
+// A restored shell starts before any client says how big it is. Its first attach resizes it.
+const RESTORE_SIZE: Size = Size { cols: 80, rows: 24 };
 
 type Ws = WebSocketStream<TcpStream>;
 type Out = UnboundedSender<Message>;
@@ -46,9 +51,29 @@ pub async fn bind(port: u16) -> Result<TcpListener> {
         .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))
 }
 
-pub async fn serve(listener: TcpListener, token: String) {
+/// Brings back the sessions saved in `data_dir`, serves until `shutdown` completes, then saves
+/// once more. The caller should exit right after: the programs are still running, and a
+/// session that ends from here on stays saved, because a reboot hangs up every shell.
+pub async fn serve(
+    listener: TcpListener,
+    token: String,
+    data_dir: PathBuf,
+    shutdown: impl Future<Output = ()>,
+) {
+    let registry = Arc::new(Registry::new(data_dir));
+    let restoring = Arc::clone(&registry);
+    // Starting shells forks, and looking at folders can stall on a network mount.
+    let _ = spawn_blocking(move || restoring.restore()).await;
+    Arc::clone(&registry).start_saving();
+    tokio::select! {
+        () = accept(listener, token, Arc::clone(&registry)) => {}
+        () = shutdown => {}
+    }
+    let _ = spawn_blocking(move || registry.shut_down()).await;
+}
+
+async fn accept(listener: TcpListener, token: String, registry: Arc<Registry>) {
     let token: Arc<str> = token.into();
-    let registry = Arc::new(Registry::default());
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -251,7 +276,7 @@ impl Connection {
             ));
         };
         let (served, _) = self.attached(session)?;
-        if served.input.push(bytes) {
+        if served.running()?.input.push(bytes) {
             Ok(None)
         } else {
             Err(HostFrame::error(
@@ -290,7 +315,7 @@ impl Connection {
             } => {
                 let size = checked_size(cols, rows)?;
                 let (served, _) = self.attached(session)?;
-                served.handle.resize(size);
+                served.running()?.handle.resize(size);
                 Ok(None)
             }
             ClientFrame::Kill { session } => {
@@ -299,8 +324,10 @@ impl Connection {
             }
             ClientFrame::Ack { session, bytes } => {
                 // An ack can cross an exit or a detach on the wire, so a late one is no error.
-                if let Ok((served, id)) = self.attached(session) {
-                    served.handle.ack(id, bytes);
+                if let Ok((served, id)) = self.attached(session)
+                    && let Ok(running) = served.running()
+                {
+                    running.handle.ack(id, bytes);
                 }
                 Ok(None)
             }
@@ -330,7 +357,7 @@ impl Connection {
             .map_err(|_| HostFrame::error(code::BAD_REQUEST, "uuid does not parse"))?;
         let (kind, kind_name) = match kind.as_str() {
             "shell" => (Kind::Shell, "shell"),
-            // The uuid is also the chat id. Resuming a chat is not offered yet.
+            // The uuid is also the chat id. A new chat never resumes; a restored one can.
             "claude" => (
                 Kind::Claude {
                     chat: parsed,
@@ -340,40 +367,30 @@ impl Connection {
             ),
             _ => return Err(HostFrame::error(code::BAD_KIND, "unknown kind")),
         };
+        let chat = match kind {
+            Kind::Claude { chat, .. } => Some(chat),
+            Kind::Shell => None,
+        };
         let spec = SpawnSpec {
             kind,
             cwd: PathBuf::from(cwd),
             uuid: parsed,
         };
+        let cwd = spec.cwd.clone();
 
         // Forking is slow, and looking at a folder can stall on a network mount.
         let spawned = spawn_blocking(move || {
             if !spec.cwd.is_dir() {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
             }
-            let spawn_failed = |error: String| HostFrame::error(code::SPAWN_FAILED, &error);
-            let handle = Session::spawn(spec, size).map_err(|e| spawn_failed(format!("{e:#}")))?;
-            let handle = Arc::new(handle);
-            let input =
-                InputQueue::start(Arc::clone(&handle)).map_err(|e| spawn_failed(e.to_string()))?;
-            Ok((handle, input))
+            start_program(spec, size)
         })
         .await;
-        let (handle, input) = match spawned {
-            Ok(result) => result?,
-            Err(_) => {
-                let message = "starting the program failed";
-                return Err(HostFrame::error(code::SPAWN_FAILED, message));
-            }
-        };
+        let running = spawned.unwrap_or_else(|_| Err(start_failed()))?;
 
-        let session = self.registry.add(Served {
-            uuid: uuid.clone(),
-            kind: kind_name,
-            handle,
-            input,
-            kill_asked: AtomicBool::new(false),
-        });
+        let served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
+        let _ = served.running.set(running);
+        let session = self.registry.add(served);
         Ok(Some(HostFrame::Created { session, uuid }))
     }
 
@@ -381,6 +398,14 @@ impl Connection {
         let size = checked_size(cols, rows)?;
         let served = self.registry.get(session).ok_or_else(no_session)?;
         self.drop_attachment(session);
+        if served.running.get().is_none() {
+            // A restored Claude session starts here, so a reboot does not start every chat at
+            // once.
+            let starting = Arc::clone(&served);
+            let started = spawn_blocking(move || starting.start(size)).await;
+            started.unwrap_or_else(|_| Err(start_failed()))?;
+        }
+        let running = served.running()?;
 
         let (tx, rx) = unbounded();
         let wanted = Arc::new(Mutex::new(true));
@@ -397,7 +422,7 @@ impl Connection {
 
         // Takes a snapshot, which can be slow on a long scrollback. If this panics, `tx` is
         // gone with it and the pump answers `detached`.
-        let handle = Arc::clone(&served.handle);
+        let handle = Arc::clone(&running.handle);
         if let Ok(id) = spawn_blocking(move || handle.attach(tx, size)).await {
             self.attachments.insert(session, Attachment { id, wanted });
         }
@@ -422,8 +447,11 @@ impl Connection {
             return;
         };
         let was_wanted = mem::replace(&mut *lock(&attachment.wanted), false);
-        if was_wanted && let Some(served) = self.registry.get(session) {
-            served.handle.detach(attachment.id);
+        if was_wanted
+            && let Some(served) = self.registry.get(session)
+            && let Ok(running) = served.running()
+        {
+            running.handle.detach(attachment.id);
         }
     }
 
@@ -475,14 +503,30 @@ fn pump_events(session: u32, events: Receiver<ClientEvent>, out: Out, wanted: Ar
 
 /// Everything the host serves, shared by all connections. The locks only cover quick
 /// lookups, so they are safe to take on the async runtime.
-#[derive(Default)]
 struct Registry {
     last_session: AtomicU32,
     sessions: Mutex<HashMap<u32, Arc<Served>>>,
     layout: Mutex<Option<String>>,
+    data_dir: PathBuf,
+    /// What is in `state.json` now. Held while saving, so saves never cross.
+    saved: Mutex<State>,
+    /// Set before the last save on the way out. Nothing is saved after it, so the sessions a
+    /// shutdown or reboot ends stay saved.
+    shutting_down: AtomicBool,
 }
 
 impl Registry {
+    fn new(data_dir: PathBuf) -> Registry {
+        Registry {
+            last_session: AtomicU32::new(0),
+            sessions: Mutex::new(HashMap::new()),
+            layout: Mutex::new(None),
+            data_dir,
+            saved: Mutex::new(State::default()),
+            shutting_down: AtomicBool::new(false),
+        }
+    }
+
     fn add(&self, served: Served) -> u32 {
         let session = self.last_session.fetch_add(1, Ordering::Relaxed) + 1;
         lock(&self.sessions).insert(session, Arc::new(served));
@@ -498,20 +542,24 @@ impl Registry {
         drop(removed);
     }
 
+    /// A restored Claude session that has not started yet reports a size of 0 by 0.
     fn items(&self) -> Vec<SessionItem> {
         let sessions = lock(&self.sessions);
         let mut items: Vec<SessionItem> = sessions
             .iter()
             .map(|(&session, served)| {
-                let status = served.handle.status();
+                let status = served.running.get().map(|running| running.handle.status());
+                let size = status
+                    .as_ref()
+                    .map_or(Size { cols: 0, rows: 0 }, |status| status.size);
                 SessionItem {
                     session,
                     uuid: served.uuid.clone(),
                     kind: served.kind.to_string(),
-                    title: status.title,
-                    exited: status.exited,
-                    cols: status.size.cols,
-                    rows: status.size.rows,
+                    title: served.title(status.as_ref()),
+                    exited: status.and_then(|status| status.exited),
+                    cols: size.cols,
+                    rows: size.rows,
                 }
             })
             .collect();
@@ -520,19 +568,23 @@ impl Registry {
     }
 
     /// A finished session goes now. A running one is killed and goes once its exit has been
-    /// announced, so clients attached to it hear why.
+    /// announced, so clients attached to it hear why. Either way it is no longer saved.
     fn kill(self: &Arc<Self>, session: u32) -> Result<(), HostFrame> {
         let served = self.get(session).ok_or_else(no_session)?;
-        if served.handle.status().exited.is_some() {
+        let Some(running) = served.running.get() else {
+            self.remove(session);
+            return Ok(());
+        };
+        if running.handle.status().exited.is_some() {
             self.remove(session);
             return Ok(());
         }
         if served.kill_asked.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
-        served.handle.kill();
+        running.handle.kill();
 
-        let announced = served.handle.announced();
+        let announced = running.handle.announced();
         let registry = Arc::clone(self);
         // Without this thread the session stays listed as finished, and a later kill removes it.
         let _ = thread::Builder::new()
@@ -543,16 +595,244 @@ impl Registry {
             });
         Ok(())
     }
+
+    /// Puts back what `state.json` holds. Shells start now. Claude sessions wait for their
+    /// first attach.
+    fn restore(&self) {
+        let loaded = state::load(&self.data_dir);
+        *lock(&self.layout) = loaded.layout.clone();
+        for saved in &loaded.sessions {
+            let Some(served) = Served::restored(saved) else {
+                eprintln!("term-host: skipped a saved session that does not make sense");
+                continue;
+            };
+            let shell = served.chat.is_none();
+            let session = self.add(served);
+            if shell
+                && let Some(served) = self.get(session)
+                && let Err(HostFrame::Error { message, .. }) = served.start(RESTORE_SIZE)
+            {
+                // Stays listed, and its first attach tries again.
+                eprintln!("term-host: could not restore a shell: {message}");
+            }
+        }
+        *lock(&self.saved) = loaded;
+    }
+
+    fn start_saving(self: Arc<Self>) {
+        let started = thread::Builder::new()
+            .name("state-saver".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(SAVE_EVERY);
+                    self.save();
+                }
+            });
+        if let Err(error) = started {
+            eprintln!("term-host: sessions will not be saved: {error}");
+        }
+    }
+
+    /// Writes `state.json` if anything changed since the last write.
+    fn save(&self) {
+        let mut saved = lock(&self.saved);
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        self.write_state(&mut saved);
+    }
+
+    /// The last save. Taken while every program still runs, so their folders can be read.
+    fn shut_down(&self) {
+        let mut saved = lock(&self.saved);
+        self.shutting_down.store(true, Ordering::Relaxed);
+        self.write_state(&mut saved);
+    }
+
+    fn write_state(&self, saved: &mut State) {
+        let state = self.state();
+        if state == *saved {
+            return;
+        }
+        // Left as it was on failure, so the next save tries again.
+        match state::save(&self.data_dir, &state) {
+            Ok(()) => *saved = state,
+            Err(error) => eprintln!("term-host: cannot save sessions: {error}"),
+        }
+    }
+
+    fn state(&self) -> State {
+        let served: Vec<(u32, Arc<Served>)> = lock(&self.sessions)
+            .iter()
+            .map(|(&session, served)| (session, Arc::clone(served)))
+            .collect();
+        let mut numbered: Vec<(u32, SavedSession)> = served
+            .into_iter()
+            .filter_map(|(session, served)| Some((session, served.saved()?)))
+            .collect();
+        numbered.sort_by_key(|(session, _)| *session);
+        State {
+            sessions: numbered.into_iter().map(|(_, saved)| saved).collect(),
+            layout: lock(&self.layout).clone(),
+        }
+    }
 }
 
 /// A session and what the host knows about it. A finished one stays here, so a client
 /// reconnecting later sees its screen and exit.
 struct Served {
     uuid: String,
+    id: Uuid,
     kind: &'static str,
+    chat: Option<Uuid>,
+    /// Where the program was last seen, or where it is to start.
+    cwd: Mutex<PathBuf>,
+    /// Saved before a restart, and shown until the program sets a title of its own.
+    saved_title: Option<String>,
+    /// Empty only for a restored session that has not started yet.
+    running: OnceLock<Running>,
+    starting: Mutex<()>,
+    kill_asked: AtomicBool,
+}
+
+struct Running {
     handle: Arc<SessionHandle>,
     input: InputQueue,
-    kill_asked: AtomicBool,
+}
+
+impl Served {
+    fn new(
+        uuid: String,
+        id: Uuid,
+        kind: &'static str,
+        chat: Option<Uuid>,
+        cwd: PathBuf,
+        saved_title: Option<String>,
+    ) -> Served {
+        Served {
+            uuid,
+            id,
+            kind,
+            chat,
+            cwd: Mutex::new(cwd),
+            saved_title,
+            running: OnceLock::new(),
+            starting: Mutex::new(()),
+            kill_asked: AtomicBool::new(false),
+        }
+    }
+
+    fn restored(saved: &SavedSession) -> Option<Served> {
+        let id = Uuid::parse_str(&saved.uuid).ok()?;
+        let (kind, chat) = match (saved.kind.as_str(), saved.chat) {
+            ("shell", _) => ("shell", None),
+            ("claude", Some(chat)) => ("claude", Some(chat)),
+            _ => return None,
+        };
+        let served = Served::new(
+            saved.uuid.clone(),
+            id,
+            kind,
+            chat,
+            saved.cwd.clone(),
+            saved.title.clone(),
+        );
+        Some(served)
+    }
+
+    /// Only a session with no attachment yet can be waiting to start, so its absence reads as
+    /// not attached.
+    fn running(&self) -> Result<&Running, HostFrame> {
+        self.running
+            .get()
+            .ok_or_else(|| HostFrame::error(code::NOT_ATTACHED, "not attached to this session"))
+    }
+
+    fn title(&self, status: Option<&Status>) -> Option<String> {
+        status
+            .and_then(|status| status.title.clone())
+            .or_else(|| self.saved_title.clone())
+    }
+
+    /// Starts a restored session, in its saved folder or the home folder if that is gone. A
+    /// Claude chat resumes only if it has a transcript, since one that never got a first
+    /// message cannot be resumed and starts fresh with the same id. Blocks.
+    fn start(&self, size: Size) -> Result<(), HostFrame> {
+        let _gate = lock(&self.starting);
+        if self.running.get().is_some() {
+            return Ok(());
+        }
+        let wanted = lock(&self.cwd).clone();
+        let cwd = if wanted.is_dir() {
+            wanted
+        } else {
+            fallback_dir()
+        };
+        let kind = match self.chat {
+            Some(chat) => Kind::Claude {
+                chat,
+                resume: state::transcript_exists(chat),
+            },
+            None => Kind::Shell,
+        };
+        *lock(&self.cwd) = cwd.clone();
+        let spec = SpawnSpec {
+            kind,
+            cwd,
+            uuid: self.id,
+        };
+        let _ = self.running.set(start_program(spec, size)?);
+        Ok(())
+    }
+
+    /// What to save, or None if the session should not come back: it was closed with `kill`,
+    /// or it ended cleanly on its own, as a typed `exit` does. One ended by a signal stays,
+    /// since a reboot hangs up every shell before the host is told to stop.
+    fn saved(&self) -> Option<SavedSession> {
+        if self.kill_asked.load(Ordering::Relaxed) {
+            return None;
+        }
+        let running = self.running.get();
+        let status = running.map(|running| running.handle.status());
+        let exited = status.as_ref().and_then(|status| status.exited);
+        if exited == Some(true) {
+            return None;
+        }
+        // Once it has exited its pid may belong to something else.
+        if exited.is_none()
+            && let Some(pid) = running.and_then(|running| running.handle.pid())
+            && let Some(dir) = state::current_dir(pid)
+        {
+            *lock(&self.cwd) = dir;
+        }
+        Some(SavedSession {
+            uuid: self.uuid.clone(),
+            kind: self.kind.to_string(),
+            cwd: lock(&self.cwd).clone(),
+            title: self.title(status.as_ref()),
+            chat: self.chat,
+        })
+    }
+}
+
+/// Starts the program and its input thread. Blocks.
+fn start_program(spec: SpawnSpec, size: Size) -> Result<Running, HostFrame> {
+    let spawn_failed = |error: String| HostFrame::error(code::SPAWN_FAILED, &error);
+    let handle = Session::spawn(spec, size).map_err(|e| spawn_failed(format!("{e:#}")))?;
+    let handle = Arc::new(handle);
+    let input = InputQueue::start(Arc::clone(&handle)).map_err(|e| spawn_failed(e.to_string()))?;
+    Ok(Running { handle, input })
+}
+
+fn start_failed() -> HostFrame {
+    HostFrame::error(code::SPAWN_FAILED, "starting the program failed")
+}
+
+/// Where a restored session starts when its folder is gone.
+fn fallback_dir() -> PathBuf {
+    dirs::home_dir()
+        .filter(|home| home.is_dir())
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Each session has its own writer thread, because a write blocks while the program is not

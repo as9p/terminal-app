@@ -89,6 +89,20 @@ function describe(error: unknown, port: number | undefined): string {
   return String(error);
 }
 
+/** What the app asks the host to keep for it. The host never looks inside. */
+type Layout = { tab: string };
+
+/** The tab the window last showed, or undefined if the saved layout is missing or not ours. */
+function savedTab(json: string | null): string | undefined {
+  if (json === null) return undefined;
+  try {
+    const layout = JSON.parse(json) as Partial<Layout> | null;
+    return typeof layout?.tab === "string" ? layout.tab : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -133,17 +147,22 @@ async function main(): Promise<void> {
   });
 
   async function chooseSession(next: Connection, home: string): Promise<number> {
+    // The host keeps the layout across restarts, so a new window goes back to the same tab.
+    sessionUuid ??= savedTab(await next.layout());
     const live = (await next.list()).filter((item) => item.exited === null);
     // Session numbers start over in a new host, so the uuid is what says it is the same one.
     const existing = live.find((item) => item.uuid === sessionUuid) ?? live[0];
+    let session: number;
     if (existing) {
       sessionUuid = existing.uuid;
-      return existing.session;
+      session = existing.session;
+    } else {
+      const uuid = crypto.randomUUID();
+      const { cols, rows } = view.size;
+      session = await next.create(uuid, "shell", home, cols, rows);
+      sessionUuid = uuid;
     }
-    const uuid = crypto.randomUUID();
-    const { cols, rows } = view.size;
-    const session = await next.create(uuid, "shell", home, cols, rows);
-    sessionUuid = uuid;
+    next.setLayout(JSON.stringify({ tab: sessionUuid } satisfies Layout));
     return session;
   }
 

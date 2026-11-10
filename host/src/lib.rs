@@ -6,6 +6,7 @@ mod pty;
 mod screen;
 pub mod server;
 mod session;
+pub mod state;
 
 pub use env::clean_env;
 pub use pty::{Size, prepare_for_fork};

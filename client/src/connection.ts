@@ -66,6 +66,7 @@ type HostFrame =
   | { type: "title"; session: number; title: string }
   | { type: "exited"; session: number; clean: boolean }
   | { type: "detached"; session: number }
+  | { type: "layout"; json: string | null }
   | { type: "error"; code: string; message: string };
 
 type Waiting = {
@@ -78,6 +79,7 @@ type Waiting = {
 };
 
 const LIST_CODES: readonly string[] = [];
+const LAYOUT_CODES: readonly string[] = [];
 const CREATE_CODES = ["bad_request", "bad_kind", "bad_cwd", "bad_size", "spawn_failed"];
 const ATTACH_CODES = ["no_session", "bad_size"];
 
@@ -165,6 +167,23 @@ export class Connection {
         if (frame.type === "sessions") resolve(frame.items);
       },
     );
+  }
+
+  /** The layout last given to `setLayout`, kept by the host across restarts, or null. */
+  layout(): Promise<string | null> {
+    return this.request(
+      { type: "layout_get" },
+      LAYOUT_CODES,
+      (frame) => frame.type === "layout",
+      (frame, resolve: (json: string | null) => void) => {
+        if (frame.type === "layout") resolve(frame.json);
+      },
+    );
+  }
+
+  /** The host never looks inside `json`. Dropped if the socket is not open. */
+  setLayout(json: string): void {
+    this.sendText({ type: "layout_set", json });
   }
 
   /** Resolves with the session number. Rejects with a HostError or a ConnectionFailure. */
