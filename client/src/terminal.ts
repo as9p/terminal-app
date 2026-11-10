@@ -16,6 +16,8 @@ const SHIFT_ENTER = "\x1b\r";
 const FULL_RESET = "\x1bc";
 const STOPPED_LINE = "\r\n\x1b[2mThe program stopped unexpectedly.\x1b[0m\r\n";
 
+export type Renderer = "webgl" | "dom";
+
 export type TerminalViewEvents = {
   /** The selection changed to this non-empty text. */
   onSelection(text: string): void;
@@ -61,7 +63,8 @@ export class TerminalView {
   private attachedAt = 0;
   private reattachTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(parent: HTMLElement, events: TerminalViewEvents) {
+  /** `renderer` is for speed runs: `dom` leaves out WebGL, so xterm draws with the DOM. */
+  constructor(parent: HTMLElement, events: TerminalViewEvents, renderer: Renderer = "webgl") {
     this.parent = parent;
     this.events = events;
     this.term = new Terminal({
@@ -82,7 +85,7 @@ export class TerminalView {
     this.term.unicode.activeVersion = "11";
     this.term.attachCustomKeyEventHandler(this.onKey);
     this.term.open(parent);
-    this.loadWebgl();
+    if (renderer === "webgl") this.loadWebgl();
 
     this.subscriptions.push(
       this.term.onData((data) => this.connection?.sendInput(this.session, data)),

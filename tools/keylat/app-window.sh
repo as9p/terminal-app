@@ -21,7 +21,13 @@ open_app() {
     return 1
   fi
   APP_DATA=$(mktemp -d -t term-speed)
-  SHELL=$2 TERM_APP_DATA=$APP_DATA TERM_HOST_PORT=$APP_PORT "$APP" > /dev/null 2>&1 &
+  # A speed run picks the renderer, webgl or dom, with TA_RENDERER. Unset, the app keeps WebGL.
+  local renderer=()
+  if [ -n "${TA_RENDERER:-}" ]; then
+    renderer=(TA_RENDERER=$TA_RENDERER)
+  fi
+  # env replaces itself with the app, so APP_PID is still the app's.
+  SHELL=$2 TERM_APP_DATA=$APP_DATA TERM_HOST_PORT=$APP_PORT env "${renderer[@]}" "$APP" > /dev/null 2>&1 &
   APP_PID=$!
   APP_WINDOW=""
   for i in {1..40}; do

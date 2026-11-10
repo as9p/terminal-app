@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 import { Connection, ConnectionFailure, HostError, type HostAddress } from "./connection";
-import { TerminalView, terminalFontReady } from "./terminal";
+import { type Renderer, TerminalView, terminalFontReady } from "./terminal";
 import { theme } from "./theme";
 
 type HostConnection = HostAddress & { home: string };
@@ -66,6 +66,21 @@ function findHost(): Promise<HostConnection> {
   return invoke<HostConnection>("host_connection");
 }
 
+/** TA_RENDERER from a speed run, or `renderer` in the dev page's address. WebGL otherwise. */
+async function findRenderer(): Promise<Renderer> {
+  let value: string | null;
+  if (import.meta.env.DEV && !inTauri()) {
+    value = new URLSearchParams(location.search).get("renderer");
+  } else {
+    try {
+      value = await invoke<string | null>("renderer");
+    } catch {
+      value = null;
+    }
+  }
+  return value === "dom" ? "dom" : "webgl";
+}
+
 // A native write, because WKWebView can refuse navigator.clipboard outside a user gesture.
 function copy(text: string): Promise<void> {
   if (import.meta.env.DEV && !inTauri()) return navigator.clipboard.writeText(text);
@@ -120,7 +135,7 @@ async function main(): Promise<void> {
   barElement.style.color = theme.foreground ?? "";
   const bar = new StatusBar(barElement);
 
-  await terminalFontReady();
+  const [renderer] = await Promise.all([findRenderer(), terminalFontReady()]);
 
   let connection: Connection | undefined;
   let sessionUuid: string | undefined;
@@ -128,21 +143,25 @@ async function main(): Promise<void> {
   // After a crash the screen is what matters, and nothing on it needs the host any more.
   let stopped = false;
 
-  const view = new TerminalView(parent, {
-    onSelection: (text) => {
-      copy(text).catch((error: unknown) => bar.note(`Could not copy the selection: ${error}`));
+  const view = new TerminalView(
+    parent,
+    {
+      onSelection: (text) => {
+        copy(text).catch((error: unknown) => bar.note(`Could not copy the selection: ${error}`));
+      },
+      onExited: (clean) => {
+        if (clean) {
+          getCurrentWindow()
+            .close()
+            .catch((error: unknown) => bar.show(`Could not close the window: ${error}`));
+        } else {
+          stopped = true;
+        }
+      },
+      onAttachLost: () => void bringUp(),
     },
-    onExited: (clean) => {
-      if (clean) {
-        getCurrentWindow()
-          .close()
-          .catch((error: unknown) => bar.show(`Could not close the window: ${error}`));
-      } else {
-        stopped = true;
-      }
-    },
-    onAttachLost: () => void bringUp(),
-  });
+    renderer,
+  );
 
   // Clicks on the padding or the bar would otherwise take the keyboard from the terminal.
   document.addEventListener("mousedown", (event) => {

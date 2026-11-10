@@ -11,12 +11,19 @@ async fn host_connection() -> Result<host::HostConnection, String> {
         .map_err(|error| format!("The search for the host stopped: {error}"))?
 }
 
+/// The renderer a speed run asked for through TA_RENDERER, `webgl` or `dom`. None leaves the
+/// default.
+#[tauri::command]
+fn renderer() -> Option<String> {
+    std::env::var("TA_RENDERER").ok()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         // Saves the window's size and place on exit and puts them back at the next start.
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![host_connection])
+        .invoke_handler(tauri::generate_handler![host_connection, renderer])
         .run(tauri::generate_context!())
         .expect("tauri failed to run");
 }
