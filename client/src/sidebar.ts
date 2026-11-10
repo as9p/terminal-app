@@ -2,13 +2,19 @@
 // size and color is in styles.css, taken from docs/ui-review.md.
 
 import type { Group, Tab } from "./connection";
+import { refocus } from "./focus";
 import { type Row, type Store, leaves } from "./store";
 
 export const MIN_WIDTH = 168;
 export const DEFAULT_WIDTH = 240;
 export const MAX_WIDTH = 480;
+/** The terminal area never gets narrower than this because of the sidebar. */
+export const TERMINAL_MIN_WIDTH = 320;
 
 const FLIP_MS = 180;
+
+// What the keyboard moves between: tab rows and the folder button of each group header.
+const ITEMS = ".row, .ghead > .slot";
 
 const FOLDER_SVG =
   '<svg class="gfold" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true">' +
@@ -20,6 +26,14 @@ const FOLDER_SVG =
 export function clampWidth(px: number): number {
   if (!Number.isFinite(px)) return DEFAULT_WIDTH;
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(px)));
+}
+
+/**
+ * The width to show: the saved width, narrowed so the terminal area keeps at least 320 px, and
+ * never under the minimum.
+ */
+export function fitWidth(saved: number, windowWidth: number): number {
+  return Math.max(MIN_WIDTH, Math.min(clampWidth(saved), Math.floor(windowWidth) - TERMINAL_MIN_WIDTH));
 }
 
 function folderName(path: string): string {
@@ -56,6 +70,10 @@ export class Sidebar {
   private flipFrom: Flip | undefined;
   private flipTimer = 0;
   private flipLayer: HTMLElement | undefined;
+  // The width the user chose, and the width shown, which a narrow window can make smaller.
+  private savedWidth = DEFAULT_WIDTH;
+  private shownWidth = 0;
+  private fitFrame = 0;
 
   constructor(element: HTMLElement, store: Store, events: SidebarEvents, rowStyle: RowStyle = "compact") {
     this.element = element;
@@ -74,7 +92,12 @@ export class Sidebar {
     grip.className = "grip";
     element.replaceChildren(this.list, usage, grip);
     this.list.addEventListener("click", this.onClick);
+    // Keys reach these only while a row or header has focus, never on the terminal's key path.
+    this.list.addEventListener("keydown", this.onKeyDown);
+    this.list.addEventListener("focusin", this.onFocusIn);
     grip.addEventListener("pointerdown", this.onGripDown);
+    window.addEventListener("resize", this.onWindowResize);
+    this.applyWidth();
   }
 
   /** Builds the list again, unless nothing it shows has changed. */
@@ -120,6 +143,7 @@ export class Sidebar {
     fill.className = "fill";
     fill.setAttribute("data-tauri-drag-region", "");
     this.list.replaceChildren(...sections, fill);
+    this.rove(this.list.querySelector<HTMLElement>(".row.selected") ?? this.items()[0]);
     this.markFocused();
     if (from) this.playFlip(from);
   }
@@ -128,7 +152,10 @@ export class Sidebar {
   retitle(): void {
     for (const name of this.list.querySelectorAll<HTMLElement>("[data-auto]")) {
       const text = this.autoName(name.dataset.auto ?? "", name.dataset.folder);
-      if (name.textContent !== text) name.textContent = text;
+      if (name.textContent !== text) {
+        name.textContent = text;
+        name.closest(".row")?.setAttribute("aria-label", text);
+      }
     }
   }
 
@@ -140,8 +167,35 @@ export class Sidebar {
     }
   }
 
+  /** Saves `width` as the chosen width and shows as much of it as the window leaves room for. */
   setWidth(width: number): void {
-    this.element.style.width = `${clampWidth(width)}px`;
+    this.savedWidth = clampWidth(width);
+    this.applyWidth();
+  }
+
+  private applyWidth(): void {
+    const width = fitWidth(this.savedWidth, window.innerWidth);
+    if (width === this.shownWidth) return;
+    this.shownWidth = width;
+    this.element.style.width = `${width}px`;
+  }
+
+  // At most once a frame, and it reads only the window's width, so it never forces a layout.
+  private readonly onWindowResize = (): void => {
+    if (this.fitFrame) return;
+    this.fitFrame = requestAnimationFrame(() => {
+      this.fitFrame = 0;
+      this.applyWidth();
+    });
+  };
+
+  private items(): HTMLElement[] {
+    return [...this.list.querySelectorAll<HTMLElement>(ITEMS)];
+  }
+
+  // One tab stop in the list: `current` takes it, every other row and header gives it up.
+  private rove(current: HTMLElement | undefined): void {
+    for (const item of this.items()) item.tabIndex = item === current ? 0 : -1;
   }
 
   // Everything the list shows, so a pushed tree that only moved `last_used` costs nothing.
@@ -196,18 +250,21 @@ export class Sidebar {
     const count = document.createElement("span");
     count.className = "gcount";
     count.textContent = String(this.count(group));
-    // Holds the rolled-up blocked marker of a collapsed group, from the state markers task.
-    const roll = document.createElement("span");
-    roll.className = "roll";
-    head.append(count, roll);
+    head.append(count);
+    // The rolled-up blocked marker of a collapsed group goes after the count in a `span.roll`,
+    // from the state markers task. It is added only when there is a marker, so without one the
+    // count sits at the right edge (mock 1224).
     return head;
   }
 
   private tabRow(tab: Tab): HTMLElement {
     const row = document.createElement("div");
-    row.className = tab.id === this.store.current ? "row selected" : "row";
+    const selected = tab.id === this.store.current;
+    row.className = selected ? "row selected" : "row";
     row.dataset.key = `tab:${tab.id}`;
     row.dataset.tab = tab.id;
+    row.setAttribute("role", "button");
+    if (selected) row.setAttribute("aria-current", "true");
     // The state marker goes here, from the state markers task. Empty, it still keeps its width.
     const slot = document.createElement("span");
     slot.className = "slot";
@@ -225,6 +282,7 @@ export class Sidebar {
       name.textContent = this.autoName(session, name.dataset.folder);
     }
     body.append(name);
+    row.setAttribute("aria-label", name.textContent ?? "");
     row.append(slot, body);
     return row;
   }
@@ -252,11 +310,7 @@ export class Sidebar {
     const target = event.target instanceof Element ? event.target : null;
     const fold = target?.closest<HTMLElement>(".ghead .slot");
     if (fold) {
-      const key = fold.parentElement?.dataset.group;
-      const group = this.store.tree.groups.find((g) => g.key === key);
-      if (!group) return;
-      this.flipFrom = this.measure(group);
-      this.events.collapse(group.key, !group.collapsed);
+      this.toggle(fold);
       return;
     }
     const pane = target?.closest<HTMLElement>(".pane-row");
@@ -266,6 +320,38 @@ export class Sidebar {
     }
     const row = target?.closest<HTMLElement>(".row");
     if (row?.dataset.tab) this.events.select(row.dataset.tab);
+  };
+
+  private toggle(fold: HTMLElement): void {
+    const key = fold.parentElement?.dataset.group;
+    const group = this.store.tree.groups.find((g) => g.key === key);
+    if (!group) return;
+    this.flipFrom = this.measure(group);
+    this.events.collapse(group.key, !group.collapsed);
+  }
+
+  // Up and Down move between visible rows and headers, Enter or Space selects a tab or opens and
+  // closes a group, then typing goes back to the terminal (mock 1844-1853).
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (!target?.matches(ITEMS) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const items = this.items();
+      items[items.indexOf(target) + (event.key === "ArrowDown" ? 1 : -1)]?.focus();
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") return;
+    // Also keeps the folder button's own click from toggling a second time.
+    event.preventDefault();
+    if (target.classList.contains("slot")) this.toggle(target);
+    else if (target.dataset.tab) this.events.select(target.dataset.tab);
+    refocus();
+  };
+
+  private readonly onFocusIn = (event: FocusEvent): void => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.matches(ITEMS)) this.rove(target);
   };
 
   // Collapse motion, FLIP: measure, build the new list, move each row back to where it was with
@@ -366,10 +452,11 @@ export class Sidebar {
     const grip = event.currentTarget as HTMLElement;
     grip.setPointerCapture(event.pointerId);
     const startX = event.clientX;
-    const startWidth = this.element.getBoundingClientRect().width;
-    let width = clampWidth(startWidth);
+    const startWidth = this.shownWidth;
+    let width = startWidth;
+    // Saves what the user sees, so a narrow window never stores a width larger than shown.
     const move = (moveEvent: PointerEvent) => {
-      const next = clampWidth(startWidth + moveEvent.clientX - startX);
+      const next = fitWidth(startWidth + moveEvent.clientX - startX, window.innerWidth);
       if (next === width) return;
       width = next;
       this.setWidth(width);
@@ -378,7 +465,9 @@ export class Sidebar {
       grip.removeEventListener("pointermove", move);
       grip.removeEventListener("pointerup", up);
       grip.removeEventListener("pointercancel", up);
-      if (width !== clampWidth(startWidth)) this.events.resized?.(width);
+      if (width !== startWidth) this.events.resized?.(width);
+      // The preventDefault above also stops the mouseup the focus rule listens for.
+      refocus();
     };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);

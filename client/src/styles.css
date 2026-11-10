@@ -52,7 +52,6 @@ body {
   /* The window drag strip. */
   padding-top: 10px;
   background: rgba(205, 214, 244, 0.034);
-  border-right: 1px solid var(--mac-hair);
   /* Nothing inside the sidebar can make the terminal area lay out again. */
   contain: strict;
   font: normal var(--sb-font) var(--sys);
@@ -60,6 +59,18 @@ body {
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* The edge line, drawn over the sidebar so rows keep its full width (mock 386). */
+#sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--mac-hair);
+  pointer-events: none;
 }
 
 #sidebar[hidden] {
@@ -255,6 +266,16 @@ button.slot {
 
 .row.selected::before {
   background: var(--mac-sel);
+}
+
+/* Keyboard focus outlines the same rounded rect, not the row (mock 399-400). */
+.row:focus-visible {
+  outline: none;
+}
+
+.row:focus-visible::before {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .row {

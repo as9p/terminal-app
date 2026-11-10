@@ -6,6 +6,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 
 import type { Connection, SessionListener } from "./connection";
+import { followLeftOption } from "./option-key";
 import { fontFamily, fontSize, lineHeight, theme } from "./theme";
 
 const ACK_BYTES = 128 * 1024;
@@ -49,6 +50,7 @@ export class TerminalView {
   private readonly fitAddon = new FitAddon();
   private readonly observer: ResizeObserver;
   private readonly subscriptions: { dispose(): void }[] = [];
+  private readonly stopOption: () => void;
 
   private connection: Connection | undefined;
   private session = 0;
@@ -96,10 +98,9 @@ export class TerminalView {
       }),
     );
 
-    // Capture, so xterm sees the new setting on the same key press that follows.
-    window.addEventListener("keydown", this.onWindowKeyDown, true);
-    window.addEventListener("keyup", this.onWindowKeyUp, true);
-    window.addEventListener("blur", this.onWindowBlur);
+    this.stopOption = followLeftOption((meta) => {
+      this.term.options.macOptionIsMeta = meta;
+    });
 
     this.fitAddon.fit();
     this.observer = new ResizeObserver(this.fitSoon);
@@ -142,9 +143,7 @@ export class TerminalView {
     cancelAnimationFrame(this.fitFrame);
     clearTimeout(this.reattachTimer);
     this.observer.disconnect();
-    window.removeEventListener("keydown", this.onWindowKeyDown, true);
-    window.removeEventListener("keyup", this.onWindowKeyUp, true);
-    window.removeEventListener("blur", this.onWindowBlur);
+    this.stopOption();
     for (const subscription of this.subscriptions) subscription.dispose();
     this.term.dispose();
     this.parent.replaceChildren();
@@ -255,19 +254,5 @@ export class TerminalView {
     // Left to the browser, so the Edit menu copies and pastes and the shell never sees them.
     if (event.metaKey && (event.code === "KeyC" || event.code === "KeyV")) return false;
     return true;
-  };
-
-  // Left Option acts as Alt while right Option still types special characters. xterm has one
-  // setting for both, so it follows the left key.
-  private readonly onWindowKeyDown = (event: KeyboardEvent): void => {
-    if (event.code === "AltLeft") this.term.options.macOptionIsMeta = true;
-  };
-
-  private readonly onWindowKeyUp = (event: KeyboardEvent): void => {
-    if (event.code === "AltLeft") this.term.options.macOptionIsMeta = false;
-  };
-
-  private readonly onWindowBlur = (): void => {
-    this.term.options.macOptionIsMeta = false;
   };
 }

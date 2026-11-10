@@ -16,6 +16,7 @@
         "title": "terminal-app",
         "width": 1280,
         "height": 800,
+        "minWidth": 488,
         "decorations": false,
         "backgroundColor": "#16141F"
       }
