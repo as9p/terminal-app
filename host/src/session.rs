@@ -308,8 +308,11 @@ impl Client {
         }
     }
 
+    /// Takes the client's running total of bytes handled. A total that goes back, or past
+    /// what was sent, is held within those, so a bad ack cannot undo an earlier one or lift
+    /// the limit and the stale clock.
     fn count_acked(&mut self, bytes: u64) {
-        self.acked = bytes;
+        self.acked = bytes.clamp(self.acked, self.sent);
         self.over_since = self.over_limit().then(Instant::now);
     }
 }
@@ -744,6 +747,21 @@ fn without_verbatim(path: PathBuf) -> PathBuf {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn ack_stays_between_the_last_ack_and_what_was_sent() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut client = Client::new(ClientId(1), tx);
+        client.count_sent(FLOOD_LIMIT as usize + 10);
+        client.count_acked(u64::MAX);
+        assert_eq!(client.acked, client.sent, "an ack went past what was sent");
+        // An ack past what was sent must not lift the limit for what comes after it.
+        client.count_sent(FLOOD_LIMIT as usize + 1);
+        assert!(client.over_limit(), "the limit was lifted");
+        assert!(client.over_since.is_some(), "the stale clock did not start");
+        client.count_acked(5);
+        assert_eq!(client.acked, FLOOD_LIMIT + 10, "an ack went back");
+    }
 
     /// What the fake terminal does on each read, in order. It reports end of file once
     /// they run out.

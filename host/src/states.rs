@@ -51,14 +51,20 @@ pub enum HookEvent {
     /// A tool call, before or after it ran. `edited` is the file an `Edit` or `Write` names.
     /// `helper_started` is true for the main session's call that starts a helper. The
     /// tracker does not count helpers with it: `Stop` says whether one is still running.
-    /// `from_helper` is true when a helper made the call; it shares the main session's id.
+    /// `helper` is the `agent_id` of the helper that made the call, which shares the main
+    /// session's id.
     Tool {
         edited: Option<PathBuf>,
         helper_started: bool,
-        from_helper: bool,
+        helper: Option<String>,
     },
-    NeedsInput,
-    HelperStop,
+    /// A permission prompt. `helper` is the `agent_id` of the helper that raised it.
+    NeedsInput {
+        helper: Option<String>,
+    },
+    HelperStop {
+        helper: Option<String>,
+    },
     /// The main session ended its turn. `helper_running` is true while one of its helpers
     /// is still running, which holds done back until the turn that follows its report.
     Stop {
@@ -70,28 +76,31 @@ pub enum HookEvent {
 /// The event for one hook call, or None for one that changes nothing. `event` is the hook's
 /// name, in any case. An event that carries `agent_id` came from a helper.
 pub fn parse(event: &str, payload: &Value) -> Option<HookEvent> {
-    let from_helper = payload.get("agent_id").is_some_and(|id| !id.is_null());
+    let helper = payload
+        .get("agent_id")
+        .filter(|id| !id.is_null())
+        .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_string));
     let text = |key: &str| payload.get(key).and_then(Value::as_str);
     match event.to_ascii_lowercase().as_str() {
         "sessionstart" => text("session_id").map(|chat| HookEvent::Start {
             chat: chat.to_string(),
         }),
-        "userpromptsubmit" if !from_helper => Some(HookEvent::Prompt),
+        "userpromptsubmit" if helper.is_none() => Some(HookEvent::Prompt),
         "pretooluse" | "posttooluse" | "posttoolusefailure" => {
             let tool = text("tool_name");
             Some(HookEvent::Tool {
                 edited: edited_file(payload),
-                helper_started: !from_helper && tool == Some(HELPER_TOOL),
-                from_helper,
+                helper_started: helper.is_none() && tool == Some(HELPER_TOOL),
+                helper,
             })
         }
-        "permissionrequest" => Some(HookEvent::NeedsInput),
+        "permissionrequest" => Some(HookEvent::NeedsInput { helper }),
         // `idle_prompt` only comes after the turn ended, which is already done.
         "notification" if text("notification_type") == Some("permission_prompt") => {
-            Some(HookEvent::NeedsInput)
+            Some(HookEvent::NeedsInput { helper })
         }
-        "subagentstop" => Some(HookEvent::HelperStop),
-        "stop" if from_helper => Some(HookEvent::HelperStop),
+        "subagentstop" => Some(HookEvent::HelperStop { helper }),
+        "stop" if helper.is_some() => Some(HookEvent::HelperStop { helper }),
         "stop" => Some(HookEvent::Stop {
             helper_running: helper_running(payload),
         }),
@@ -147,6 +156,9 @@ struct Entry {
     /// When a turn that ended with no helper running becomes done.
     done_at: Option<Instant>,
     edited: bool,
+    /// The helper whose permission prompt set blocked, None when the main session's did.
+    /// That helper's next event means it got past the prompt.
+    blocked_by: Option<String>,
 }
 
 impl Entry {
@@ -177,14 +189,11 @@ impl Tracker {
                 change.chat = Some(chat);
             }
             HookEvent::Prompt => self.work(session, None, now),
-            HookEvent::Tool {
-                edited,
-                from_helper,
-                ..
-            } => {
-                // A helper's call leaves the state alone, so it never clears blocked.
-                if !from_helper {
-                    self.work(session, None, now);
+            HookEvent::Tool { edited, helper, .. } => {
+                // A helper's call never clears the main session's blocked, only its own.
+                match helper {
+                    Some(helper) => self.helper_moved_on(session, &helper, now),
+                    None => self.work(session, None, now),
                 }
                 if let Some(file) = edited {
                     let entry = self.sessions.entry(session.to_string()).or_default();
@@ -194,12 +203,22 @@ impl Tracker {
                     }
                 }
             }
-            HookEvent::NeedsInput => {
+            HookEvent::NeedsInput { helper } => {
                 let entry = self.sessions.entry(session.to_string()).or_default();
+                // The main session's prompt stays the one to answer while it is up.
+                let main_waits =
+                    entry.state == Some(AgentState::Blocked) && entry.blocked_by.is_none();
+                if !main_waits {
+                    entry.blocked_by = helper;
+                }
                 entry.done_at = None;
                 entry.set(Some(AgentState::Blocked), now);
             }
-            HookEvent::HelperStop => {}
+            HookEvent::HelperStop { helper } => {
+                if let Some(helper) = helper {
+                    self.helper_moved_on(session, &helper, now);
+                }
+            }
             HookEvent::Stop { helper_running } => {
                 let done_at = (!helper_running).then(|| now + DONE_DELAY);
                 self.work(session, done_at, now);
@@ -270,6 +289,19 @@ impl Tracker {
     fn work(&mut self, session: &str, done_at: Option<Instant>, now: Instant) {
         let entry = self.sessions.entry(session.to_string()).or_default();
         entry.done_at = done_at;
+        entry.blocked_by = None;
         entry.set(Some(AgentState::Working), now);
+    }
+
+    /// An event of `helper`: when its own permission prompt set blocked, it got past it and
+    /// the session is working again. Anything else is left alone.
+    fn helper_moved_on(&mut self, session: &str, helper: &str, now: Instant) {
+        let Some(entry) = self.sessions.get_mut(session) else {
+            return;
+        };
+        if entry.state == Some(AgentState::Blocked) && entry.blocked_by.as_deref() == Some(helper) {
+            entry.blocked_by = None;
+            entry.set(Some(AgentState::Working), now);
+        }
     }
 }

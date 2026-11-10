@@ -618,12 +618,49 @@ impl Tree {
         self.find(|tab| tab.split.contains(session))
     }
 
+    /// Gives each folder group saved when folder keys held only the name (`folder:<name>`)
+    /// the key of its stored path. A closed tab that names such a key gets the key of the
+    /// folder with that name above its first pane's folder, else of that folder, as a reopen
+    /// used to pick. Defaults kept under such a key name no folder, so they are dropped.
+    pub fn upgrade_folder_keys(&mut self) {
+        for group in &mut self.groups {
+            if is_name_key(&group.key) {
+                group.key = project::folder_key(&group.path);
+            }
+        }
+        for closed in &mut self.closed {
+            let Some(name) = closed
+                .group
+                .as_deref()
+                .filter(|key| is_name_key(key))
+                .and_then(|key| key.strip_prefix("folder:"))
+            else {
+                continue;
+            };
+            let first = closed
+                .tab
+                .split
+                .leaves()
+                .into_iter()
+                .find_map(|session| closed.panes.iter().find(|pane| pane.uuid == session));
+            let Some(cwd) = first.map(|pane| pane.cwd.as_path()) else {
+                continue;
+            };
+            let root = cwd
+                .ancestors()
+                .find(|folder| folder.file_name().is_some_and(|found| found == name))
+                .unwrap_or(cwd);
+            closed.group = Some(project::folder_key(root));
+        }
+        self.defaults.retain(|key, _| !is_name_key(key));
+    }
+
     fn group_index(&self, key: &str) -> Option<usize> {
         self.groups.iter().position(|group| group.key == key)
     }
 
     /// The group a project belongs in. A remote key matches wherever the repo is cloned; a
-    /// folder key only matches the same folder, since two folders can share a name.
+    /// folder key holds the folder's whole path, so it only matches the same folder.
     fn group_for(&self, project: &Project) -> Option<usize> {
         let by_remote = project.key.starts_with("remote:");
         self.groups
@@ -656,17 +693,14 @@ impl Tree {
 
     /// Brings back a group for a reopened tab, from the folder its first pane was last in.
     /// When that folder resolves to another project (the shell had left for a folder that is
-    /// no group), a parent folder with the group's name is used, else the folder itself.
-    /// `found` is that folder's project, resolved by the caller; None or another project's
-    /// means the folder is used as is.
+    /// no group), a folder group comes back at the folder its key names, and a remote one at
+    /// the folder itself. `found` is that folder's project, resolved by the caller; None or
+    /// another project's means the folder is used as is.
     fn recreate_group(&mut self, key: &str, cwd: &Path, found: Option<Project>) -> usize {
         let project = if let Some(found) = found.filter(|found| found.key == key) {
             found
         } else {
-            let root = cwd
-                .ancestors()
-                .find(|folder| project::folder_key(folder) == key)
-                .unwrap_or(cwd);
+            let root = key.strip_prefix("folder:").map_or(cwd, Path::new);
             Project {
                 key: key.to_string(),
                 root: root.to_path_buf(),
@@ -856,6 +890,13 @@ impl Split {
             }
         }
     }
+}
+
+/// True for a folder key saved when they held only the folder's name: `folder:` and no
+/// absolute path after it.
+fn is_name_key(key: &str) -> bool {
+    key.strip_prefix("folder:")
+        .is_some_and(|rest| !Path::new(rest).is_absolute())
 }
 
 /// A group for the folder itself, for when no resolved project was handed in.

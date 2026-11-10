@@ -1,10 +1,10 @@
-//! The local socket that hook calls reach the host through: `<data_dir>/ctl/ctl.sock`, or a
-//! named pipe on Windows. A request is one JSON line. The host never replies, so a hook call never
+//! The local socket that hook calls reach the host through: `<data_dir>/ctl/ctl.sock`, a short
+//! folder under `/tmp` when that path is too long to bind, or a named pipe on Windows. A request is one JSON line. The host never replies, so a hook call never
 //! waits on it, and a request whose token is not its session's is dropped.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -58,11 +58,32 @@ impl Tokens {
     }
 }
 
-/// The folder the socket sits in. Only its owner can enter it, so no other user can reach the
+/// The longest socket path that binds everywhere: macOS keeps 104 bytes for it, the ending
+/// NUL included.
+#[cfg(not(windows))]
+const MAX_SOCKET_PATH: usize = 103;
+
+/// The socket's path for a data folder and user: `<data_dir>/ctl/ctl.sock`, or, when that is
+/// too long to bind, `ctl.sock` in `/tmp/term-host-<uid>-<hash of the data folder>`. The host
+/// and the hook command both derive it here, from nothing the environment can change, so
+/// they always agree. Either folder is its owner's alone, so no other user can reach the
 /// socket, not even between its bind and its own mode change.
 #[cfg(not(windows))]
-fn socket_dir(data_dir: &Path) -> std::path::PathBuf {
-    data_dir.join("ctl")
+pub fn socket_path(data_dir: &Path, uid: u32) -> PathBuf {
+    let path = data_dir.join("ctl").join("ctl.sock");
+    if path.as_os_str().len() <= MAX_SOCKET_PATH {
+        return path;
+    }
+    Path::new("/tmp")
+        .join(format!("term-host-{uid}-{:016x}", folder_hash(data_dir)))
+        .join("ctl.sock")
+}
+
+/// [`socket_path`] for this user.
+#[cfg(not(windows))]
+fn own_socket_path(data_dir: &Path) -> PathBuf {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    socket_path(data_dir, unsafe { libc::getuid() })
 }
 
 /// The socket's name for a data folder.
@@ -70,23 +91,44 @@ fn socket_dir(data_dir: &Path) -> std::path::PathBuf {
 pub fn socket_name(data_dir: &Path) -> io::Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
 
-    socket_dir(data_dir)
-        .join("ctl.sock")
-        .to_fs_name::<GenericFilePath>()
+    own_socket_path(data_dir).to_fs_name::<GenericFilePath>()
 }
 
 /// Makes the socket's folder, or closes an existing one, to its owner alone. A folder is used
-/// rather than a umask around the bind, since the umask is shared by every thread.
+/// rather than a umask around the bind, since the umask is shared by every thread. A folder
+/// that is a link or another user's is refused: anyone can make one under `/tmp` first.
 #[cfg(unix)]
-fn make_socket_dir(data_dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+fn make_socket_dir(socket: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    let dir = socket_dir(data_dir);
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .create(dir)?;
+    let found = std::fs::symlink_metadata(dir)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    if !found.is_dir() || found.uid() != unsafe { libc::getuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a folder of this user's own", dir.display()),
+        ));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// FNV-1a of the data folder, so the host and the hook command get the same hash in any
+/// build.
+fn folder_hash(data_dir: &Path) -> u64 {
+    data_dir
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 /// The pipe's name for a data folder: `\\.\pipe\terminal-app-ctl-<user>-<hash>`. Pipes are
@@ -101,14 +143,7 @@ pub fn socket_name(data_dir: &Path) -> io::Result<Name<'static>> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    // FNV-1a, so the host and the hook command get the same hash in any build.
-    let hash = data_dir
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-        });
+    let hash = folder_hash(data_dir);
     format!("terminal-app-ctl-{user}-{hash:016x}").to_ns_name::<GenericNamespaced>()
 }
 
@@ -124,7 +159,9 @@ pub fn serve(
     let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
     let _entered = runtime.enter();
     #[cfg(unix)]
-    make_socket_dir(data_dir)?;
+    let socket = own_socket_path(data_dir);
+    #[cfg(unix)]
+    make_socket_dir(&socket)?;
     // A socket file left by a host that died is replaced. Only the host holding the port gets
     // here, so no live host is pushed off it.
     let listener = ListenerOptions::new()
@@ -135,10 +172,7 @@ pub fn serve(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            socket_dir(data_dir).join("ctl.sock"),
-            std::fs::Permissions::from_mode(0o600),
-        )?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -340,9 +340,33 @@ fn write_plist(path: &Path, text: &str) -> io::Result<()> {
     fs::rename(&temp, path)
 }
 
-/// Runs `term-host service <action>` and returns the exit code.
-pub fn main(action: Option<OsString>) -> ExitCode {
-    match cli(action.as_deref().map(|action| action.to_string_lossy())) {
+/// What `term-host service` was asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Install,
+    Uninstall,
+    Status,
+}
+
+/// The action for the arguments after `service`, or None for anything but exactly one known
+/// action.
+pub fn action(args: &[OsString]) -> Option<Action> {
+    match args {
+        [one] if one == "install" => Some(Action::Install),
+        [one] if one == "uninstall" => Some(Action::Uninstall),
+        [one] if one == "status" => Some(Action::Status),
+        _ => None,
+    }
+}
+
+/// Runs `term-host service <action>` and returns the exit code. Anything but one known action
+/// prints the usage and exits with 2, having done nothing.
+pub fn main(args: &[OsString]) -> ExitCode {
+    let Some(action) = action(args) else {
+        eprintln!("usage: term-host service install|uninstall|status");
+        return ExitCode::from(2);
+    };
+    match cli(action) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("term-host service: {error:#}");
@@ -352,7 +376,7 @@ pub fn main(action: Option<OsString>) -> ExitCode {
 }
 
 #[cfg(target_os = "macos")]
-fn cli(action: Option<std::borrow::Cow<'_, str>>) -> Result<()> {
+fn cli(action: Action) -> Result<()> {
     use anyhow::anyhow;
 
     let home = dirs::home_dir().ok_or_else(|| anyhow!("this computer has no home folder"))?;
@@ -363,8 +387,8 @@ fn cli(action: Option<std::borrow::Cow<'_, str>>) -> Result<()> {
         uid: unsafe { libc::getuid() },
     };
     let mut launchctl = SystemLaunchctl;
-    match action.as_deref() {
-        Some("install") => {
+    match action {
+        Action::Install => {
             check_env(
                 std::env::var("TERM_HOST_PORT").ok(),
                 std::env::var_os("TERM_APP_DATA"),
@@ -379,18 +403,17 @@ fn cli(action: Option<std::borrow::Cow<'_, str>>) -> Result<()> {
                 Installed::Written => println!("Installed {}", service.plist_path().display()),
             }
         }
-        Some("uninstall") => {
+        Action::Uninstall => {
             if service.uninstall(&mut launchctl)? == Uninstalled::Removed {
                 println!("Removed {}", service.plist_path().display());
             }
         }
-        Some("status") => println!("{}", service.status(&mut launchctl)?),
-        _ => bail!("usage: term-host service install|uninstall|status"),
+        Action::Status => println!("{}", service.status(&mut launchctl)?),
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn cli(_action: Option<std::borrow::Cow<'_, str>>) -> Result<()> {
+fn cli(_action: Action) -> Result<()> {
     bail!("not supported on this system yet. Only macOS runs the host as a service for now")
 }

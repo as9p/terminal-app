@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
-    /// `remote:<host/owner/repo>`, or `folder:<root folder name>` with no remote or no git.
+    /// `remote:<host/owner/repo>`, or `folder:<root folder path>` with no remote or no git.
     pub key: String,
     /// The folder holding `.git`, or the folder itself when there is no git.
     pub root: PathBuf,
@@ -166,12 +166,9 @@ fn origin_url(config: &str) -> Option<String> {
     None
 }
 
-/// `folder:<name>`. The filesystem root has no name, so its whole path stands in.
+/// `folder:<path>`, the folder's whole path, so two folders that share a name stay apart.
 pub(crate) fn folder_key(folder: &Path) -> String {
-    let name = folder
-        .file_name()
-        .map_or_else(|| folder.to_string_lossy(), |name| name.to_string_lossy());
-    format!("folder:{name}")
+    format!("folder:{}", plain(folder))
 }
 
 #[cfg(test)]
@@ -266,11 +263,12 @@ mod tests {
         let project = resolve(&root.0.join("Solo"));
         assert!(project.is_git);
         assert_eq!(project.root, root.0.join("Solo"));
-        assert_eq!(project.key, "folder:Solo");
+        assert_eq!(project.key, folder_key(&root.0.join("Solo")));
 
         // No config file at all is the same.
         root.write("bare/.git/HEAD", "ref: refs/heads/main\n");
-        assert_eq!(resolve(&root.0.join("bare")).key, "folder:bare");
+        let bare = root.0.join("bare");
+        assert_eq!(resolve(&bare).key, format!("folder:{}", bare.display()));
     }
 
     #[test]
@@ -280,7 +278,7 @@ mod tests {
         let project = resolve(&deep);
         assert_eq!(project.root, deep);
         assert!(!project.is_git);
-        assert_eq!(project.key, "folder:inner");
+        assert_eq!(project.key, format!("folder:{}", deep.display()));
         assert_eq!(project.branch, None);
     }
 

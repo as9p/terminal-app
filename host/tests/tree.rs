@@ -281,7 +281,7 @@ fn open_folder_makes_group_for_non_git() {
     assert_eq!(spawn.chat, None);
     assert_eq!(tree.groups.len(), 1);
     let group = &tree.groups[0];
-    assert_eq!(group.key, "folder:notes");
+    assert_eq!(group.key, format!("folder:{}", notes.display()));
     assert_eq!(group.path, notes);
     assert_eq!(group.branch, None);
 
@@ -295,8 +295,99 @@ fn open_folder_makes_group_for_non_git() {
     assert!(tree.on_cwd("t", &notes));
     assert_eq!(
         layout(&tree)[0],
-        ("folder:notes".to_string(), vec![id, other])
+        (format!("folder:{}", notes.display()), vec![id, other])
     );
+}
+
+#[test]
+fn same_named_folders_are_separate_groups() {
+    let root = Root::new();
+    let one = root.0.join("one").join("notes");
+    let two = root.0.join("two").join("notes");
+    fs::create_dir_all(&one).expect("make one");
+    fs::create_dir_all(&two).expect("make two");
+    let mut tree = Tree::default();
+    ok(&mut tree, Op::OpenFolder { path: one.clone() });
+    let a = shell(&mut tree, "a", &one);
+    ok(&mut tree, Op::OpenFolder { path: two.clone() });
+    shell(&mut tree, "b", &two);
+    assert_eq!(tree.groups.len(), 2);
+    assert_ne!(tree.groups[0].key, tree.groups[1].key);
+    let second = tree.groups[1].key.clone();
+    assert_eq!(tree.groups[1].path, two);
+
+    // Each op that names a group reaches that group, not the first with the same name.
+    ok(
+        &mut tree,
+        Op::RenameGroup {
+            group: second.clone(),
+            name: Some("Two".to_string()),
+        },
+    );
+    ok(
+        &mut tree,
+        Op::CollapseGroup {
+            group: second.clone(),
+            collapsed: true,
+        },
+    );
+    assert_eq!(tree.groups[0].name, None);
+    assert!(!tree.groups[0].collapsed);
+    assert_eq!(tree.groups[1].name.as_deref(), Some("Two"));
+    assert!(tree.groups[1].collapsed);
+    ok(
+        &mut tree,
+        Op::MoveTab {
+            tab: a.clone(),
+            group: Some(second.clone()),
+            index: 0,
+        },
+    );
+    let group = tree.groups.iter().find(|group| group.key == second);
+    assert_eq!(group.expect("the second group").tabs[0].id, a);
+}
+
+#[test]
+fn name_only_folder_keys_from_before_take_their_path() {
+    let root = Root::new();
+    let one = root.0.join("one").join("notes");
+    let two = root.0.join("two").join("notes");
+    fs::create_dir_all(&one).expect("make one");
+    fs::create_dir_all(&two).expect("make two");
+    let mut tree = Tree::default();
+    ok(&mut tree, Op::OpenFolder { path: one.clone() });
+    shell(&mut tree, "a", &one);
+    ok(&mut tree, Op::OpenFolder { path: two.clone() });
+    shell(&mut tree, "b", &two);
+    let gone = shell(&mut tree, "c", &two);
+    tree.close_tab(&gone, vec![saved("c", "shell", &two.join("deeper"), None)])
+        .expect("close");
+    // As a file saved before folder keys held the whole path would have them.
+    for group in &mut tree.groups {
+        group.key = "folder:notes".to_string();
+    }
+    tree.closed[0].group = Some("folder:notes".to_string());
+    tree.defaults
+        .insert("folder:notes".to_string(), GroupDefaults::default());
+
+    tree.upgrade_folder_keys();
+    let keys: Vec<_> = tree.groups.iter().map(|group| group.key.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            format!("folder:{}", one.display()),
+            format!("folder:{}", two.display())
+        ]
+    );
+    assert_eq!(
+        tree.closed[0].group,
+        Some(format!("folder:{}", two.display()))
+    );
+    assert!(tree.defaults.is_empty());
+
+    // The reopened tab goes back to its own folder's group.
+    ok(&mut tree, Op::ReopenTab);
+    assert_eq!(tree.groups[1].tabs.len(), 2);
 }
 
 #[test]

@@ -930,7 +930,16 @@ impl Registry {
             return;
         };
         let ended = event == HookEvent::End;
-        let change = lock(&self.states).on_event(session, event, std::time::Instant::now());
+        let change = {
+            let mut states = lock(&self.states);
+            // Checked again under the states lock: `forget` stops a session's token before it
+            // clears its state under this lock, so a call for a session that ended since it was
+            // read cannot bring back a state nothing would clear.
+            if !self.tokens.matches(session, &request.token) {
+                return;
+            }
+            states.on_event(session, event, std::time::Instant::now())
+        };
         if change.changed {
             self.push_states();
         }
@@ -1622,9 +1631,12 @@ mod tests {
             "a frame went over {MERGED_OUTPUT_BYTES} bytes"
         );
         assert_eq!(frames.concat(), input);
+        // Every frame but the last stopped only because the next read would not fit, so it
+        // holds more than the cap less one read.
+        let most = input.len().div_ceil(MERGED_OUTPUT_BYTES - 1013);
         assert!(
-            frames.len() < chunks / 10,
-            "{} frames for {chunks} chunks",
+            frames.len() <= most,
+            "{} frames for {chunks} chunks, wanted at most {most}",
             frames.len()
         );
     }
@@ -1842,9 +1854,12 @@ mod tests {
             "a frame went over {MERGED_OUTPUT_BYTES} bytes"
         );
         assert_eq!(payloads.concat(), input);
+        // Every frame but the last stopped only because the next read would not fit, so it
+        // holds more than the cap less one read.
+        let most = input.len().div_ceil(MERGED_OUTPUT_BYTES - 1013);
         assert!(
-            payloads.len() < chunks / 10,
-            "{} frames for {chunks} chunks",
+            payloads.len() <= most,
+            "{} frames for {chunks} chunks, wanted at most {most}",
             payloads.len()
         );
     }

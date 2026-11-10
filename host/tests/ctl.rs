@@ -509,3 +509,30 @@ async fn hook_reaches_host() {
     })
     .await;
 }
+
+#[cfg(unix)]
+#[test]
+fn socket_moves_to_a_short_folder_when_its_path_is_too_long() {
+    let short = Path::new("/Users/me/Library/Application Support/terminal-app");
+    assert_eq!(
+        ctl::socket_path(short, 501),
+        short.join("ctl").join("ctl.sock")
+    );
+
+    let long = PathBuf::from(format!("/Users/me/{}terminal-app", "deep/".repeat(20)));
+    assert!(long.join("ctl").join("ctl.sock").as_os_str().len() > 104);
+    let path = ctl::socket_path(&long, 501);
+    assert!(path.as_os_str().len() <= 103, "{}", path.display());
+    assert!(path.starts_with("/tmp"), "{}", path.display());
+    assert_eq!(path.file_name().expect("a file name"), "ctl.sock");
+    let folder = path.parent().and_then(Path::file_name).expect("a folder");
+    assert!(
+        folder.to_string_lossy().starts_with("term-host-501-"),
+        "{}",
+        path.display()
+    );
+    // The host and the hook command derive the same path; another user or folder another.
+    assert_eq!(ctl::socket_path(&long, 501), path);
+    assert_ne!(ctl::socket_path(&long, 502), path);
+    assert_ne!(ctl::socket_path(&long.join("x"), 501), path);
+}
