@@ -1,9 +1,11 @@
-//! Protocol version 2. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
+//! Protocol version 3. Text frames are JSON with a `type` tag. Binary frames are a 4-byte
 //! little-endian session number, then bytes, in both directions.
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTO: u32 = 2;
+use crate::tree::{Op, Place, Tree};
+
+pub const PROTO: u32 = 3;
 
 /// Values of `code` in `HostFrame::Error`.
 pub mod code {
@@ -16,9 +18,12 @@ pub mod code {
     pub const BAD_SIZE: &str = "bad_size";
     pub const BAD_KIND: &str = "bad_kind";
     pub const SPAWN_FAILED: &str = "spawn_failed";
+    pub const NO_TAB: &str = "no_tab";
+    pub const NO_GROUP: &str = "no_group";
+    pub const BAD_OP: &str = "bad_op";
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     Hello {
@@ -33,6 +38,9 @@ pub enum ClientFrame {
         cwd: String,
         cols: u16,
         rows: u16,
+        /// Where its pane goes in the tree. A client that leaves it out gets a tab of its own.
+        #[serde(default)]
+        place: Place,
     },
     Attach {
         session: u32,
@@ -55,13 +63,13 @@ pub enum ClientFrame {
         bytes: u64,
     },
     List,
-    LayoutGet,
-    LayoutSet {
-        json: String,
+    TreeGet,
+    TreeOp {
+        op: Op,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostFrame {
     HelloOk {
@@ -96,8 +104,9 @@ pub enum HostFrame {
     Detached {
         session: u32,
     },
-    Layout {
-        json: Option<String>,
+    /// The whole tree, as the answer to `tree_get` and after every change to it.
+    Tree {
+        tree: Tree,
     },
     Error {
         code: String,
@@ -215,8 +224,10 @@ mod tests {
                 json!({"type": "detached", "session": 1}),
             ),
             (
-                HostFrame::Layout { json: None },
-                json!({"type": "layout", "json": null}),
+                HostFrame::Tree {
+                    tree: Tree::default(),
+                },
+                json!({"type": "tree", "tree": {"groups": [], "ungrouped": [], "closed": [], "defaults": {}}}),
             ),
             (
                 HostFrame::error(code::BAD_KIND, "m"),

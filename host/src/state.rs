@@ -1,7 +1,7 @@
 //! What the host saves so its sessions come back after a restart or a reboot.
 //!
-//! `state.json` in the data folder holds the sessions worth bringing back and the app's layout.
-//! It is written to a temporary file that is then renamed over it, so a crash mid-write
+//! `state.json` in the data folder holds the sessions worth bringing back and the tree of groups
+//! and tabs. It is written to a temporary file that is then renamed over it, so a crash mid-write
 //! leaves the previous file whole. A file that does not parse is renamed aside, not lost.
 
 use std::fs::{self, File};
@@ -12,16 +12,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::tree::Tree;
+
 const FILE: &str = "state.json";
 const TEMP_FILE: &str = "state.json.tmp";
 const MOVED_ASIDE: &str = "state.json.bad";
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub sessions: Vec<SavedSession>,
-    /// The app's own layout, as the opaque string it last sent with `layout_set`. The host
-    /// never looks inside it, and hands it back with `layout_get`.
-    pub layout: Option<String>,
+    /// Missing from a file saved before the tree, which also has a `layout` key that is now
+    /// ignored. Such a file loads with an empty tree, and its sessions get tabs on restore.
+    #[serde(default)]
+    pub tree: Tree,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,11 +173,24 @@ mod tests {
                 title: Some("vim".to_string()),
                 chat: None,
             }],
-            layout: Some("{}".to_string()),
+            tree: Tree::default(),
         };
         save(&dir, &state).expect("save");
         assert_eq!(load(&dir), state);
         assert!(!dir.join(TEMP_FILE).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_layout_file_loads_with_an_empty_tree() {
+        let dir = scratch("state-old-layout");
+        fs::create_dir_all(&dir).expect("make the folder");
+        let old = r#"{"sessions":[{"uuid":"a","kind":"shell","cwd":"/tmp","title":null,"chat":null}],"layout":"{}"}"#;
+        fs::write(dir.join(FILE), old).expect("write an old file");
+        let state = load(&dir);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].uuid, "a");
+        assert_eq!(state.tree, Tree::default());
         let _ = fs::remove_dir_all(&dir);
     }
 

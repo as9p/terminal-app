@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::mem;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -27,7 +27,9 @@ use uuid::Uuid;
 use crate::protocol::{
     ClientFrame, HostFrame, PROTO, SessionItem, code, decode_binary, encode_binary,
 };
+use crate::session::resolve_dir;
 use crate::state::{self, SavedSession, State};
+use crate::tree::{Op, Place, Tree, TreeError};
 use crate::{ClientEvent, ClientId, Kind, Session, SessionHandle, Size, SpawnSpec, Status};
 use crate::{auth, shellinit};
 
@@ -214,6 +216,7 @@ async fn serve_sessions(ws: Ws, registry: Arc<Registry>) {
     let stop_writer = writer.abort_handle();
 
     let mut connection = Connection {
+        watcher: registry.next_watcher.fetch_add(1, Ordering::Relaxed),
         registry,
         out,
         attachments: HashMap::new(),
@@ -230,6 +233,7 @@ async fn serve_sessions(ws: Ws, registry: Arc<Registry>) {
 
     // Otherwise a gone client holds a program back until its stale clock runs out.
     connection.detach_all();
+    lock(&connection.registry.watchers).remove(&connection.watcher);
     drop(connection);
     if timeout(CLOSE_TIMEOUT, writer).await.is_err() {
         stop_writer.abort();
@@ -241,6 +245,8 @@ struct Connection {
     registry: Arc<Registry>,
     out: Out,
     attachments: HashMap<u32, Attachment>,
+    /// This connection's key in `Registry::watchers`, which it joins with `tree_get`.
+    watcher: u64,
 }
 
 struct Attachment {
@@ -304,7 +310,8 @@ impl Connection {
                 cwd,
                 cols,
                 rows,
-            } => self.create(uuid, kind, cwd, cols, rows).await,
+                place,
+            } => self.create(uuid, kind, cwd, cols, rows, place).await,
             ClientFrame::Attach {
                 session,
                 cols,
@@ -341,11 +348,16 @@ impl Connection {
             ClientFrame::List => Ok(Some(HostFrame::Sessions {
                 items: self.registry.items(),
             })),
-            ClientFrame::LayoutGet => Ok(Some(HostFrame::Layout {
-                json: lock(&self.registry.layout).clone(),
-            })),
-            ClientFrame::LayoutSet { json } => {
-                *lock(&self.registry.layout) = Some(json);
+            // Sent by the registry, so it cannot land behind a newer pushed tree.
+            ClientFrame::TreeGet => {
+                self.registry.watch(self.watcher, &self.out);
+                Ok(None)
+            }
+            ClientFrame::TreeOp { op } => {
+                // `project::resolve` looks at folders, and an op can start or end programs.
+                let registry = Arc::clone(&self.registry);
+                let applied = spawn_blocking(move || registry.tree_op(op)).await;
+                applied.unwrap_or_else(|_| Err(start_failed()))?;
                 Ok(None)
             }
         }
@@ -358,6 +370,7 @@ impl Connection {
         cwd: String,
         cols: u16,
         rows: u16,
+        place: Place,
     ) -> Answer {
         let size = checked_size(cols, rows)?;
         let parsed = Uuid::parse_str(&uuid)
@@ -389,17 +402,26 @@ impl Connection {
 
         // Forking is slow, and looking at a folder can stall on a network mount.
         let spawned = spawn_blocking(move || {
-            if !spec.cwd.is_dir() {
+            let Some(folder) = resolve_dir(&spec.cwd) else {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
-            }
-            start_program(spec, size)
+            };
+            Ok((start_program(spec, size)?, folder))
         })
         .await;
-        let running = spawned.unwrap_or_else(|_| Err(start_failed()))?;
+        let (running, folder) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
 
         let served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
         let _ = served.running.set(running);
         let session = self.registry.add(served);
+        let registry = Arc::clone(&self.registry);
+        let tab_for = uuid.clone();
+        let shell = kind_name == "shell";
+        // Off the runtime, since `project::resolve` looks at folders.
+        let _ = spawn_blocking(move || {
+            lock(&registry.tree).add_session(&tab_for, place, &folder, shell);
+            registry.push_tree();
+        })
+        .await;
         Ok(Some(HostFrame::Created { session, uuid }))
     }
 
@@ -420,11 +442,16 @@ impl Connection {
         let (tx, rx) = unbounded();
         let wanted = Arc::new(Mutex::new(true));
         let pump = {
-            let out = self.out.clone();
-            let wanted = Arc::clone(&wanted);
+            let pumped = Pumped {
+                session,
+                served: Arc::clone(&served),
+                registry: Arc::clone(&self.registry),
+                out: self.out.clone(),
+                wanted: Arc::clone(&wanted),
+            };
             thread::Builder::new()
                 .name("session-pump".to_string())
-                .spawn(move || pump_events(session, rx, out, wanted))
+                .spawn(move || pump_events(pumped, rx))
         };
         if pump.is_err() {
             return Ok(Some(HostFrame::Detached { session }));
@@ -473,9 +500,25 @@ impl Connection {
     }
 }
 
+/// What a pump thread needs from its attachment.
+struct Pumped {
+    session: u32,
+    served: Arc<Served>,
+    registry: Arc<Registry>,
+    out: Out,
+    wanted: Arc<Mutex<bool>>,
+}
+
 /// Runs on its own thread per attachment, taking a session's events to the connection's
-/// writer task. Ends when the attachment does.
-fn pump_events(session: u32, events: Receiver<ClientEvent>, out: Out, wanted: Arc<Mutex<bool>>) {
+/// writer task and folders and exits to the tree. Ends when the attachment does.
+fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
+    let Pumped {
+        session,
+        served,
+        registry,
+        out,
+        wanted,
+    } = pumped;
     loop {
         let event = events.recv();
         let mut wanted = lock(&wanted);
@@ -502,10 +545,16 @@ fn pump_events(session: u32, events: Receiver<ClientEvent>, out: Out, wanted: Ar
                     let cwd = cwd.to_string();
                     hand_text(&out, &HostFrame::Cwd { session, cwd });
                 }
+                // Let go first: `attached` takes this lock on the runtime, and the tree looks
+                // at folders.
+                drop(wanted);
+                registry.saw_cwd(&served, &path);
             }
             Ok(ClientEvent::Exited { clean, .. }) => {
                 *wanted = false;
                 hand_text(&out, &HostFrame::Exited { session, clean });
+                drop(wanted);
+                registry.saw_exit(&served, clean);
                 return;
             }
             // The session dropped this client. The app answers by attaching again.
@@ -519,11 +568,18 @@ fn pump_events(session: u32, events: Receiver<ClientEvent>, out: Out, wanted: Ar
 }
 
 /// Everything the host serves, shared by all connections. The locks only cover quick
-/// lookups, so they are safe to take on the async runtime.
+/// lookups, so they are safe to take on the async runtime, except `tree`, whose calls can
+/// look at folders and so are made off it.
+///
+/// Lock order: `watchers` before `tree`, and only to copy the tree. `tree` is otherwise held
+/// alone: never while calling into a session, sending to a client or saving.
 struct Registry {
     last_session: AtomicU32,
     sessions: Mutex<HashMap<u32, Arc<Served>>>,
-    layout: Mutex<Option<String>>,
+    tree: Mutex<Tree>,
+    /// The connections that asked for the tree, each sent the whole tree after every change.
+    watchers: Mutex<HashMap<u64, Out>>,
+    next_watcher: AtomicU64,
     data_dir: PathBuf,
     /// What is in `state.json` now. Held while saving, so saves never cross.
     saved: Mutex<State>,
@@ -537,7 +593,9 @@ impl Registry {
         Registry {
             last_session: AtomicU32::new(0),
             sessions: Mutex::new(HashMap::new()),
-            layout: Mutex::new(None),
+            tree: Mutex::new(Tree::default()),
+            watchers: Mutex::new(HashMap::new()),
+            next_watcher: AtomicU64::new(0),
             data_dir,
             saved: Mutex::new(State::default()),
             shutting_down: AtomicBool::new(false),
@@ -591,6 +649,10 @@ impl Registry {
     /// announced, so clients attached to it hear why. Either way it is no longer saved.
     fn kill(self: &Arc<Self>, session: u32) -> Result<(), HostFrame> {
         let served = self.get(session).ok_or_else(no_session)?;
+        // A pane closed by hand goes like one that exited cleanly.
+        if lock(&self.tree).on_exit(&served.uuid, true) {
+            self.push_tree();
+        }
         let Some(running) = served.running.get() else {
             self.remove(session);
             return Ok(());
@@ -618,26 +680,212 @@ impl Registry {
 
     /// Puts back what `state.json` holds. Shells start now. Claude sessions wait for their
     /// first attach.
+    /// The tree comes back too, less panes whose session did not, and a restored session in
+    /// no saved tab gets a tab of its own.
     fn restore(&self) {
         let loaded = state::load(&self.data_dir);
-        *lock(&self.layout) = loaded.layout.clone();
-        for saved in &loaded.sessions {
-            let Some(served) = Served::restored(saved) else {
-                eprintln!("term-host: skipped a saved session that does not make sense");
-                continue;
-            };
-            let shell = served.chat.is_none();
-            let session = self.add(served);
-            if shell
-                && let Some(served) = self.get(session)
-                && let Err(HostFrame::Error { message, .. }) =
-                    served.start(RESTORE_SIZE, &self.data_dir)
-            {
-                // Stays listed, and its first attach tries again.
-                eprintln!("term-host: could not restore a shell: {message}");
+        let restored: Vec<&SavedSession> = loaded
+            .sessions
+            .iter()
+            .filter(|saved| self.bring_back(saved))
+            .collect();
+        let kept: HashSet<&str> = restored.iter().map(|saved| saved.uuid.as_str()).collect();
+        let mut tree = loaded.tree.clone();
+        tree.retain_sessions(|uuid| kept.contains(uuid));
+        for saved in restored {
+            tree.add_session(
+                &saved.uuid,
+                Place::NewTab,
+                &saved.cwd,
+                saved.kind == "shell",
+            );
+        }
+        *lock(&self.tree) = tree;
+        *lock(&self.saved) = loaded;
+    }
+
+    /// Lists a saved session again. A shell starts now, a Claude session at its first attach.
+    /// Returns false for one that does not make sense. Blocks.
+    fn bring_back(&self, saved: &SavedSession) -> bool {
+        let Some(served) = Served::restored(saved) else {
+            eprintln!("term-host: skipped a saved session that does not make sense");
+            return false;
+        };
+        let shell = served.chat.is_none();
+        let session = self.add(served);
+        if shell
+            && let Some(served) = self.get(session)
+            && let Err(HostFrame::Error { message, .. }) =
+                served.start(RESTORE_SIZE, &self.data_dir)
+        {
+            // Stays listed, and its first attach tries again.
+            eprintln!("term-host: could not restore a shell: {message}");
+        }
+        true
+    }
+
+    /// The live session with this uuid. One being killed does not count, since a reopened tab
+    /// brings its uuid back while the old program may still be on its way out.
+    fn find(&self, uuid: &str) -> Option<(u32, Arc<Served>)> {
+        lock(&self.sessions)
+            .iter()
+            .filter(|(_, served)| served.uuid == uuid && !served.kill_asked.load(Ordering::Relaxed))
+            .max_by_key(|(session, _)| **session)
+            .map(|(&session, served)| (session, Arc::clone(served)))
+    }
+
+    /// Adds a connection to the watchers and sends it the tree. Done under the watchers lock,
+    /// so a newer tree pushed meanwhile always lands after it.
+    fn watch(&self, watcher: u64, out: &Out) {
+        let mut watchers = lock(&self.watchers);
+        watchers.insert(watcher, out.clone());
+        let tree = lock(&self.tree).clone();
+        hand_text(out, &HostFrame::Tree { tree });
+    }
+
+    /// Sends the tree to every watcher. Pushes never cross, so the last one sent is the newest.
+    fn push_tree(&self) {
+        let watchers = lock(&self.watchers);
+        if watchers.is_empty() {
+            return;
+        }
+        let tree = lock(&self.tree).clone();
+        let frame = HostFrame::Tree { tree };
+        for out in watchers.values() {
+            hand_text(out, &frame);
+        }
+    }
+
+    /// Carries out a `tree_op`, with the kills and spawns it asks for. Blocks.
+    fn tree_op(self: &Arc<Self>, op: Op) -> Result<(), HostFrame> {
+        let op = match op {
+            Op::OpenFolder { path } => return self.open_folder(&path),
+            op => op,
+        };
+        let closing = match &op {
+            Op::CloseTab { tab } => Some(tab.clone()),
+            _ => None,
+        };
+        let effects = lock(&self.tree).apply(op).map_err(tree_error)?;
+        if let Some(tab) = closing {
+            self.keep_closed(&tab, &effects.kill);
+        }
+        for uuid in &effects.kill {
+            if let Some((session, _)) = self.find(uuid) {
+                let _ = self.kill(session);
             }
         }
-        *lock(&self.saved) = loaded;
+        for saved in &effects.spawn {
+            self.bring_back(saved);
+        }
+        self.push_tree();
+        Ok(())
+    }
+
+    /// Puts what the closed tab's sessions need to come back into its entry, read before
+    /// they are killed. The tree only knows their uuids.
+    fn keep_closed(&self, tab: &str, sessions: &[String]) {
+        let panes: Vec<SavedSession> = sessions
+            .iter()
+            .filter_map(|uuid| self.find(uuid)?.1.saved())
+            .collect();
+        let mut tree = lock(&self.tree);
+        if let Some(closed) = tree
+            .closed
+            .iter_mut()
+            .rev()
+            .find(|closed| closed.tab.id == tab)
+        {
+            closed.panes = panes;
+        }
+    }
+
+    /// Starts a shell in the folder, then makes its group and tab in one go, so no one sees
+    /// the group empty. Blocks.
+    fn open_folder(self: &Arc<Self>, path: &Path) -> Result<(), HostFrame> {
+        let folder =
+            resolve_dir(path).ok_or_else(|| HostFrame::error(code::BAD_CWD, "no such folder"))?;
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| start_failed())?;
+        let id = uuid::Builder::from_random_bytes(bytes).into_uuid();
+        let spec = SpawnSpec {
+            kind: Kind::Shell,
+            cwd: folder.clone(),
+            uuid: id,
+            data_dir: self.data_dir.clone(),
+            known_cwd: false,
+        };
+        // Its first attach gives it a real size.
+        let running = start_program(spec, RESTORE_SIZE)?;
+        let uuid = id.to_string();
+        let served = Served::new(uuid.clone(), id, "shell", None, folder.clone(), None);
+        let _ = served.running.set(running);
+        let session = self.add(served);
+
+        let opened = {
+            let mut tree = lock(&self.tree);
+            let opened = tree.apply(Op::OpenFolder {
+                path: folder.clone(),
+            });
+            if opened.is_ok() {
+                tree.add_session(&uuid, Place::NewTab, &folder, true);
+            }
+            opened
+        };
+        if let Err(error) = opened {
+            let _ = self.kill(session);
+            return Err(tree_error(error));
+        }
+        self.push_tree();
+        Ok(())
+    }
+
+    /// A session reported its folder. Only a new one reaches the tree, since every attachment
+    /// passes on the same report.
+    fn saw_cwd(&self, served: &Served, cwd: &Path) {
+        if served.kill_asked.load(Ordering::Relaxed) {
+            return;
+        }
+        {
+            let mut seen = lock(&served.seen_cwd);
+            if seen.as_deref() == Some(cwd) {
+                return;
+            }
+            *seen = Some(cwd.to_path_buf());
+        }
+        if lock(&self.tree).on_cwd(&served.uuid, cwd) {
+            self.push_tree();
+        }
+    }
+
+    /// A session's program ended. A killed one is already out of the tree, and its uuid may
+    /// belong to a reopened tab by now.
+    fn saw_exit(&self, served: &Served, clean: bool) {
+        if served.kill_asked.load(Ordering::Relaxed)
+            || served.seen_exit.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        if lock(&self.tree).on_exit(&served.uuid, clean) {
+            self.push_tree();
+        }
+    }
+
+    /// Passes on folders and exits of sessions no one is attached to, which have no pump.
+    fn notice(&self) {
+        let served: Vec<Arc<Served>> = lock(&self.sessions).values().cloned().collect();
+        for served in served {
+            let Some(running) = served.running.get() else {
+                continue;
+            };
+            let status = running.handle.status();
+            if let Some(cwd) = &status.cwd {
+                self.saw_cwd(&served, cwd);
+            }
+            if let Some(clean) = status.exited {
+                self.saw_exit(&served, clean);
+            }
+        }
     }
 
     fn start_saving(self: Arc<Self>) {
@@ -646,6 +894,7 @@ impl Registry {
             .spawn(move || {
                 loop {
                     thread::sleep(SAVE_EVERY);
+                    self.notice();
                     self.save();
                 }
             });
@@ -694,7 +943,7 @@ impl Registry {
         numbered.sort_by_key(|(session, _)| *session);
         State {
             sessions: numbered.into_iter().map(|(_, saved)| saved).collect(),
-            layout: lock(&self.layout).clone(),
+            tree: lock(&self.tree).clone(),
         }
     }
 }
@@ -714,6 +963,10 @@ struct Served {
     running: OnceLock<Running>,
     starting: Mutex<()>,
     kill_asked: AtomicBool,
+    /// The last folder passed to the tree.
+    seen_cwd: Mutex<Option<PathBuf>>,
+    /// Set once the exit has been passed to the tree.
+    seen_exit: AtomicBool,
 }
 
 struct Running {
@@ -740,6 +993,8 @@ impl Served {
             running: OnceLock::new(),
             starting: Mutex::new(()),
             kill_asked: AtomicBool::new(false),
+            seen_cwd: Mutex::new(None),
+            seen_exit: AtomicBool::new(false),
         }
     }
 
@@ -849,6 +1104,10 @@ fn start_program(spec: SpawnSpec, size: Size) -> Result<Running, HostFrame> {
     let handle = Arc::new(handle);
     let input = InputQueue::start(Arc::clone(&handle)).map_err(|e| spawn_failed(e.to_string()))?;
     Ok(Running { handle, input })
+}
+
+fn tree_error(error: TreeError) -> HostFrame {
+    HostFrame::error(error.code(), &error.to_string())
 }
 
 fn start_failed() -> HostFrame {

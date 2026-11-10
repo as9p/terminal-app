@@ -671,7 +671,7 @@ impl From<Exit> for ClientEvent {
 }
 
 /// The folder with every link resolved, or None if it is not a folder. Blocks.
-fn resolve_dir(path: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_dir(path: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(path).ok()?;
     if !real.is_dir() {
         return None;

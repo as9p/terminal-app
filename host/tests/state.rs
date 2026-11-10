@@ -226,11 +226,11 @@ async fn signed_in(host: &Host) -> Ws {
         .expect("upgrade to a WebSocket");
     say(
         &mut ws,
-        json!({"type": "hello", "token": host.token, "proto": 2}),
+        json!({"type": "hello", "token": host.token, "proto": 3}),
     )
     .await;
     let reply = hear(&mut ws, |frame| frame["type"] == "hello_ok").await;
-    assert_eq!(reply["proto"], 2, "{reply}");
+    assert_eq!(reply["proto"], 3, "{reply}");
     ws
 }
 
@@ -517,7 +517,7 @@ async fn claude_restore_uses_resume() {
             saved_claude(FIRST, &dirs.work()),
             saved_claude(SECOND, &dirs.work()),
         ],
-        layout: None,
+        ..State::default()
     });
 
     let mut host = Host::start(&dirs);
@@ -551,7 +551,7 @@ async fn claude_restore_is_lazy() {
     seeded.title = Some("planning".to_string());
     dirs.write_state(&State {
         sessions: vec![seeded],
-        layout: None,
+        ..State::default()
     });
 
     let mut host = Host::start(&dirs);
@@ -577,24 +577,71 @@ async fn claude_restore_is_lazy() {
     assert_eq!(state.sessions[0].title.as_deref(), Some("planning"));
 }
 
+async fn tree(ws: &mut Ws) -> Value {
+    say(ws, json!({"type": "tree_get"})).await;
+    hear(ws, |frame| frame["type"] == "tree").await["tree"].clone()
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn layout_survives_restart() {
+async fn tree_survives_restart() {
     let dirs = Dirs::new();
-    let layout = r#"{"tabs":[{"split":"row"}]}"#;
     let mut host = Host::start(&dirs);
     let mut ws = signed_in(&host).await;
-    say(&mut ws, json!({"type": "layout_set", "json": layout})).await;
-    // `layout_set` has no reply. Frames are handled in order, so this reply means it landed.
-    list(&mut ws).await;
+    create(&mut ws, FIRST, "shell", &dirs.work()).await;
+    let tab = tree(&mut ws).await["ungrouped"][0]["id"].clone();
+    say(
+        &mut ws,
+        json!({"type": "tree_op", "op": {"type": "rename_tab", "tab": tab, "name": "build"}}),
+    )
+    .await;
+    hear(&mut ws, |frame| {
+        frame["type"] == "tree" && frame["tree"]["ungrouped"][0]["name"] == "build"
+    })
+    .await;
     host.stop();
 
     let mut host = Host::start(&dirs);
     let mut ws = signed_in(&host).await;
-    say(&mut ws, json!({"type": "layout_get"})).await;
-    let reply = hear(&mut ws, |frame| frame["type"] == "layout").await;
-    assert_eq!(reply["json"], layout);
+    let tree = tree(&mut ws).await;
+    let tabs = tree["ungrouped"].as_array().expect("tabs");
+    assert_eq!(tabs.len(), 1, "{tree}");
+    assert_eq!(tabs[0]["id"], tab, "{tree}");
+    assert_eq!(tabs[0]["name"], "build", "{tree}");
+    assert_eq!(tabs[0]["split"], json!({"type": "leaf", "session": FIRST}));
     host.stop();
+}
+
+/// A `state.json` from before the tree has a `layout` string and no `tree`.
+#[cfg(unix)]
+#[tokio::test]
+async fn old_layout_state_loads() {
+    let dirs = Dirs::new();
+    let work = dirs.work();
+    let old = json!({
+        "sessions": [{"uuid": FIRST, "kind": "shell", "cwd": work, "title": null, "chat": null}],
+        "layout": "{\"tab\":\"x\"}",
+    });
+    std::fs::create_dir_all(dirs.state_file().parent().expect("a data folder"))
+        .expect("make the data folder");
+    std::fs::write(dirs.state_file(), old.to_string()).expect("write an old state");
+
+    let mut host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    let items = list(&mut ws).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["uuid"], FIRST);
+    // A restored session in no saved tab gets one of its own.
+    let tree = tree(&mut ws).await;
+    assert_eq!(
+        tree["ungrouped"][0]["split"],
+        json!({"type": "leaf", "session": FIRST}),
+        "{tree}"
+    );
+    host.stop();
+    assert_eq!(uuids(&dirs.read_state()), [FIRST]);
+    let raw = std::fs::read_to_string(dirs.state_file()).expect("read state.json");
+    assert!(!raw.contains("\"layout\""), "{raw}");
 }
 
 #[tokio::test]

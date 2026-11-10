@@ -1,6 +1,6 @@
 // One WebSocket to the host. It knows nothing about xterm or how many sessions are on screen.
 
-const PROTO = 2;
+const PROTO = 3;
 const HEADER_BYTES = 4;
 // Long enough for a busy host, short enough that a silent port does not look like a frozen app.
 const HELLO_TIMEOUT_MS = 5000;
@@ -20,6 +20,83 @@ export type SessionItem = {
   cols: number;
   rows: number;
 };
+
+// The tree of groups and tabs the host keeps, field for field as it sends it. Nothing uses it
+// yet: the sidebar that shows it comes later.
+
+export type Dir = "right" | "down";
+
+export type Split =
+  | { type: "leaf"; session: string }
+  | { type: "row"; children: Split[]; sizes: number[] }
+  | { type: "col"; children: Split[]; sizes: number[] };
+
+export type Tab = {
+  id: string;
+  name: string | null;
+  pinned: boolean;
+  split: Split;
+  last_used: number;
+};
+
+export type Group = {
+  key: string;
+  path: string;
+  name: string | null;
+  branch: string | null;
+  collapsed: boolean;
+  tabs: Tab[];
+};
+
+export type SavedSession = {
+  uuid: string;
+  kind: string;
+  cwd: string;
+  title: string | null;
+  chat: string | null;
+};
+
+export type ClosedTab = { tab: Tab; group: string | null; index: number; panes: SavedSession[] };
+
+export type GroupDefaults = { name: string | null; collapsed: boolean };
+
+export type Tree = {
+  groups: Group[];
+  ungrouped: Tab[];
+  closed: ClosedTab[];
+  defaults: Record<string, GroupDefaults>;
+};
+
+export type Op =
+  | { type: "open_folder"; path: string }
+  | { type: "close_tab"; tab: string }
+  | { type: "reopen_tab" }
+  | { type: "move_tab"; tab: string; group: string | null; index: number }
+  | { type: "move_group"; group: string; index: number }
+  | { type: "rename_tab"; tab: string; name: string | null }
+  | { type: "rename_group"; group: string; name: string | null }
+  | { type: "pin_tab"; tab: string; pinned: boolean }
+  | { type: "collapse_group"; group: string; collapsed: boolean }
+  | { type: "join_tabs"; tab: string; into: string; dir: Dir }
+  | { type: "split_out"; session: string }
+  | { type: "set_sizes"; tab: string; split: Split }
+  | { type: "used"; tab: string };
+
+/** Where a created session's pane goes. Left out, it gets a tab of its own. */
+export type Place = { type: "new_tab" } | { type: "split_of"; session: string; dir: Dir };
+
+type CreateFrame = {
+  type: "create";
+  uuid: string;
+  kind: SessionKind;
+  cwd: string;
+  cols: number;
+  rows: number;
+  place?: Place;
+};
+
+/** `tree_get` is answered with a `tree` frame, and joins this connection to every later push. */
+export type TreeFrame = { type: "tree_get" } | { type: "tree_op"; op: Op };
 
 /** Why a connection could not be opened, or that it ended. */
 export type FailureKind = "proto_mismatch" | "token_refused" | "not_our_host" | "lost";
@@ -71,7 +148,7 @@ type HostFrame =
   | { type: "cwd"; session: number; cwd: string }
   | { type: "exited"; session: number; clean: boolean }
   | { type: "detached"; session: number }
-  | { type: "layout"; json: string | null }
+  | { type: "tree"; tree: Tree }
   | { type: "error"; code: string; message: string };
 
 type Waiting = {
@@ -84,7 +161,6 @@ type Waiting = {
 };
 
 const LIST_CODES: readonly string[] = [];
-const LAYOUT_CODES: readonly string[] = [];
 const CREATE_CODES = ["bad_request", "bad_kind", "bad_cwd", "bad_size", "spawn_failed"];
 const ATTACH_CODES = ["no_session", "bad_size"];
 
@@ -174,23 +250,6 @@ export class Connection {
     );
   }
 
-  /** The layout last given to `setLayout`, kept by the host across restarts, or null. */
-  layout(): Promise<string | null> {
-    return this.request(
-      { type: "layout_get" },
-      LAYOUT_CODES,
-      (frame) => frame.type === "layout",
-      (frame, resolve: (json: string | null) => void) => {
-        if (frame.type === "layout") resolve(frame.json);
-      },
-    );
-  }
-
-  /** The host never looks inside `json`. Dropped if the socket is not open. */
-  setLayout(json: string): void {
-    this.sendText({ type: "layout_set", json });
-  }
-
   /** Resolves with the session number. Rejects with a HostError or a ConnectionFailure. */
   create(
     uuid: string,
@@ -200,7 +259,7 @@ export class Connection {
     rows: number,
   ): Promise<number> {
     return this.request(
-      { type: "create", uuid, kind, cwd, cols, rows },
+      { type: "create", uuid, kind, cwd, cols, rows } satisfies CreateFrame,
       CREATE_CODES,
       (frame) => frame.type === "created" && frame.uuid === uuid,
       (frame, resolve: (session: number) => void) => {

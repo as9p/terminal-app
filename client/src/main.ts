@@ -89,17 +89,22 @@ function describe(error: unknown, port: number | undefined): string {
   return String(error);
 }
 
-/** What the app asks the host to keep for it. The host never looks inside. */
-type Layout = { tab: string };
+const LAST_SESSION_KEY = "lastSession";
 
-/** The tab the window last showed, or undefined if the saved layout is missing or not ours. */
-function savedTab(json: string | null): string | undefined {
-  if (json === null) return undefined;
+/** The uuid of the session the window last showed. Lost if storage is turned off. */
+function lastSession(): string | undefined {
   try {
-    const layout = JSON.parse(json) as Partial<Layout> | null;
-    return typeof layout?.tab === "string" ? layout.tab : undefined;
+    return localStorage.getItem(LAST_SESSION_KEY) ?? undefined;
   } catch {
     return undefined;
+  }
+}
+
+function rememberSession(uuid: string): void {
+  try {
+    localStorage.setItem(LAST_SESSION_KEY, uuid);
+  } catch {
+    // Full or turned off: the next window starts on the first live session instead.
   }
 }
 
@@ -147,8 +152,8 @@ async function main(): Promise<void> {
   });
 
   async function chooseSession(next: Connection, home: string): Promise<number> {
-    // The host keeps the layout across restarts, so a new window goes back to the same tab.
-    sessionUuid ??= savedTab(await next.layout());
+    // Kept across restarts, so a new window goes back to the same session.
+    sessionUuid ??= lastSession();
     const live = (await next.list()).filter((item) => item.exited === null);
     // Session numbers start over in a new host, so the uuid is what says it is the same one.
     const existing = live.find((item) => item.uuid === sessionUuid) ?? live[0];
@@ -162,7 +167,7 @@ async function main(): Promise<void> {
       session = await next.create(uuid, "shell", home, cols, rows);
       sessionUuid = uuid;
     }
-    next.setLayout(JSON.stringify({ tab: sessionUuid } satisfies Layout));
+    rememberSession(sessionUuid);
     return session;
   }
 
