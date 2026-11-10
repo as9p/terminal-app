@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>terminal-app</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #16141f;
+      }
+      /* The overlay title bar leaves nothing to grab, so this strip is what moves the window. */
+      #drag-strip {
+        position: fixed;
+        inset: 0 0 auto 0;
+        height: 28px;
+      }
+      /* Below the strip, so the window buttons never cover text, with 8 of padding on all sides. */
+      #terminal {
+        position: fixed;
+        inset: 36px 8px 8px 8px;
+      }
+      #bar {
+        position: fixed;
+        inset: 28px 0 auto 0;
+        z-index: 10;
+        padding: 2px 8px;
+        font: 12px/1.4 "JetBrainsMono Nerd Font Mono", monospace;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="drag-strip" data-tauri-drag-region></div>
+    <div id="terminal"></div>
+    <div id="bar" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

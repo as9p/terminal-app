@@ -1,0 +1,29 @@
+name: app
+
+# The app's Rust side on Windows, which this Mac can't build: tauri-build needs a Windows
+# resource compiler. Mac is checked locally by .claude/verify.md. Only when the app's Rust side
+# can have changed, since a Windows minute costs two of the free monthly minutes.
+on:
+  push:
+    paths:
+      - "client/src-tauri/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/app.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # A debug build, so build.rs drops the host sidecar and no frontend build is needed.
+      - run: cargo clippy -p terminal-app --all-targets -- -D warnings
+      - run: cargo test -p terminal-app

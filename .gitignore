@@ -5,9 +5,18 @@ dist/
 .claude/worktrees/
 .superpowers/
 client/src-tauri/gen/
+client/src-tauri/binaries/
+client/dist/
+client/node_modules/
 
 # Built and temporary keylat files
 tools/keylat/keylat
 tools/keylat/*.log
 tools/keylat/*.out
 tools/keylat/*.csv
+tools/keylat/*.tmp
+tools/keylat/job.*
+tools/keylat/stop
+
+# Generated speed test output
+tools/speed/.cache/

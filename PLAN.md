@@ -40,10 +40,10 @@ Each of these has its test in the task that owns the code.
 
 **Files:** Create `docs/risky-tests.md`. Modify `DESIGN.md` (the lines these tests settle).
 
-- [ ] **Step 1:** Resume under a different path on the Mac. In a scratch folder run `claude -p --model haiku "Remember the word plum"` with `CLAUDECODE` unset, note the session id, move the folder, then try `claude -p --resume <id> "What word?"` from the new path: first as is, then after copying the transcript into the new path's folder under `~/.claude/projects/`. Record which works.
-- [ ] **Step 2:** Find whether Remote Control sessions can be listed. Read `claude remote-control --help` and `claude --help`, and look for a matching file under `~/.claude`. Read only. Don't start a server. Record the answer, with the exact command or file, or "no list found".
-- [ ] **Step 3:** Write results to `docs/risky-tests.md` and update the "Not tested" lines in `DESIGN.md`.
-- [ ] **Step 4:** Commit: `docs: record resume path and Remote Control list tests`.
+- [x] **Step 1:** Resume under a different path on the Mac. In a scratch folder run `claude -p --model haiku "Remember the word plum"` with `CLAUDECODE` unset, note the session id, move the folder, then try `claude -p --resume <id> "What word?"` from the new path: first as is, then after copying the transcript into the new path's folder under `~/.claude/projects/`. Record which works.
+- [x] **Step 2:** Find whether Remote Control sessions can be listed. Read `claude remote-control --help` and `claude --help`, and look for a matching file under `~/.claude`. Read only. Don't start a server. Record the answer, with the exact command or file, or "no list found".
+- [x] **Step 3:** Write results to `docs/risky-tests.md` and update the "Not tested" lines in `DESIGN.md`.
+- [x] **Step 4:** Commit: `docs: record resume path and Remote Control list tests`.
 
 Mac to Windows resume waits for Task 8, when a PC session is involved.
 
@@ -68,16 +68,16 @@ Mac to Windows resume waits for Task 8, when a PC session is involved.
 
 Each session has a reader thread feeding a bounded channel and one actor thread. The actor forwards bytes to attached clients first, then feeds the screen copy. Attach, detach and resize go through the actor, so attach happens at one exact point in the output.
 
-- [ ] **Step 1:** Write failing tests in `host/tests/session.rs`:
+- [x] **Step 1:** Write failing tests in `host/tests/session.rs`:
   - `echo_round_trip`: spawn `cat` (Windows: `cmd /c more`), write `hello\n`, read it back within 2 s.
   - `resize_reaches_program`: resize to 100x40, `stty size` prints `40 100` (Unix only).
   - `exit_reports_clean_or_signal`: `exit` reports clean; a `SIGHUP` kill reports a signal (Unix only).
   - `clean_env_strips`: `CLAUDECODE`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_*`, `KITTY_*`, `ORCA_*` removed; `TERM=xterm-256color`, `COLORTERM=truecolor` set.
   - `login_shell_finds_path`: a spawn with a bare environment still gets the PATH from the login shell (Unix only).
-- [ ] **Step 2:** Run `cargo test -p term-host --test session`. Expected: fails to compile.
-- [ ] **Step 3:** Implement. Shell: `$SHELL -l`, using `SHELL` from the host's environment so the speed tests can swap it. Windows: `COMSPEC`. Claude on Unix: `$SHELL -lic 'exec claude --session-id <uuid>'`, or `--resume <uuid>` when `resume` is true. Claude on Windows: `cmd /c claude ...`.
-- [ ] **Step 4:** Run the tests. Expected: pass.
-- [ ] **Step 5:** Commit: `feat(host): spawn and run terminal sessions`.
+- [x] **Step 2:** Run `cargo test -p term-host --test session`. Expected: fails to compile.
+- [x] **Step 3:** Implement. Shell: `$SHELL -l`, using `SHELL` from the host's environment so the speed tests can swap it. Windows: `COMSPEC`. Claude on Unix: `$SHELL -lic 'exec claude --session-id <uuid>'`, or `--resume <uuid>` when `resume` is true. Claude on Windows: `cmd /c claude ...`.
+- [x] **Step 4:** Run the tests. Expected: pass.
+- [x] **Step 5:** Commit: `feat(host): spawn and run terminal sessions`.
 
 ## Task 4: Screen copy and attach
 
@@ -85,17 +85,17 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 
 **Produces:** `Screen::new(size, scrollback: usize)`, `feed(&[u8])`, `resize(Size)`, `snapshot() -> Vec<u8>`. Scrollback is 20000 lines to match Alex's kitty.
 
-- [ ] **Step 1:** Clone Orca into the scratchpad and read how its daemon makes snapshots, reference only. Write three lines in the handoff on what to borrow. Copy no code without its notice.
-- [ ] **Step 2:** Write failing tests:
+- [x] **Step 1:** Clone Orca into the scratchpad and read how its daemon makes snapshots, reference only. Write three lines in the handoff on what to borrow. Copy no code without its notice.
+- [x] **Step 2:** Write failing tests:
   - `snapshot_round_trip`: feed colors, wide characters, cursor moves and 500 scrolled lines, feed the snapshot into a fresh `Screen`, and assert the same formatted contents, scrollback and cursor.
   - `alt_screen_round_trip`: the same while a full-screen program is active, with modes like mouse and bracketed paste kept.
   - `attach_mid_stream_no_loss_no_dup`: while a session prints numbered lines, attach; the snapshot plus later bytes contain every number once, in order.
   - `flood_stays_bounded`: a client that never acks stops forwarding at 4 MiB unacked, the program is throttled, a second session keeps echoing, and `kill()` works.
   - `stale_client_dropped`: a client with no ack for 5 s is dropped, and the throttle lifts.
-- [ ] **Step 3:** Run them. Expected: fail.
-- [ ] **Step 4:** Implement on `vt100`, with the actor holding back output while a live client is over 4 MiB unacked.
-- [ ] **Step 5:** Benchmark 30 MB of colored text with `cargo bench -p term-host --bench parse`. Pass is at least 80 MB/s in release, because the actor parses every byte. Measure memory with 20000 lines full at 200 columns, and report it. If speed fails, swap `Screen`'s insides to `alacritty_terminal` 0.26 (Apache-2.0), keeping its interface, and note why.
-- [ ] **Step 6:** Run the tests. Expected: pass. Commit: `feat(host): keep a screen copy and attach without losing output`.
+- [x] **Step 3:** Run them. Expected: fail.
+- [x] **Step 4:** Implement on `vt100`, with the actor holding back output while a live client is over 4 MiB unacked.
+- [x] **Step 5:** Benchmark 30 MB of colored text with `cargo bench -p term-host --bench parse`. Pass is at least 80 MB/s in release, because the actor parses every byte. Measure memory with 20000 lines full at 200 columns, and report it. If speed fails, swap `Screen`'s insides to `alacritty_terminal` 0.26 (Apache-2.0), keeping its interface, and note why.
+- [x] **Step 6:** Run the tests. Expected: pass. Commit: `feat(host): keep a screen copy and attach without losing output`.
 
 ## Task 5: WebSocket server
 
@@ -106,7 +106,7 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 - Binary frames are a 4-byte little-endian session number, then bytes, in both directions.
 - Port 47211, or `TERM_HOST_PORT`. Data folder from the `dirs` crate plus `terminal-app`, or `TERM_APP_DATA`. Token file `host-token` holds 32 random bytes as hex, mode 0600.
 
-- [ ] **Step 1:** Write failing tests:
+- [x] **Step 1:** Write failing tests:
   - `refuses_foreign_origin`: `Origin: https://example.com` is refused before the upgrade.
   - `allows_app_origins`: `tauri://localhost` and `http://tauri.localhost` are accepted. `http://localhost:1420` is accepted only in debug builds.
   - `refuses_bad_token`: wrong token closes; no `hello` within 5 s closes; a wrong `proto` returns `error{code:"proto_mismatch"}` and closes.
@@ -114,9 +114,9 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
   - `sessions_survive_disconnect`: disconnect, reconnect, attach, and the screen and process are still there.
   - `binds_loopback_only`: connecting through a non-loopback address of this computer fails.
   - `second_host_exits`: a second host on the same port exits without touching the first.
-- [ ] **Step 2:** Run them. Expected: fail.
-- [ ] **Step 3:** Implement, with `TCP_NODELAY` set on every socket, since a delayed small packet would add typing latency.
-- [ ] **Step 4:** Run them. Expected: pass. Commit: `feat(host): serve sessions over a local WebSocket`.
+- [x] **Step 2:** Run them. Expected: fail.
+- [x] **Step 3:** Implement, with `TCP_NODELAY` set on every socket, since a delayed small packet would add typing latency.
+- [x] **Step 4:** Run them. Expected: pass. Commit: `feat(host): serve sessions over a local WebSocket`.
 
 ## Task 6: One terminal in a Tauri window
 
@@ -126,16 +126,16 @@ Each session has a reader thread feeding a bounded channel and one actor thread.
 
 Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono 14, line height 1.1, beam cursor with no blink, padding 8, scrollback 20000, copy on select, left Option as Alt, no bell sound, Shift+Enter sends `\x1b\r`, colors from `current-theme.conf`, hidden title bar.
 
-- [ ] **Step 1:** Build it with one shell session. Ack bytes from xterm's write callback.
-- [ ] **Step 2:** Run `pnpm -C client tsc --noEmit` and `pnpm -C client tauri build`. Expected: both succeed.
+- [x] **Step 1:** Build it with one shell session. Ack bytes from xterm's write callback.
+- [x] **Step 2:** Run `pnpm -C client tsc --noEmit` and `pnpm -C client tauri build`. Expected: both succeed.
 - [ ] **Step 3:** Check by hand on the release build: type, run `vim` and `claude`, Cmd+Q, reopen, and the same session returns with its screen. A foreign proto shows a clear message and kills nothing. Stop the host afterward.
-- [ ] **Step 4:** Commit: `feat(client): show a host session in a Tauri window`.
+- [x] **Step 4:** Commit: `feat(client): show a host session in a Tauri window`.
 
 ## Task 7: First speed check through the host
 
 **Files:** Create `tools/keylat/test-app.sh`, `tools/speed/throughput.sh`, `tools/speed/README.md`. Modify `DESIGN.md` speed tables.
 
-- [ ] **Step 1:** Write `test-app.sh` from `test-build2.sh`: a release build, a host on its own port and data folder, and `SHELL` set to `cat-shell.sh`, then 60 presses with `keep-size`.
+- [x] **Step 1:** Write `test-app.sh` from `test-build2.sh`: a release build, a host on its own port and data folder, and `SHELL` set to `cat-shell.sh`, then 60 presses with `keep-size`.
 - [ ] **Step 2:** Ask Alex for a go, then run it through `runner.command` as `run-kitty-test.sh` shows. Rerun kitty in the same sitting, so the comparison is fair, and run each 3 times.
 - [ ] **Step 3:** Measure throughput with 30 MB of colored text, three times, visible tab.
 - [ ] **Step 4:** Record median, 95th percentile, share over 30 ms, backspace and MB/s in `DESIGN.md`. Missing a target stops this plan's UI work until the cause is known.
@@ -145,17 +145,17 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 
 **Files:** Create `.github/workflows/host.yml`, `docs/windows-test.md`.
 
-- [ ] **Step 1:** Create the private repo `as9p/terminal-app` if it's missing, and push. If the permission check refuses, hand Alex the command.
-- [ ] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
+- [x] **Step 1:** Create the private repo `as9p/terminal-app` if it's missing, and push. If the permission check refuses, hand Alex the command.
+- [x] **Step 2:** Add a workflow running `cargo test -p term-host` on `windows-latest` and `macos-latest` for pushes. Expected: green on both, with the Unix-only tests skipped.
 - [ ] **Step 3:** Ask a PC session, by message starting `From session <name>:`, to clone the repo, run the tests, type in a real host session through a small test client, and try Mac to Windows chat resume. Save its reported results in `docs/windows-test.md`, marked as reported, not seen here.
-- [ ] **Step 4:** Commit: `ci(host): test on Windows and Mac`.
+- [x] **Step 4:** Commit: `ci(host): test on Windows and Mac`. Done as c1ec2e3 and the commits after it.
 
 ## Task 9: Tab and split review (waits on Alex)
 
 **Files:** None in the repo. Publishes an artifact through `ui-review-page`.
 
 - [ ] **Step 1:** Take real screenshots of Orca and kitty with many tabs. Close test windows after.
-- [ ] **Step 2:** Publish the review: tab bar look, many-tab behavior (recommended: title shrinks first, status never hides, minimum width, then sideways scroll), the status marker, split dividers, a new Claude tab key, and a states strip.
+- [ ] **Step 2:** Publish the review: tab bar look, many-tab behavior (recommended: title shrinks first, status never hides, minimum width, then sideways scroll), the status marker in its four states (working, blocked, done, idle, from Herdr) with blocked rolling up to the tab and the jump-to-blocked key, split dividers, a new Claude tab key, and a states strip.
 - [ ] **Step 3:** Wait for Alex's go. Record the answers in `DESIGN.md`.
 
 ## Task 10: Tabs, splits and kitty keys
@@ -165,6 +165,8 @@ Defaults, from Alex's `~/.config/kitty/kitty.conf`: JetBrainsMono Nerd Font Mono
 **Produces:** `Layout` as JSON saved through `layout_set`: tabs, each holding a split tree whose leaves are session uuids.
 
 Keys, from Alex's kitty config: Cmd+T new tab in current folder, Cmd+W close pane, Cmd+Shift+W close tab, Cmd+Shift+] and [ next and previous tab, Cmd+1 to 9 go to a tab, Cmd+Shift+T rename tab, Cmd+D vertical split in current folder, Cmd+Shift+D horizontal split, Cmd+Alt+arrows move between panes, Cmd+Shift+Enter zoom pane, Cmd+C and Cmd+V copy and paste. New Claude tab uses the key from the review.
+
+Text zoom (DESIGN.md "Text zoom"): Cmd+= and Cmd+plus up 1 px, Cmd+minus down 1 px, Cmd+0 back to 14, applied to every terminal at once and to new ones, saved across restarts, clamped to 8 to 40 px. No popup, toast or readout for this or any other key. Work `letterSpacing` out from the measured cell width at each size (see the cell size note under handoffs). Add tests `zoom_applies_to_every_terminal`, `zoom_clamps_to_limits`, `zoom_survives_restart` to Step 1.
 
 - [ ] **Step 1:** Write failing tests for the layout logic: `close_last_pane_closes_tab`, `close_tab_kills_every_session`, `layout_round_trips_json`, `unknown_session_in_saved_layout_is_dropped`, `resize_rounds_to_whole_cells`.
 - [ ] **Step 2:** Run `pnpm -C client vitest run`. Expected: fail.
@@ -207,7 +209,55 @@ Current folder: `libproc` `pidcwd` on Mac. On Windows, the folder the session st
 ## Open questions for Alex
 
 - Which account is the second one for Task 2. Waiting on Alex, not blocking.
+- Whether test runs may unset `CLAUDECODE` through a wrapper script. Something blocked `env -u` in Task 1 and the agent worked around it. The source of the block is unknown. Task 2 needs an answer.
+- Task 6 Step 3: Alex's hand check of the release app, including the stray 280x168 window and the small round bubble near the cursor.
+- Task 7 Steps 2 and 3: a go for `tools/speed/run-sitting.sh task-7`. It takes the keyboard for about 4 minutes. Tasks 9 and 10 wait on its result.
+- Task 8 Step 3: on hold (Alex, 2026-11-09: the PC session has nothing set up for this yet, wait). Alex says when a PC session is ready. The message to send is drafted; `tools/host-client` is the test client. CI already runs the host tests on Windows.
 
 ## Handoffs
 
 (One short note per finished task: what changed, what was verified and how, anything the next task should know.)
+
+**Task 1 (9e3ca5c):** Plain `claude --resume <id>` works from a moved folder on the Mac, and keeps writing to the original transcript. No command lists Remote Control sessions. `~/.claude/sessions/<pid>.json` has a `bridgeSessionId` field, and what fills it is unknown. Verified by reading the diff and report and checking that no test folders or processes remain. Mac to Windows resume is still open for Task 8. The test ran through a wrapper script after `env -u` was blocked (see open questions).
+
+**Task 3 (149b986):** Host sessions work: spawn, write, resize, kill with escalation, attach, detach, exit events. Verified by 22 passing tests, clippy, fmt, and 200 repeat runs of the session tests with no failures. Two macOS flakes fixed in `host/src/pty.rs`: a bounded retry on the kernel's -6 open race, and running libnotify's run-once setup before any fork, because a fork child could die with SIGKILL in `_notify_fork_child`. Which parent thread held that gate is still unknown. Any new code that forks must call `prepare_for_fork` first. Task 4: attach only subscribes so far, snapshot and throttle are yours. Task 8: the Windows parts have never compiled; the startup cursor reply rests on memory of the ConPTY stall, and the Windows echo test runs `more` inside COMSPEC. Task 11: `SpawnSpec.uuid` is unused so far, Claude uses `chat`; any exit after `kill()` now reports not clean, including a shell that answers SIGHUP with a normal exit.
+
+**Task 4 (6dde78d, 0482277, 0a283cc, 6eed1ef, c965361):** Screen copy on vt100, attach through the actor, flood limit. Verified by 27 session tests (five clean repeat runs), 5 screen tests, clippy, fmt, and a mutation check that broke `session.rs` 14 ways: 13 caught. The survivor, "drain not restarted", cannot run on macOS, which ends output when the program exits (seen with a probe). The test for it only bites on Linux.
+
+- Orca, read only: (1) a headless emulator per session serialized on attach, the same shape as `Screen`; (2) its "serialize() omits parser state" comment names a real bug, and `Screen::feed` takes the idea as `held`; (3) its alt screen restore lists modes one by one, including some vt100 never tracks (4h, 1004, ?7l, ?45), the place to start if we track modes ourselves.
+- Speed: 105 to 113 MB/s release, pass line 80. Memory: 142.5 MiB at 20000 lines of 200 columns. Short lines: 109 MiB resident, 281 MiB after the first attach, because the snapshot pads a clone and the process keeps that memory after freeing it. Live memory goes back to where it was, and later snapshots reuse the space. Full size snapshot about 45 ms. Task 12 can revisit.
+- A snapshot cannot restore: scroll margins, saved cursor, origin mode, tab stops, character sets (`ESC ( 0` line drawing comes back as letters), modes vt100 does not track (autowrap off, focus 1004, 2026), OSC state (title, cwd, hyperlinks), lines cut on narrow then widen. This affects reattach only; the live stream goes to xterm directly.
+- Ruling: a kill ends the hold. macOS keeps a killed program in `ps` state `E` while its terminal has unread output, so a pure hold never reports its exit. A client over the limit at kill time loses the final bytes and still gets `Exited`. The cause is inferred from behaviour, not kernel source.
+- Task 5: `SessionHandle::write` blocks while the program is not reading, so it must never run on the async runtime or a path shared with other sessions. A dropped stale client sees only a disconnected channel, which means "attach again". Acks are running totals and include the snapshot.
+- Task 6: snapshot replay has never run in xterm.js. Check it, with xterm scrollback at 20000 or more.
+- Task 8: on Windows the terminal has no end of output at exit, so the drain grace is the main path there, and the hold has never run against ConPTY. These tests are `cfg(unix)`. Give the hold and the drain restart a Windows test.
+- Known risk: endless small acks can hold a program indefinitely, following "resets on any ack". Only a local client with the token can do this.
+
+**Task 5 (1ab4c83, ed75a53, 9a9e752):** The host serves sessions over a WebSocket on 127.0.0.1 with origin and token checks. Verified by 63 debug tests, 23 server and 28 session tests in release, clippy, fmt, 40 clean repeat runs, 200 clean runs of `last_resize_wins`, and 7 of 7 break checks caught.
+
+- Added beyond the plan: host frame `detached{session}` (the app answers by attaching again), error code `spawn_failed`, and `SessionHandle::announced()`. `kill`, `detach` and `layout_set` send no reply on success. A stale ack is ignored. A duplicate uuid is allowed. `create`'s `uuid` is also the chat id; resume stays Task 11.
+- Readline finding: bash line editing reads the window size and writes it back as it returns to its prompt, so a resize landing between the two is lost with no error. On a bare terminal with no host code, 29 of 800 resizes were undone with line editing on, 0 of 800 with it off, 0 of 800 in zsh. The cause in readline's source is from memory, not checked; the experiment is what implicates line editing. Linux probably has it too, not tested. The host now reads the size back after 50 ms and sets it again, up to 3 times. `list` reports a size only once it has held, so it lags a resize by 50 ms.
+- A resize that a program undoes later than 50 ms after the host set it stays undone. That needs a shell stalled between its read and its write, accepted as unlikely.
+- Speed through the socket on release, acking client that does not parse: 84 MB/s `yes` short lines, 44 `tr | cat` unbroken, 35 `tr` direct unbroken. Bare terminal with no host: 184, 47, 39. So macOS's terminal driver limits unbroken lines and the host costs about 10% there; on short lines the host is the limit at 84. 84 is an upper bound, since no parsing or drawing is included.
+- Task 6: check a 20000-line snapshot through the webview. `Kind::Claude` has never been spawned; the first real one is the hand check.
+- Task 8: compile on Windows, confirm `get_size` behaves on ConPTY, and test the drain restart and an input thread stuck after a kill with a background holder. Neither can run on macOS.
+- Task 10 and 12: `Connection::answer` handles frames one at a time and `create` and `attach` wait on blocking work, so a slow spawn, snapshot or folder check stalls other tabs on that connection. Measure before changing it.
+- Accepted: a client holding the token can grow the writer queue with `list`.
+
+**Task 6 (ab72c33, 975e63d, 3dfd3ca, d3fdf8d), Step 3 still waits on Alex's hand check:** The app shows a host session in a Tauri window. Verified on the release build, on test ports: the picture of the WebGL canvas shows JetBrains Mono in all four faces, color, box lines and icons. A host with another protocol shows the version message, and no host was started or killed. A 20038-line snapshot reached the page buffer within 100 ms between two reports, with the right first and last lines. Closing and reopening the app returned the same session with its buffer. Killing the host with the app open showed the lost message, then a new host and new session about 200 ms later. Retries against something that is not the host came 1.1, 2.1, 4.1, 8.1, 16.1 s apart. Not seen yet: typing with real keys, vim, a real `Kind::Claude` spawn, real Cmd+Q, copy on select, ack pacing under load.
+
+- Real bug found: WKWebView's canvas cannot see user-installed fonts, and xterm measures and draws through canvas, so the app drew Courier with no error. The app now ships four woff2 faces plus their license, about 4.3 MB. Windows and other users need no install because of it.
+- Cell size: 17 x 39 device pixels at ratio 2. `letterSpacing: 1` is in device pixels and matches kitty's rounding at 14 px, but not at a font size whose natural width is a whole number (15 px gives 18, plus 1). Task 10: work the spacing out from the measured width when font size keys arrive.
+- Behind another window or on another AeroSpace workspace, WebKit stops animation frames while the buffer keeps advancing. So acks do not stall, and pictures of a hidden window are stale. Task 12: confirm a hidden window paints at once when shown.
+- AeroSpace tiles the window by default, so its size depends on the workspace. 1280x800 applies only when floated.
+- Open: an extra 280x168 window at layer 0 from the app's process, which AeroSpace does not list, and a small round bubble near the cursor. Probably macOS's text input indicator, not proven. Both are in Alex's hand check.
+- Task 10 and 11: exited sessions pile up in the host list, and `main.ts` start-up and bar code needs sharing out for tabs. Task 8: Windows detach flags in `start_host`, Windows origin.
+
+**Task 8 (c1ec2e3, 028dd70, 7341dec, d0f58a9, 5e6f1f1, 3eabd87), Step 3 waits on a PC session:** The host runs on Windows in CI. `host.yml` tests on windows-latest and macos-latest, and `app.yml` lints and tests the app's Rust side on Windows, because this Mac can't build the app for Windows (tauri-winres needs `llvm-rc`). Verified by CI runs 42527059403 (app), 42533187099 (host) and 42533611436 (host, with the crash exit test seen passing in the Windows log). Windows tests now cover echo, resize read-back (`get_size` reports 100x40 on ConPTY, so no extra resizes), the output hold, a stale client drop, the drain restart at exit, kill while held back, and crash exit codes.
+
+- Measured on the runner: ConPTY passes about 1.42 MB/s with no lines dropped, and a client that never acks goes over 4 MiB in about 3.2 s at 400 columns.
+- ConPTY sets a window title at program start, and cmd sets one per command, so Windows sends many more Title events than macOS. Tests skip them, and title events add bytes to a flood.
+- Ruling: on Windows an exit code of 0xC0000000 and up (a crash, Ctrl+C) is unclean, any other code clean, matching Unix where only a signal is unclean. A kill is unclean on both through `kill_sent`.
+- Fragile: the Windows drain test relies on about 4 KiB of output after the limit fitting in the host's buffers. A Windows build that sends output in much smaller pieces could make it flaky.
+- Still not run anywhere: real typing on Windows, the app window on Windows, an input thread stuck after a kill when a background child holds the terminal, and Mac to Windows chat resume. All are Step 3.
+- The app starts the host detached on Windows (no console window, home folder as working folder). `http://tauri.localhost` was already an allowed origin.
