@@ -279,11 +279,29 @@ describe("markers in the sidebar", () => {
     const { element, store } = mount(tree([], [tab("a"), tab("b")]));
     store.setStates([{ session: "s-b", state: "working", since_ms: 1 }]);
     store.setStates([{ session: "s-b", state: "done", since_ms: 2 }]);
-    store.select("b");
+    const before = rowMarker(element, "b");
+    // A new tab changes what the list shows, so it is built again (a tab switch is not: it
+    // updates in place, see tab_switch_keeps_a_marker_mid_morph).
+    store.setTree(tree([], [tab("a"), tab("b"), tab("c")]));
     const after = rowMarker(element, "b");
+    expect(after).not.toBe(before);
     expect(after?.querySelector(".mrig")?.classList.contains("p-done")).toBe(true);
     expect(after?.classList.contains("mo-run")).toBe(false);
     expect(after?.classList.contains("mo-hold")).toBe(false);
+  });
+
+  it("tab_switch_keeps_a_marker_mid_morph", () => {
+    reduceMotion(false);
+    const { element, store } = mount(tree([], [tab("a"), tab("b")]));
+    store.setStates([{ session: "s-b", state: "working", since_ms: 1 }]);
+    store.setStates([{ session: "s-b", state: "done", since_ms: 2 }]);
+    const before = rowMarker(element, "b");
+    const running = before?.classList.contains("mo-run") || before?.classList.contains("mo-hold");
+    expect(running).toBe(true);
+    store.select("b");
+    const after = rowMarker(element, "b");
+    expect(after).toBe(before);
+    expect(after?.classList.contains("mo-run") || after?.classList.contains("mo-hold")).toBe(running);
   });
 
   it("collapsed_group_rolls_up_blocked_in_place", () => {

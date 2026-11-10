@@ -281,13 +281,210 @@ describe("sidebar", () => {
     element.querySelector("input.rename")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   });
 
+  it("esc_on_a_focused_row_gives_typing_back", () => {
+    vi.mocked(refocus).mockClear();
+    const { element } = mount(tree([group("a", [tab("a1"), tab("a2")])]));
+    const row = element.querySelector<HTMLElement>('[data-tab="a2"]');
+    const fold = element.querySelector<HTMLElement>(".ghead > .slot");
+    if (!row || !fold) throw new Error("no row");
+    row.focus();
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    row.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(refocus).toHaveBeenCalledTimes(1);
+    key(fold, "Escape");
+    expect(refocus).toHaveBeenCalledTimes(2);
+  });
+
+  it("sub_line_trims_the_title_like_the_name", () => {
+    const { element, store, sidebar } = mount(tree([], [tab("t")]), { title: () => "  build  " });
+    store.setStates([{ session: "s-t", state: "blocked", since_ms: 1 }]);
+    sidebar.updateStates();
+    const row = element.querySelector<HTMLElement>('[data-tab="t"]');
+    expect(row?.querySelector(".name")?.textContent).toBe("build");
+    expect(row?.querySelector(".sub")?.textContent).toBe("build");
+  });
+
+  describe("tab switch", () => {
+    const split = (a: string, b: string): Split => ({
+      type: "row",
+      children: [{ type: "leaf", session: a }, { type: "leaf", session: b }],
+      sizes: [1, 1],
+    });
+
+    it("a_tab_switch_updates_in_place_and_keeps_unaffected_rows_and_markers", () => {
+      const t = tree([group("a", [tab("a1"), tab("a2"), tab("a3")]), group("b", [tab("b1")])], [tab("u1")]);
+      const { element, store, sidebar } = mount(t);
+      store.setStates([
+        { session: "s-a1", state: "working", since_ms: 1 },
+        { session: "s-a2", state: "blocked", since_ms: 1 },
+        { session: "s-a3", state: "done", since_ms: 1 },
+        { session: "s-b1", state: "working", since_ms: 1 },
+      ]);
+      sidebar.updateStates();
+      const rows = [...element.querySelectorAll<HTMLElement>(".row, .ghead")];
+      const markers = [...element.querySelectorAll<HTMLElement>(".mk")];
+      expect(markers.length).toBe(4);
+      const before = element.querySelector<HTMLElement>('[data-tab="u1"]');
+      expect(before?.classList.contains("selected")).toBe(true);
+
+      store.select("a2");
+      sidebar.render();
+
+      expect([...element.querySelectorAll<HTMLElement>(".row, .ghead")]).toEqual(rows);
+      // Every marker is the node it was, including the two switched rows', so none restarts a morph.
+      expect([...element.querySelectorAll<HTMLElement>(".mk")]).toEqual(markers);
+      const now = element.querySelector<HTMLElement>('[data-tab="a2"]');
+      expect(before?.classList.contains("selected")).toBe(false);
+      expect(before?.getAttribute("aria-current")).toBeNull();
+      expect(before?.tabIndex).toBe(-1);
+      expect(now?.classList.contains("selected")).toBe(true);
+      expect(now?.getAttribute("aria-current")).toBe("true");
+      expect(now?.tabIndex).toBe(0);
+      expect([...element.querySelectorAll<HTMLElement>(".row, .ghead > .slot")].filter((i) => i.tabIndex === 0)).toEqual([now]);
+    });
+
+    it("a_tab_switch_rebuilds_only_the_pane_rows_of_the_two_tabs", () => {
+      const t = tree([group("a", [tab("a1", null, split("p1", "p2")), tab("a2"), tab("a3", null, split("q1", "q2"))])]);
+      const { element, store, sidebar } = mount(t);
+      store.select("a1");
+      sidebar.render();
+      const rows = [...element.querySelectorAll<HTMLElement>(".row, .ghead")];
+      expect([...element.querySelectorAll<HTMLElement>(".pane-row")].map((r) => r.dataset.session)).toEqual(["p1", "p2"]);
+
+      store.select("a3");
+      sidebar.render();
+      expect([...element.querySelectorAll<HTMLElement>(".row, .ghead")]).toEqual(rows);
+      const panes = [...element.querySelectorAll<HTMLElement>(".pane-row")];
+      expect(panes.map((r) => r.dataset.session)).toEqual(["q1", "q2"]);
+      expect(panes.map((r) => r.querySelector(".pidx")?.textContent)).toEqual(["1", "2"]);
+      // The panes sit right under their tab's row.
+      expect(element.querySelector('[data-tab="a3"]')?.nextElementSibling?.classList.contains("panes")).toBe(true);
+      expect(element.querySelectorAll(".panes").length).toBe(1);
+
+      store.select("a2");
+      sidebar.render();
+      expect(element.querySelectorAll(".panes, .pane-row").length).toBe(0);
+      expect([...element.querySelectorAll<HTMLElement>(".row, .ghead")]).toEqual(rows);
+    });
+  });
+
+  describe("context menu keys", () => {
+    function menuSetup() {
+      const op = vi.fn();
+      const { element } = mount(tree([group("a", [tab("a1")]), group("b", [tab("b1")])], [tab("u1")]), { op });
+      const row = element.querySelector<HTMLElement>('[data-tab="a1"]');
+      if (!row) throw new Error("no row");
+      row.focus();
+      const terminal = document.createElement("textarea");
+      document.body.append(terminal);
+      const typed = vi.fn();
+      terminal.addEventListener("keydown", typed);
+      const press = (name: string, init: KeyboardEventInit = {}) => {
+        const event = new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, ...init });
+        (document.activeElement ?? document.body).dispatchEvent(event);
+        return event;
+      };
+      const items = () => [...document.querySelectorAll<HTMLElement>(".ctx-menu .item")];
+      const label = () => document.activeElement?.querySelector(".label")?.textContent;
+      const done = () => {
+        press("Escape");
+        press("Escape");
+        terminal.remove();
+      };
+      return { element, op, row, press, items, label, typed, done };
+    }
+
+    it("shift_f10_opens_the_menu_with_focus_on_the_first_item", () => {
+      const { press, items, label, done } = menuSetup();
+      press("F10", { shiftKey: true });
+      expect(document.querySelector(".ctx-menu")?.getAttribute("role")).toBe("menu");
+      expect(items().map((item) => item.getAttribute("role"))).toEqual(["menuitem", "menuitem", "menuitem", "menuitem"]);
+      expect(label()).toBe("Rename");
+      done();
+    });
+
+    it("arrows_wrap_home_and_end_jump_and_esc_returns_to_the_row", () => {
+      const { row, press, label, typed, done } = menuSetup();
+      press("ContextMenu");
+      expect(label()).toBe("Rename");
+      press("ArrowDown");
+      expect(label()).toBe("Pin");
+      press("ArrowUp");
+      press("ArrowUp");
+      expect(label()).toBe("Move to group");
+      press("ArrowDown");
+      expect(label()).toBe("Rename");
+      press("End");
+      expect(label()).toBe("Move to group");
+      press("Home");
+      expect(label()).toBe("Rename");
+      const esc = press("Escape");
+      expect(esc.defaultPrevented).toBe(true);
+      expect(document.querySelector(".ctx-menu")).toBeNull();
+      expect(document.activeElement).toBe(row);
+      expect(row.classList.contains("menu-open")).toBe(false);
+      expect(typed).not.toHaveBeenCalled();
+      done();
+    });
+
+    it("enter_activates_an_item_and_gives_typing_back", () => {
+      vi.mocked(refocus).mockClear();
+      const { op, press, done } = menuSetup();
+      press("F10", { shiftKey: true });
+      press("ArrowDown");
+      press("Enter");
+      expect(op).toHaveBeenCalledWith({ type: "pin_tab", tab: "a1", pinned: true });
+      expect(document.querySelector(".ctx-menu")).toBeNull();
+      expect(refocus).toHaveBeenCalledTimes(1);
+      done();
+    });
+
+    it("space_or_right_opens_the_submenu_and_left_comes_back", () => {
+      const { op, press, label, done } = menuSetup();
+      press("F10", { shiftKey: true });
+      press("End");
+      press("ArrowRight");
+      expect(document.querySelectorAll(".ctx-menu").length).toBe(2);
+      expect(label()).toBe("No group");
+      press("ArrowLeft");
+      expect(document.querySelectorAll(".ctx-menu").length).toBe(1);
+      expect(label()).toBe("Move to group");
+      press(" ");
+      expect(label()).toBe("No group");
+      // Esc in the submenu closes only the submenu.
+      press("Escape");
+      expect(document.querySelectorAll(".ctx-menu").length).toBe(1);
+      expect(label()).toBe("Move to group");
+      press(" ");
+      press("ArrowDown");
+      expect(label()).toBe("b");
+      press("Enter");
+      expect(op).toHaveBeenCalledWith({ type: "move_tab", tab: "a1", group: "b", index: 1 });
+      expect(document.querySelector(".ctx-menu")).toBeNull();
+      done();
+    });
+
+    it("menu_items_show_focus_with_the_hover_fill", () => {
+      expect(css).toMatch(/\.ctx-menu \.item:not\(\.disabled\):hover,\s*\.ctx-menu \.item:not\(\.disabled\):focus-visible \{/);
+    });
+  });
+
   describe("row drag", () => {
-    function dragSetup() {
+    function dragSetup(listBottom = 200) {
       const op = vi.fn();
       const { element, select } = mount(tree([], [tab("a"), tab("b"), tab("c")]), { op });
+      const list = element.querySelector<HTMLElement>("#list");
+      if (!list) throw new Error("no list");
+      list.getBoundingClientRect = () =>
+        ({ top: 0, bottom: listBottom, left: 0, right: 200, width: 200, height: listBottom, x: 0, y: 0 }) as DOMRect;
+      // How far the list has scrolled, which moves every row up.
+      const scroll = { by: 0 };
       element.querySelectorAll<HTMLElement>(".row").forEach((row, i) => {
-        row.getBoundingClientRect = () =>
-          ({ top: i * 26, bottom: (i + 1) * 26, left: 0, right: 200, width: 200, height: 26, x: 0, y: i * 26 }) as DOMRect;
+        row.getBoundingClientRect = () => {
+          const top = i * 26 - scroll.by;
+          return { top, bottom: top + 26, left: 0, right: 200, width: 200, height: 26, x: 0, y: top } as DOMRect;
+        };
       });
       const rowA = element.querySelector<HTMLElement>('[data-tab="a"]');
       if (!rowA) throw new Error("no row");
@@ -305,7 +502,7 @@ describe("sidebar", () => {
         terminal.dispatchEvent(event);
         return event;
       };
-      return { element, op, select, rowA, pointer, esc, typed, terminal };
+      return { element, list, scroll, op, select, rowA, pointer, esc, typed, terminal };
     }
 
     it("a_drag_drops_on_release", () => {
@@ -313,6 +510,53 @@ describe("sidebar", () => {
       pointer("pointerup", 39);
       expect(op).toHaveBeenCalledWith({ type: "join_tabs", tab: "a", into: "b", dir: "right" });
       terminal.remove();
+    });
+
+    it("a_scroll_during_a_drag_measures_the_rows_again", async () => {
+      const { element, list, scroll, op, pointer, terminal } = dragSetup();
+      expect(element.querySelector('[data-tab="b"]')?.classList.contains("join-target")).toBe(true);
+      // The wheel moves the list a row up: c is now under the pointer.
+      scroll.by = 26;
+      list.dispatchEvent(new Event("scroll"));
+      list.dispatchEvent(new Event("scroll"));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      expect(element.querySelector('[data-tab="c"]')?.classList.contains("join-target")).toBe(true);
+      expect(element.querySelector('[data-tab="b"]')?.classList.contains("join-target")).toBe(false);
+      pointer("pointerup", 39);
+      expect(op).toHaveBeenCalledWith({ type: "join_tabs", tab: "a", into: "c", dir: "right" });
+      terminal.remove();
+    });
+
+    it("the_pointer_past_the_list_hits_the_last_visible_row_not_a_clipped_one", () => {
+      // Two rows show; c is scrolled out below.
+      const { op, pointer, terminal } = dragSetup(52);
+      pointer("pointermove", 65);
+      pointer("pointerup", 65);
+      expect(op).toHaveBeenCalledWith({ type: "move_tab", tab: "a", group: null, index: 1 });
+      terminal.remove();
+    });
+
+    it("the_ghost_is_measured_once_per_drag", () => {
+      let reads = 0;
+      const own = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+      Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+        configurable: true,
+        get(this: HTMLElement) {
+          if (this.classList.contains("ghost")) reads++;
+          return 26;
+        },
+      });
+      try {
+        const { pointer, terminal } = dragSetup();
+        pointer("pointermove", 45);
+        pointer("pointermove", 50);
+        pointer("pointermove", 60);
+        expect(reads).toBe(1);
+        pointer("pointerup", 60);
+        terminal.remove();
+      } finally {
+        if (own) Object.defineProperty(HTMLElement.prototype, "offsetHeight", own);
+      }
     });
 
     it("esc_ends_a_drag_with_no_drop_and_never_reaches_the_terminal", () => {

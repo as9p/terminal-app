@@ -19,6 +19,8 @@ const DRAG_START_PX = 4;
 
 // What the keyboard moves between: tab rows and the folder button of each group header.
 const ITEMS = ".row, .ghead > .slot";
+// What the keyboard moves between in a right-click menu: the items that can run.
+const MENU_ITEMS = ".item:not(.disabled)";
 
 const FOLDER_SVG =
   '<svg class="gfold" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true">' +
@@ -65,10 +67,16 @@ type Drag = {
   // Esc ended it: nothing shows or drops, and the release is still swallowed.
   cancelled?: boolean;
   ghost?: HTMLElement;
-  // Measured once when the drag starts, so moving the pointer reads no layout.
+  ghostHalf: number;
+  // Measured when the drag starts and again after the list scrolls, so moving the pointer reads
+  // no layout. The list's visible top and bottom keep a clipped row from being hit.
   rects: { element: HTMLElement; top: number; bottom: number }[];
+  listTop: number;
+  listBottom: number;
   sidebarTop: number;
   sidebarLeft: number;
+  // The pointer's last height, for hit-testing again after a scroll.
+  lastY: number;
   target?: DropTarget;
 };
 
@@ -93,7 +101,11 @@ export class Sidebar {
   private readonly store: Store;
   private readonly events: SidebarEvents;
   private readonly list: HTMLElement;
-  private shape = "";
+  // Unset until the first render, which an empty tree's empty shape must not skip.
+  private shape: string | undefined;
+  // The current tab and its pane rows as last shown, which a tab switch changes in place.
+  private shownCurrent: string | null = null;
+  private shownPanes = "";
   private flipFrom: Flip | undefined;
   private flipTimer = 0;
   private flipLayer: HTMLElement | undefined;
@@ -105,8 +117,11 @@ export class Sidebar {
   private renderLater = false;
   private menus: HTMLElement[] = [];
   private menuRow: HTMLElement | undefined;
+  // Opened from the keyboard: Esc gives focus back to this row instead of the terminal.
+  private menuReturn: HTMLElement | undefined;
   private drag: Drag | undefined;
   private dragged = false;
+  private dragFrame = 0;
   private hovered: HTMLElement | undefined;
   // Stops the working tick of markers scrolled out of the list (absent in tests).
   private ticks: IntersectionObserver | undefined;
@@ -167,8 +182,14 @@ export class Sidebar {
     }
     const rows = this.store.rows();
     const shape = this.shapeOf(rows);
-    if (shape === this.shape) return;
+    const paneShape = this.panesOf(rows);
+    if (shape === this.shape) {
+      if (this.store.current !== this.shownCurrent || paneShape !== this.shownPanes) this.switchTab(rows, paneShape);
+      return;
+    }
     this.shape = shape;
+    this.shownCurrent = this.store.current;
+    this.shownPanes = paneShape;
     this.endFlip();
     this.closeMenu();
     this.endDrag();
@@ -224,6 +245,54 @@ export class Sidebar {
     }
     this.markFocused();
     if (from) this.playFlip(from);
+  }
+
+  // A tab switch moves the selection between two rows and swaps the pane rows under them, in
+  // place: every other row, and every marker mid-morph, stays the node it was.
+  private switchTab(rows: Row[], panes: string): void {
+    const current = this.store.current;
+    if (current !== this.shownCurrent) {
+      const old = this.rowOf(this.shownCurrent);
+      const now = this.rowOf(current);
+      old?.classList.remove("selected");
+      old?.removeAttribute("aria-current");
+      now?.classList.add("selected");
+      now?.setAttribute("aria-current", "true");
+      // Someone moving through the rows with the keyboard keeps the tab stop where they are.
+      const active = document.activeElement;
+      const moving = active instanceof HTMLElement && active.matches(ITEMS) && this.list.contains(active);
+      const stop = this.list.querySelector<HTMLElement>('[tabindex="0"]');
+      if (!moving && now && stop !== now) {
+        if (stop) stop.tabIndex = -1;
+        now.tabIndex = 0;
+      }
+      this.shownCurrent = current;
+    }
+    if (panes === this.shownPanes) return;
+    this.shownPanes = panes;
+    // The rows below move, so a running collapse, an open menu or a drag would be in the wrong place.
+    this.endFlip();
+    this.closeMenu();
+    this.endDrag();
+    for (const box of this.list.querySelectorAll<HTMLElement>(".panes")) {
+      for (const mk of box.querySelectorAll<HTMLElement>(".mk")) this.ticks?.unobserve(mk);
+      box.remove();
+    }
+    const row = this.rowOf(current);
+    const box = document.createElement("div");
+    box.className = "panes";
+    for (const line of rows) {
+      if (line.kind === "pane") box.append(this.paneRow(line.session, line.tab, box.childElementCount + 1));
+    }
+    if (row && box.firstElementChild) {
+      row.after(box);
+      for (const mk of box.querySelectorAll<HTMLElement>(".mk")) this.ticks?.observe(mk);
+    }
+    this.markFocused();
+  }
+
+  private rowOf(tab: string | null): HTMLElement | undefined {
+    return [...this.list.querySelectorAll<HTMLElement>(".row")].find((row) => row.dataset.tab === tab);
   }
 
   /** Puts new terminal titles on unnamed rows and pane rows, without building the list again. */
@@ -297,7 +366,7 @@ export class Sidebar {
 
   // A blocked or done row gets a dim second line with the title of the session in that state,
   // even when that is also the row's name (an unnamed tab), so every such row reads the same.
-  // A blank title counts as none, and the line shows the row's name.
+  // The title is trimmed as the name is; a blank one counts as none, and the line shows the name.
   private applySub(row: HTMLElement, tab: Tab, state: AgentState | null): void {
     const body = row.querySelector<HTMLElement>(":scope > .body");
     if (!body) return;
@@ -305,7 +374,7 @@ export class Sidebar {
     if (state === "blocked" || state === "done") {
       const session = leaves(tab.split).find((s) => this.store.stateOf(s) === state);
       const title = session !== undefined ? this.events.title(session) : undefined;
-      text = (title?.trim() ? title : body.querySelector(".name")?.textContent) ?? "";
+      text = title?.trim() || (body.querySelector(".name")?.textContent ?? "");
     }
     let sub = body.querySelector<HTMLElement>(":scope > .sub");
     if (text === "") {
@@ -367,21 +436,24 @@ export class Sidebar {
     for (const item of this.items()) item.tabIndex = item === current ? 0 : -1;
   }
 
-  // Everything the list shows, so a pushed tree that only moved `last_used` costs nothing.
+  // Everything the list shows but the current tab and its pane rows, which a tab switch changes in
+  // place, so a pushed tree that only moved `last_used` costs nothing.
   private shapeOf(rows: Row[]): string {
-    const parts = rows.map((row) => {
-      switch (row.kind) {
-        case "group": {
-          const g = row.group;
-          return `g\0${g.key}\0${g.name}\0${g.path}\0${g.branch}\0${g.collapsed}\0${this.count(g)}`;
-        }
-        case "tab":
-          return `t\0${row.tab.id}\0${row.tab.name}\0${leaves(row.tab.split)[0]}`;
-        case "pane":
-          return `p\0${row.session}`;
+    const parts: string[] = [];
+    for (const row of rows) {
+      if (row.kind === "group") {
+        const g = row.group;
+        parts.push(`g\0${g.key}\0${g.name}\0${g.path}\0${g.branch}\0${g.collapsed}\0${this.count(g)}`);
+      } else if (row.kind === "tab") {
+        parts.push(`t\0${row.tab.id}\0${row.tab.name}\0${leaves(row.tab.split)[0]}`);
       }
-    });
-    return `${this.store.current}\n${parts.join("\n")}`;
+    }
+    return parts.join("\n");
+  }
+
+  // The pane rows, which only the current tab shows.
+  private panesOf(rows: Row[]): string {
+    return rows.flatMap((row) => (row.kind === "pane" ? [`${row.tab}\0${row.session}`] : [])).join("\n");
   }
 
   private count(group: Group): number {
@@ -577,11 +649,15 @@ export class Sidebar {
     const tab = row?.dataset.tab ? findTab(this.store.tree, row.dataset.tab) : undefined;
     if (!row || !tab) return;
     event.preventDefault();
+    // The Menu key may send a contextmenu after opening the menu from its keydown.
+    if (this.menuReturn === row) return;
     this.openMenu(row, tab);
   };
 
-  private openMenu(row: HTMLElement, tab: Tab): void {
+  // `byKey`: opened from a focused row with the keyboard, so Esc gives focus back to the row.
+  private openMenu(row: HTMLElement, tab: Tab, byKey = false): void {
     this.closeMenu();
+    this.menuReturn = byKey ? row : undefined;
     const groupOf = this.store.tree.groups.find((g) => g.tabs.some((t) => t.id === tab.id));
     const targets: { label: string; group: string | null; size: number }[] = [];
     if (groupOf) targets.push({ label: "No group", group: null, size: this.store.tree.ungrouped.length });
@@ -621,6 +697,7 @@ export class Sidebar {
     window.addEventListener("pointerdown", this.onMenuOutside, true);
     window.addEventListener("keydown", this.onMenuKey, true);
     window.addEventListener("blur", this.closeMenu);
+    menu.querySelector<HTMLElement>(MENU_ITEMS)?.focus({ preventScroll: true });
   }
 
   /** A menu of `items`, in the page. A submenu opens beside `beside`, its item in the menu above. */
@@ -644,6 +721,9 @@ export class Sidebar {
       const item = document.createElement("div");
       item.className = entry.disabled ? "item disabled" : "item";
       item.setAttribute("role", "menuitem");
+      if (entry.disabled) item.setAttribute("aria-disabled", "true");
+      else item.tabIndex = -1;
+      if (entry.open) item.setAttribute("aria-haspopup", "menu");
       const label = document.createElement("span");
       label.className = "label";
       label.textContent = entry.label;
@@ -652,6 +732,8 @@ export class Sidebar {
       hint.textContent = entry.hint;
       item.append(label, hint);
       if (!entry.disabled) {
+        // The pointer takes the keyboard's place, so only one item ever shows as hot.
+        item.addEventListener("mouseenter", () => item.focus({ preventScroll: true }));
         if (entry.open) {
           const open = entry.open;
           const show = () => {
@@ -688,6 +770,7 @@ export class Sidebar {
     this.menus = [];
     this.menuRow?.classList.remove("menu-open");
     this.menuRow = undefined;
+    this.menuReturn = undefined;
     window.removeEventListener("pointerdown", this.onMenuOutside, true);
     window.removeEventListener("keydown", this.onMenuKey, true);
     window.removeEventListener("blur", this.closeMenu);
@@ -698,13 +781,78 @@ export class Sidebar {
     if (!target?.closest(".ctx-menu")) this.closeMenu();
   };
 
-  // Only while a menu is open: Esc closes it and never reaches the terminal.
+  // Only while a menu is open, before the key reaches anything else, the terminal included. Up
+  // and Down move and wrap, Home and End jump, Enter or Space runs an item or opens the submenu,
+  // Right opens it and Left closes it. Esc closes the submenu, else the menu, giving focus back
+  // to the row that opened it from the keyboard, or to the terminal. Tab closes the menu.
   private readonly onMenuKey = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape") return;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const menu = this.menus.find((m) => active !== null && m.contains(active));
+    const level = menu ? this.menus.indexOf(menu) : 0;
+    const items = [...(menu ?? this.menus[0]).querySelectorAll<HTMLElement>(MENU_ITEMS)];
+    const at = active ? items.indexOf(active) : -1;
+    const item = at < 0 ? undefined : items[at];
+    switch (event.key) {
+      case "Escape":
+        if (level > 0) this.closeSubmenu(level);
+        else this.leaveMenu();
+        break;
+      case "Tab":
+        this.closeMenu();
+        refocus();
+        break;
+      case "ArrowDown":
+        items[(at + 1) % items.length]?.focus();
+        break;
+      case "ArrowUp":
+        items[at <= 0 ? items.length - 1 : at - 1]?.focus();
+        break;
+      case "Home":
+        items[0]?.focus();
+        break;
+      case "End":
+        items[items.length - 1]?.focus();
+        break;
+      case "Enter":
+      case " ":
+      case "ArrowRight":
+        // With no item focused (focus went back to the terminal), Enter and Space are typing.
+        if (!item) {
+          if (event.key !== "ArrowRight") return;
+          break;
+        }
+        if (item.hasAttribute("aria-haspopup")) {
+          item.click();
+          this.menus[level + 1]?.querySelector<HTMLElement>(MENU_ITEMS)?.focus();
+        } else if (event.key !== "ArrowRight") {
+          item.click();
+          refocus();
+        }
+        break;
+      case "ArrowLeft":
+        if (level > 0) this.closeSubmenu(level);
+        break;
+      default:
+        return;
+    }
     event.preventDefault();
     event.stopPropagation();
-    this.closeMenu();
   };
+
+  // Closes the submenu at `level` and puts focus back on the item that opened it.
+  private closeSubmenu(level: number): void {
+    const parent = this.menus[level - 1];
+    const label = this.menus[level]?.dataset.parent;
+    for (const extra of this.menus.splice(level)) extra.remove();
+    [...parent.querySelectorAll<HTMLElement>(MENU_ITEMS)].find((i) => i.querySelector(".label")?.textContent === label)?.focus();
+  }
+
+  private leaveMenu(): void {
+    const back = this.menuReturn;
+    this.closeMenu();
+    if (back?.isConnected) back.focus();
+    else refocus();
+  }
 
   // Dragging rows (docs/ui-review.md "Drag targets"). A tab row moves within its own list or
   // joins another tab as a split (right, or down with Shift); a group header moves between
@@ -722,9 +870,13 @@ export class Sidebar {
       startX: event.clientX,
       startY: event.clientY,
       live: false,
+      ghostHalf: 0,
       rects: [],
+      listTop: 0,
+      listBottom: 0,
       sidebarTop: 0,
       sidebarLeft: 0,
+      lastY: event.clientY,
     };
     window.addEventListener("pointermove", this.onDragMove);
     window.addEventListener("pointerup", this.onDragUp);
@@ -738,8 +890,9 @@ export class Sidebar {
       if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_START_PX) return;
       this.beginDrag(drag);
     }
+    drag.lastY = event.clientY;
     if (drag.ghost) {
-      drag.ghost.style.transform = `translate(${event.clientX - drag.sidebarLeft + 8}px, ${event.clientY - drag.sidebarTop - drag.ghost.offsetHeight / 2}px)`;
+      drag.ghost.style.transform = `translate(${event.clientX - drag.sidebarLeft + 8}px, ${event.clientY - drag.sidebarTop - drag.ghostHalf}px)`;
     }
     this.showTarget(drag, this.targetAt(drag, event.clientY));
   };
@@ -748,13 +901,11 @@ export class Sidebar {
     drag.live = true;
     this.closeMenu();
     window.addEventListener("keydown", this.onDragKey, true);
+    this.list.addEventListener("scroll", this.onDragScroll, { passive: true });
     const side = this.element.getBoundingClientRect();
     drag.sidebarTop = side.top;
     drag.sidebarLeft = side.left;
-    drag.rects = [...this.list.querySelectorAll<HTMLElement>(".row, .ghead")].map((element) => {
-      const rect = element.getBoundingClientRect();
-      return { element, top: rect.top, bottom: rect.bottom };
-    });
+    this.measureRows(drag);
     drag.source.classList.add("drag-src");
     const ghost = document.createElement("div");
     ghost.className = "ghost";
@@ -770,10 +921,36 @@ export class Sidebar {
     ghost.append(slot, name);
     this.element.append(ghost);
     drag.ghost = ghost;
+    drag.ghostHalf = ghost.offsetHeight / 2;
   }
 
-  // What a drop at `y` would do. Rows are measured, so this reads no layout.
-  private targetAt(drag: Drag, y: number): DropTarget | undefined {
+  private measureRows(drag: Drag): void {
+    const list = this.list.getBoundingClientRect();
+    drag.listTop = list.top;
+    drag.listBottom = list.bottom;
+    drag.rects = [...this.list.querySelectorAll<HTMLElement>(".row, .ghead")].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { element, top: rect.top, bottom: rect.bottom };
+    });
+  }
+
+  // Only while a drag is live: the wheel moves the rows under a still pointer, so they are
+  // measured again, at most once a frame, and the target follows them.
+  private readonly onDragScroll = (): void => {
+    if (this.dragFrame) return;
+    this.dragFrame = requestAnimationFrame(() => {
+      this.dragFrame = 0;
+      const drag = this.drag;
+      if (!drag?.live || drag.cancelled) return;
+      this.measureRows(drag);
+      this.showTarget(drag, this.targetAt(drag, drag.lastY));
+    });
+  };
+
+  // What a drop at `pointerY` would do. Rows are measured, so this reads no layout. Above or
+  // below the list the pointer counts as at its edge, so a row scrolled out of view is never hit.
+  private targetAt(drag: Drag, pointerY: number): DropTarget | undefined {
+    const y = Math.min(Math.max(pointerY, drag.listTop), drag.listBottom - 1);
     const hit = drag.rects.find((rect) => y >= rect.top && y < rect.bottom);
     if (!hit || hit.element === drag.source) return undefined;
     const { element } = hit;
@@ -877,6 +1054,9 @@ export class Sidebar {
 
   private clearDrag(drag: Drag): void {
     window.removeEventListener("keydown", this.onDragKey, true);
+    this.list.removeEventListener("scroll", this.onDragScroll);
+    cancelAnimationFrame(this.dragFrame);
+    this.dragFrame = 0;
     drag.source.classList.remove("drag-src");
     drag.ghost?.remove();
     drag.ghost = undefined;
@@ -900,6 +1080,21 @@ export class Sidebar {
       event.preventDefault();
       const items = this.items();
       items[items.indexOf(target) + (event.key === "ArrowDown" ? 1 : -1)]?.focus();
+      return;
+    }
+    // The menu key or Shift+F10 opens a tab row's right-click menu.
+    if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+      const tab = target.dataset.tab ? findTab(this.store.tree, target.dataset.tab) : undefined;
+      if (!tab) return;
+      event.preventDefault();
+      this.openMenu(target, tab, true);
+      return;
+    }
+    // Esc leaves the list for the terminal. A drag, a menu and a rename field take Esc first.
+    if (event.key === "Escape") {
+      if (this.renaming || this.menus.length > 0 || this.drag?.live) return;
+      event.preventDefault();
+      refocus();
       return;
     }
     if (event.key !== "Enter" && event.key !== " ") return;

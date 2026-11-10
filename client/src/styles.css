@@ -531,7 +531,13 @@ button.slot {
   color: var(--text-dim);
 }
 
-.ctx-menu .item:not(.disabled):hover {
+/* Keyboard focus shows as the hover fill, with no ring of its own. */
+.ctx-menu .item:focus {
+  outline: none;
+}
+
+.ctx-menu .item:not(.disabled):hover,
+.ctx-menu .item:not(.disabled):focus-visible {
   background: rgba(205, 214, 244, 0.16);
   color: var(--text-strong);
 }
