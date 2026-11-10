@@ -205,7 +205,7 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 - On Windows a window without a title bar can lose edge resizing and snapping. The PC build must show that both still work, and the title bar is a per-computer setting. **(my call)**
 - No top tab bar, no title strip on panes, no bottom status bar and no right-hand panel. **(Alex)**
 - The sidebar has no search box, no back and forward buttons, no Tasks, Automations, Mobile or Artifacts buttons, no "Projects" title and no button row. Alex: "we use keyboard commands around here". **(Alex)**
-- The sidebar uses the terminal's background with no divider line, as cmux does. **(my call)**
+- The sidebar has a faint edge line between it and the terminal and a faint hairline above each group. The Mac sidebar theme is the default and the Terminal theme is the other. **(Alex)**
 - Every project group and session sits in the always-visible sidebar, with no pop-out workspace panel. **(Alex)**
 
 ### Tabs
@@ -214,21 +214,21 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 - Cmd+T opens a plain shell tab at once. It starts in the folder the current tab is in right now and joins that folder's group. If that folder is no group, it joins the current tab's group. With no group at all it starts in the home folder, ungrouped. **(Alex asked for Cmd+T and no lock-in, the folder rule is my call)**
 - A new tab can open on another paired computer, so Alex can start a PC terminal from the Mac. **(Alex)** Cmd+T follows the tab Alex is on, so inside a PC group it opens on the PC. A second key, Cmd+Shift+N, opens the new tab on the other computer, in the same project's folder there if that computer has it, otherwise the home folder. With more than two computers it asks which one. `ta new --on <computer>` does the same. **(my call)**
 - The sidebar scrolls as one plain list. A group's name scrolls away with its rows and never sticks to the top, which Orca's does. **(Alex)**
-- A row is compact by default: the state marker and the name. A group's header shows its folder and git branch. Longer text, such as what the agent last said, shows only on a session that needs Alex. **(my call, from "far less on screen")** cmux's taller three-line rows are the comparison in the review.
+- A row is compact by default: the state marker and the name. Two-line rows exist behind one setting, `sidebar_rows`. **(Alex)** A group's header shows its folder, git branch, a session count and, when collapsed, a rolled-up blocked marker. **(Alex)** Longer text, such as what the agent last said, shows only on a session that needs Alex. **(my call, from "far less on screen")** cmux's taller three-line rows are the comparison in the review.
 - Rows have no icons unless Alex turns them on, and no `[primary]` or `main` labels. **(Alex)**
 - Rows keep the order Alex drags them into. There are no Recent, Repo, Pinned or Active views. New groups start sorted by folder. **(Alex)**
-- Each group has an arrow that collapses it in place. **(Alex)**
-- With more than one computer paired, a small pill-shaped switch in the sidebar filters by device: all, Mac or PC. **(Alex)** It is hidden with one computer. **(my call)**
+- A group has no arrow. The folder icon in the marker column is the open and closed control. **(Alex)**
+- With more than one computer paired, a borderless picker with a menu in the sidebar filters by device: all, Mac or PC. **(Alex)** It is hidden with one computer. **(my call)**
 - Helper agents and agent team members are child rows under their session, collapsed by default. A filter shows or hides them. **(Alex)**
 - Showing each session's and helper's model in its row is a later add-on, off by default. **(Alex called it an add-on)**
 - Rename is inline: one key or a double click, type, Enter. A name Alex set is never overwritten by the terminal title or anything automatic. **(Alex, the never-overwritten rule is from cmux)**
-- The right-click menu on a row is short: rename, pin, close, move to group. **(Alex)**
+- The right-click menu on a row is short: rename, pin, close, move to group. **(Alex)** Close shows Cmd+Shift+W, matching the keys table. **(my call)**
 
 ### Splits
 
 - A split is made the kitty way, or by dragging one existing tab onto another to join them. A pane can be pulled back out into its own tab. **(Alex asked to combine terminals that already exist)**
 - Focus follows the mouse between panes, as on Linux. It is a setting, on by default. **(Alex)**
-- With no title strip, the pane Alex is typing in stays at full brightness and the others dim slightly. The sidebar row lists its panes beneath it. **(my call)**
+- With no title strip, the pane Alex is typing in stays at full brightness and the others do not dim by default. Dimming is a setting, off by default. **(Alex)** The sidebar row lists its panes beneath it. **(my call)**
 - There is no floating or pop-out terminal. **(Alex)**
 
 ### Focus
@@ -254,7 +254,7 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 
 ### Session states
 
-- Every agent session shows one of four states: working, blocked (waiting on Alex), done (finished its turn, not yet looked at) and idle. **(Alex, from Herdr)** It is one small marker, not text, and it holds still, with no spinner. **(Alex)** The marker stays visible however narrow the sidebar gets. **(Alex)**
+- Every agent session shows one of four built states: working, blocked (waiting on Alex), done (finished its turn, not yet looked at) and idle. **(Alex, from Herdr)** Two further looks, handoff requested and failed, are recorded in `docs/ui-review.md` and built in a later plan. **(Alex for handoff, my call for failed)** It is one small marker, not text. The working marker is a drawn snowflake that ticks, a 15 degree nudge every second. The other markers hold still, and a marker reshapes into the next one when the state changes. **(Alex)** The marker stays visible however narrow the sidebar gets. **(Alex)**
 - Blocked rolls up: a blocked session marks its row, its pane and its group, even when the group is collapsed, and one key jumps to the blocked session. With several blocked, the key goes through them oldest first. **(Alex asked for Herdr's rollup, the order is my call)**
 - Done clears when Alex looks at the session. **(my call)**
 - Blocked and done both mean "your move". They follow the rule in "Alerts", so a helper agent finishing never sets them. **(Alex)**
@@ -431,10 +431,10 @@ The goal, in Alex's words: "optimalness would be i always respond when something
 Alex accepted the reminder times. The three kinds were Claude's guess, and Allow and Deny came from Alex's round 1 answers.
 
 **Look (Alex, 2026-11-09):** simple, and it fits the terminal. Alex finds Orca's notifications annoying, and dropped the kitten buddy and the alert themes: "remove the cats", "make it fit".
-- Inside the app: the marker on the row, the rollup on its group, and one sound. No popup inside the window. **(my call)**
+- Inside the app: the marker on the row, the rollup on its group, and that state's sound. No popup inside the window. **(my call)**
 - When the app isn't in front: one system notification that opens the session when clicked. None for the session Alex is looking at. **(my call, from cmux)**
 - The one-click answers live on the board card and in the system notification. **(my call)**
-- Each kind has its own sound, aimed at satisfying rather than just polite. **(Alex)**
+- Each state can be set to sound, banner, dock badge or nothing, per state. **(Alex)** A sound is aimed at satisfying rather than just polite. **(Alex)**
 
 **Rules:**
 - Quiet during the Monday stream, 4:30 to 6:30 PM ET, because OBS could pick up sounds. **(Alex)** Quiet means no sounds and no notifications, while the sidebar still updates. **(my call)** In the public version this is a general quiet hours setting, empty by default. **(my call)** Quiet hours are set per computer, for the one that runs OBS, and the phone is not affected. **(my call)**
@@ -478,21 +478,29 @@ Alex went through Orca's settings on 2026-11-09 (`orca-settings-notes.md`). What
 
 ## Keys
 
-kitty's keys stay for everything kitty has. **(Alex)** The keys below are new, and where one differs from kitty's, the one below wins. They are first guesses for the UI review. **(my call unless marked)**
+kitty's keys stay for everything kitty has. **(Alex)** The keys below are new, and where one differs from kitty's, the one below wins. The table is final after the UI review, as recorded in `docs/ui-review.md` "Keys". **(Alex)** **(my call unless marked)**
 
 | Action | Key |
 |---|---|
 | New tab | Cmd+T **(Alex)** |
+| Close pane | Cmd+W **(Alex)** |
+| Close tab | Cmd+Shift+W **(Alex)** |
 | New tab on the other computer | Cmd+Shift+N |
 | Reopen closed tab | Cmd+Shift+T **(Alex)** |
+| Next, previous tab | Cmd+Shift+] and [ **(Alex)** |
 | Jump to group 1 to 9 | Cmd+1 to Cmd+9 **(Alex)** |
 | Jump to tab 1 to 9 in the group | Ctrl+1 to Ctrl+9 |
+| Split right, split down | Cmd+D, Cmd+Shift+D **(Alex)** |
+| Move between panes | Cmd+Option+arrows **(Alex)** |
+| Fill the tab with one pane | Cmd+Shift+Enter **(Alex)** |
 | Show or hide the sidebar | Cmd+B |
 | Jump to the oldest blocked session | Cmd+Shift+U |
 | Board | Cmd+Shift+B |
 | Rename | Cmd+Shift+R |
+| Zoom in, out, reset | Cmd+= and Cmd+plus, Cmd+minus, Cmd+0 **(Alex)** |
+| Copy, paste | Cmd+C, Cmd+V **(Alex)** |
 
-- No default uses the Option key, because AeroSpace on Alex's Mac owns Option with letters and numbers. **(my call)**
+- No default uses the Option key with a letter or number, because AeroSpace on Alex's Mac owns those. Cmd+Option+arrows for moving between panes is the one exception. **(my call, the exception is Alex's)**
 - Jumping to a group lands on the tab Alex last used in it. A group's master, if it has one, is tab 1. **(my call)**
 - Reopen closed tab brings back a Claude tab with its chat resumed, and a plain shell as a fresh shell in the same folder. Either way it returns to the same group and the same place, including under its master. **(my call)**
 - A key never puts up a popup (see the anti-goals).
@@ -590,3 +598,16 @@ For Alex's approval. Each line points at the section that holds the detail.
 - The sidebar scrolls as a plain list with no sticky group names ("Tabs").
 - The Claude UI mod (`msg-ui`) is installed by the app once it exists, and the sidebar shares its marks and colors ("Claude UI mod").
 - A setting adds Alex's flags to a typed `claude`, and `claude master` opens the master ("Other agent tools and local models", "Master agent").
+
+## What changed on 2026-11-10
+
+For Alex's approval. The settled values are in `docs/ui-review.md`.
+
+- The sidebar has a faint edge line and a faint hairline above each group; the Mac theme is the default ("What is on screen").
+- No group arrow: the folder icon is the open and closed control ("Tabs").
+- A group header shows folder, branch, session count and a rolled-up blocked marker ("Tabs").
+- Compact rows by default, two-line rows behind `sidebar_rows`; the device filter is a borderless picker ("Tabs").
+- Unfocused panes do not dim by default ("Splits").
+- The working marker is a snowflake that ticks; markers reshape on a state change. Handoff requested and failed are recorded looks ("Session states").
+- Each state can be set to sound, banner, dock badge or nothing ("Alerts").
+- The keys table is final and Cmd+Option+arrows is the one Option exception ("Keys").
