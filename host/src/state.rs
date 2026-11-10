@@ -42,15 +42,16 @@ pub struct SavedSession {
 /// aside so the host still starts and the file is there to look at.
 pub fn load(dir: &Path) -> State {
     let path = dir.join(FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    // Bytes, not a string, so a file that is not UTF-8 is moved aside like any other bad file.
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return State::default(),
         Err(error) => {
             eprintln!("term-host: cannot read {}: {error}", path.display());
             return State::default();
         }
     };
-    match serde_json::from_str(&text) {
+    match serde_json::from_slice(&bytes) {
         Ok(state) => state,
         Err(error) => {
             let millis = SystemTime::now()

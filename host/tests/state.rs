@@ -593,3 +593,30 @@ async fn corrupt_state_moved_aside() {
         "{not json"
     );
 }
+
+#[tokio::test]
+async fn non_utf8_state_moved_aside() {
+    let dirs = Dirs::new();
+    let bytes = [0xff, 0xfe, 0x00, 0x80];
+    std::fs::write(dirs.state_file(), bytes).expect("write a non-UTF-8 state file");
+
+    let host = Host::start(&dirs);
+    let mut ws = signed_in(&host).await;
+    assert!(list(&mut ws).await.is_empty());
+
+    assert_ne!(std::fs::read(dirs.state_file()).ok(), Some(bytes.to_vec()));
+    let moved: Vec<PathBuf> = std::fs::read_dir(dirs.data())
+        .expect("list the data folder")
+        .map(|entry| entry.expect("read an entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("state.json.bad"))
+        })
+        .collect();
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(
+        std::fs::read(&moved[0]).expect("read the moved file"),
+        bytes
+    );
+}
