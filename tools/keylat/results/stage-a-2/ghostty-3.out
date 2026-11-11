@@ -1,0 +1,9 @@
+accessibility=true screen=true
+display max fps=120
+target Ghostty window 1300x817 id=44915
+changes while idle for 1 s=1
+key typed, frame display time: samples=60 min=6.1 median=20.2 p95=32.5 max=44.5 ms
+key typed, frame reached tool: samples=60 min=6.8 median=20.7 p95=33.0 max=45.2 ms
+backspace, frame display time: samples=60 min=6.0 median=19.3 p95=24.7 max=35.6 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished

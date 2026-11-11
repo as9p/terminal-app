@@ -670,3 +670,24 @@ Approved by Alex on 2026-11-11. The full design is in `docs/superpowers/specs/20
 - The Mac and Windows clients stop being Tauri apps with xterm.js once the app runs on the engine ("Architecture").
 - The phone web app, last in the build order, would keep a web terminal of its own, because the engine does not run in a browser ("Phone", "Build order").
 - The host and its protocol do not change.
+
+### Stage A results (the plain terminal, measured 2026-11-11)
+
+Two sittings on Alex's Mac, each measuring every terminal in turn: 60 keys per round in three rounds, then three runs of 30 MB of coloured text. Same window size (about 1280 by 800 points), font size 14 and 20,000 lines of scrollback for all. The folders are `tools/keylat/results/stage-a-1` and `tools/keylat/results/stage-a-2`. Numbers compare only within one sitting.
+
+Second sitting (`stage-a-2`):
+
+| Terminal | Typing median | Typing p95 | Backspace median | Output median | Peak memory |
+|---|---|---|---|---|---|
+| Plain terminal (default, `fifo`) | 14.1 ms | 27.5 ms | 13.1 ms | 107.5 MB/s | 200.9 MB |
+| Plain terminal (`immediate`) | 13.5 ms | 25.5 ms | 14.0 ms | 75.3 MB/s | 201.4 MB |
+| kitty | 15.4 ms | 29.6 ms | 15.5 ms | 75.9 MB/s | 230.4 MB |
+| Alacritty 0.17.0 | 14.7 ms | 28.7 ms | 14.6 ms | 78.4 MB/s | 183.9 MB |
+| Ghostty 1.4.0 | 19.3 ms | 32.5 ms | 19.3 ms | 129.8 MB/s | 156.2 MB |
+
+First sitting (`stage-a-1`), plain terminal default against the same three: typing median 14.9 ms (kitty 15.9, Alacritty 15.4, Ghostty 19.2), typing p95 26.8 ms (29.2, 30.2, 35.5), output median 125.0 MB/s (95.1, 87.5, 100.7).
+
+- All six stage rules pass in both sittings (`tools/speed/plain-targets.sh`). The plain terminal draws 0 frames in 5 idle seconds and holds 115 MB when idle.
+- `ratio to kitty: typing 0.94 output 1.31` (first sitting) and `ratio to kitty: typing 0.92 output 1.42` (second). Later stages must not fall behind this: typing at or below kitty's median, output at or above it, in the same sitting.
+- Ghostty prints faster than the plain terminal in the second sitting (129.8 against 107.5 MB/s) and uses less memory. Output speed and memory are the two places the plain terminal is not first.
+- Limits of these runs: four typing rounds out of thirty were cut short when another app took the front (CotEditor twice in the first sitting, Roblox Studio twice in the second); the keys measured before each cut are kept. Output runs are a quarter of a second long, so single runs swing widely; the rule uses the median of three. Warp was not measured, because nothing lets a script start a program inside it.

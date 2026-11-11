@@ -1,0 +1,65 @@
+plain build modified Nov 11 09:51:56 2026
+targets: plain-fifo plain-immediate kitty ghostty alacritty
+warp: skipped (cannot start a program in it)
+plain-fifo typing: samples=158 median=14.1 p95=27.5 over_30ms=6 (4%)
+plain-fifo backspace: samples=158 median=13.1 p95=22.9 over_30ms=1 (1%)
+  run 1 typing: samples=38 median=13.7 p95=20.3 over_30ms=0 (0%)
+  run 2 typing: samples=60 median=14.9 p95=32.0 over_30ms=4 (7%)
+  run 3 typing: samples=60 median=13.6 p95=19.7 over_30ms=2 (3%)
+missed=0 frames shown before the key=0 stopped early=true stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+plain-immediate typing: samples=180 median=13.5 p95=25.5 over_30ms=5 (3%)
+plain-immediate backspace: samples=180 median=14.0 p95=26.8 over_30ms=5 (3%)
+  run 1 typing: samples=60 median=13.4 p95=21.6 over_30ms=1 (2%)
+  run 2 typing: samples=60 median=13.5 p95=25.5 over_30ms=2 (3%)
+  run 3 typing: samples=60 median=13.4 p95=27.3 over_30ms=2 (3%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+kitty typing: samples=180 median=15.4 p95=29.6 over_30ms=9 (5%)
+kitty backspace: samples=180 median=15.5 p95=32.1 over_30ms=13 (7%)
+  run 1 typing: samples=60 median=15.5 p95=25.6 over_30ms=1 (2%)
+  run 2 typing: samples=60 median=15.5 p95=30.9 over_30ms=4 (7%)
+  run 3 typing: samples=60 median=15.0 p95=32.4 over_30ms=4 (7%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+ghostty typing: samples=180 median=19.3 p95=32.5 over_30ms=14 (8%)
+ghostty backspace: samples=180 median=19.3 p95=30.2 over_30ms=10 (6%)
+  run 1 typing: samples=60 median=17.5 p95=29.2 over_30ms=3 (5%)
+  run 2 typing: samples=60 median=19.7 p95=36.2 over_30ms=6 (10%)
+  run 3 typing: samples=60 median=20.0 p95=31.2 over_30ms=5 (8%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+alacritty typing: samples=153 median=14.7 p95=28.7 over_30ms=8 (5%)
+alacritty backspace: samples=153 median=14.6 p95=27.0 over_30ms=6 (4%)
+  run 1 typing: samples=60 median=15.3 p95=27.5 over_30ms=3 (5%)
+  run 2 typing: samples=33 median=14.6 p95=30.6 over_30ms=3 (9%)
+  run 3 typing: samples=60 median=13.8 p95=27.3 over_30ms=2 (3%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=true stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+plain-fifo 30 0.268 111.9 (focused: start=yes end=yes)
+plain-fifo 30 0.279 107.5 (focused: start=yes end=yes)
+plain-fifo 30 0.359 83.6 (focused: start=yes end=yes)
+plain-fifo peak memory: 200.9 MB
+plain-immediate 30 0.299 100.5 (focused: start=yes end=yes)
+plain-immediate 30 0.398 75.3 (focused: start=yes end=yes)
+plain-immediate 30 0.445 67.4 (focused: start=yes end=yes)
+plain-immediate peak memory: 201.4 MB
+kitty 30 0.422 71.1 (focused: start=yes end=yes)
+kitty 30 0.260 115.3 (focused: start=yes end=yes)
+kitty 30 0.395 75.9 (focused: start=yes end=yes)
+kitty peak memory: 230.4 MB
+ghostty 30 0.231 129.8 (focused: start=yes end=yes)
+ghostty 30 0.178 168.4 (focused: start=yes end=yes)
+ghostty 30 0.290 103.4 (focused: start=yes end=yes)
+ghostty peak memory: 156.2 MB
+alacritty 30 0.369 81.4 (focused: start=yes end=yes)
+alacritty 30 0.399 75.2 (focused: start=yes end=yes)
+alacritty 30 0.383 78.4 (focused: start=yes end=yes)
+alacritty peak memory: 183.9 MB
+idle frames in 5 s: 0
+plain memory idle: 115.4 MB

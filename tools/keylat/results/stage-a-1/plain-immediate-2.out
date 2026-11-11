@@ -1,0 +1,9 @@
+accessibility=true screen=true
+display max fps=120
+target snowflake window 1280x832 id=43514
+changes while idle for 1 s=1
+key typed, frame display time: samples=60 min=5.8 median=13.9 p95=30.8 max=42.8 ms
+key typed, frame reached tool: samples=60 min=6.3 median=14.5 p95=31.2 max=43.4 ms
+backspace, frame display time: samples=60 min=5.0 median=15.1 p95=27.1 max=39.4 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished

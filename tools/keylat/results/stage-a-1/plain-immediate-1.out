@@ -1,0 +1,10 @@
+accessibility=true screen=true
+display max fps=120
+target snowflake window 1280x832 id=43357
+changes while idle for 1 s=1
+stopped at round 0: on top is CotEditor id=42874, wanted id=43357
+key typed, frame display time: no samples
+key typed, frame reached tool: no samples
+backspace, frame display time: no samples
+missed=0 frames shown before the key=0 stopped early=true stream error=none
+finished
