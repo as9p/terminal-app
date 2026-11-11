@@ -1,0 +1,9 @@
+accessibility=true screen=true
+display max fps=120
+target alacritty window 1216x808 id=44569
+changes while idle for 1 s=1
+key typed, frame display time: samples=60 min=6.2 median=15.5 p95=37.1 max=52.4 ms
+key typed, frame reached tool: samples=60 min=6.5 median=16.0 p95=37.5 max=53.1 ms
+backspace, frame display time: samples=60 min=5.1 median=14.6 p95=25.6 max=32.4 ms
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+finished

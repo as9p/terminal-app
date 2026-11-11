@@ -1,0 +1,10 @@
+accessibility=true screen=true
+display max fps=120
+target alacritty window 1216x808 id=44739
+changes while idle for 1 s=1
+stopped at round 33: on top is Roblox Studio id=36858, wanted id=44739
+key typed, frame display time: samples=33 min=7.2 median=14.6 p95=36.0 max=39.1 ms
+key typed, frame reached tool: samples=33 min=7.7 median=15.0 p95=36.3 max=39.6 ms
+backspace, frame display time: samples=33 min=8.4 median=15.7 p95=34.7 max=51.7 ms
+missed=0 frames shown before the key=0 stopped early=true stream error=none
+finished

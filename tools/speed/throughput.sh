@@ -41,26 +41,43 @@ on_focused_workspace() {
   aerospace list-windows --workspace focused --format '%{window-id}' | grep -qx "$1"
 }
 
+# WebKit also slows a window that is covered or not in front, so the app's runs say whether it
+# was the focused window.
+focused_window() {
+  [ "$(aerospace list-windows --focused --format '%{window-id}')" = "$1" ] && echo yes || echo no
+}
+
+# Another copy of the app, such as Alex's own, shares the GPU and WebKit with the test one.
+other_apps() {
+  local others=$(pgrep -x terminal-app | grep -vx "$APP_PID" | tr '\n' ' ')
+  echo ${others:-none}
+}
+
 one_run() {
   rm -f $go $result
-  local window workspace note=""
+  local window workspace note="" seen=""
   workspace=$(aerospace list-workspaces --focused)
   if [ "$1" = app ]; then
     open_app $PORT $here/throughput-shell.sh || return 1
     window=$APP_WINDOW
+    aerospace focus --window-id $window
   else
     open_kitty || return 1
     window=$KITTY_WINDOW
   fi
   /bin/sleep 1
   on_focused_workspace $window || note=" (window was not showing, ignore this run)"
+  [ "$1" = app ] && seen=" (other terminal-app: $(other_apps); focused: start=$(focused_window $window)"
   touch $go
   for i in {1..3000}; do
     [ -f $result ] && break
     /bin/sleep 0.1
   done
+  [ "$1" = app ] && seen="$seen end=$(focused_window $window))"
+  # Lets the program in the terminal end, which it holds off so the check above sees the window.
+  rm -f $go
   [ "$(aerospace list-workspaces --focused)" = "$workspace" ] || note=" (workspace changed, ignore this run)"
-  echo "$1 $(cat $result 2> /dev/null || echo 'no result')$note"
+  echo "$1 $(cat $result 2> /dev/null || echo 'no result')$seen$note"
   # A clean exit already closed the window. This covers a run that failed.
   /bin/sleep 0.5
   if [ "$1" = app ]; then

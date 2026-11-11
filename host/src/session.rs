@@ -16,7 +16,18 @@ use crate::osc::{self, OscEvent, Scanner};
 use crate::pty::{self, Exit, SharedWriter, Size};
 use crate::screen::Screen;
 
-const READ_BUFFER: usize = 64 * 1024;
+// Each chunk read becomes one message to the client, which pays per message, so the reads
+// of a flood are gathered into one chunk up to this size. Also the read buffer's size.
+const GATHER_LIMIT: usize = 64 * 1024;
+// A read this large means the terminal's buffer was full, so more is almost certainly
+// coming. macOS hands back at most 1024 bytes a read (20,233 of 20,544 reads of a 20 MB
+// `cat` were exactly that), Linux more. Anything shorter, such as a key's echo or a
+// prompt, goes out at once. A large prompt taken for a flood waits once, for `GATHER_WAIT`.
+const FULL_READ: usize = 1000;
+// How long to wait for more after a full read. Long enough for the writing program to be
+// woken and fill the buffer again, short enough that holding back the last chunk of a
+// flood this long is not noticed.
+const GATHER_WAIT: Duration = Duration::from_micros(100);
 // Small so a slow actor soon stops the reader, and the terminal then throttles the
 // program.
 const OUTPUT_CHANNEL_CHUNKS: usize = 16;
@@ -126,9 +137,10 @@ impl Session {
         }));
 
         let filter = pty::output_filter(&writer);
+        let wait_readable = pty::readable_waiter(&*master);
         thread::Builder::new()
             .name("session-reader".to_string())
-            .spawn(move || read_output(reader, output_tx, filter))?;
+            .spawn(move || read_output(reader, wait_readable, output_tx, filter))?;
         // Separate from the reader because ConPTY's output only ends once the actor
         // closes it, which it does on hearing the program has exited.
         thread::Builder::new()
@@ -296,30 +308,64 @@ impl Client {
         }
     }
 
+    /// Takes the client's running total of bytes handled. A total that goes back, or past
+    /// what was sent, is held within those, so a bad ack cannot undo an earlier one or lift
+    /// the limit and the stale clock.
     fn count_acked(&mut self, bytes: u64) {
-        self.acked = bytes;
+        self.acked = bytes.clamp(self.acked, self.sent);
         self.over_since = self.over_limit().then(Instant::now);
     }
 }
 
 fn read_output(
     mut reader: Box<dyn Read + Send>,
+    mut wait_readable: impl FnMut(Duration) -> bool,
     output: Sender<Bytes>,
     mut filter: impl FnMut(Bytes) -> Bytes,
 ) {
-    let mut buffer = vec![0; READ_BUFFER];
+    let mut buffer = vec![0; GATHER_LIMIT];
     loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(count) => {
-                let chunk = filter(Bytes::copy_from_slice(&buffer[..count]));
-                if !chunk.is_empty() && output.send(chunk).is_err() {
-                    return;
-                }
+        let Gathered { len, ended } = gather(&mut reader, &mut wait_readable, &mut buffer);
+        if len > 0 {
+            let chunk = filter(Bytes::copy_from_slice(&buffer[..len]));
+            if !chunk.is_empty() && output.send(chunk).is_err() {
+                return;
             }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+        }
+        if ended {
+            return;
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Gathered {
+    /// How many bytes at the start of the buffer make the chunk.
+    len: usize,
+    /// The reader hit end of file or an error after those bytes.
+    ended: bool,
+}
+
+/// Reads once, and while each read comes back full, waits up to `GATHER_WAIT` for more
+/// and reads it into the same buffer. Stops at a short read, a wait that runs out, or a
+/// full buffer, so a short read leaves at once and the end of a flood waits once.
+fn gather(
+    reader: &mut impl Read,
+    wait_readable: &mut impl FnMut(Duration) -> bool,
+    buffer: &mut [u8],
+) -> Gathered {
+    let mut len = 0;
+    loop {
+        let count = match reader.read(&mut buffer[len..]) {
+            Ok(0) => return Gathered { len, ended: true },
+            Ok(count) => count,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             // Linux reports EIO, not end of file, once the program side has closed.
-            Err(_) => return,
+            Err(_) => return Gathered { len, ended: true },
+        };
+        len += count;
+        if count < FULL_READ || len == buffer.len() || !wait_readable(GATHER_WAIT) {
+            return Gathered { len, ended: false };
         }
     }
 }
@@ -694,5 +740,242 @@ fn without_verbatim(path: PathBuf) -> PathBuf {
     match text.strip_prefix(r"\\?\") {
         Some(rest) => PathBuf::from(rest),
         None => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn ack_stays_between_the_last_ack_and_what_was_sent() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut client = Client::new(ClientId(1), tx);
+        client.count_sent(FLOOD_LIMIT as usize + 10);
+        client.count_acked(u64::MAX);
+        assert_eq!(client.acked, client.sent, "an ack went past what was sent");
+        // An ack past what was sent must not lift the limit for what comes after it.
+        client.count_sent(FLOOD_LIMIT as usize + 1);
+        assert!(client.over_limit(), "the limit was lifted");
+        assert!(client.over_since.is_some(), "the stale clock did not start");
+        client.count_acked(5);
+        assert_eq!(client.acked, FLOOD_LIMIT + 10, "an ack went back");
+    }
+
+    /// What the fake terminal does on each read, in order. It reports end of file once
+    /// they run out.
+    enum Step {
+        Bytes(Vec<u8>),
+        Interrupt,
+        Fail,
+    }
+
+    /// Hands back each step's bytes, as much as fits, keeping the rest for the next read
+    /// as a terminal does.
+    struct FakeReader(VecDeque<Step>);
+
+    impl FakeReader {
+        fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+            Self(steps.into_iter().collect())
+        }
+    }
+
+    impl Read for FakeReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(Step::Bytes(mut bytes)) => {
+                    let count = bytes.len().min(buf.len());
+                    buf[..count].copy_from_slice(&bytes[..count]);
+                    if count < bytes.len() {
+                        self.0.push_front(Step::Bytes(bytes.split_off(count)));
+                    }
+                    Ok(count)
+                }
+                Some(Step::Interrupt) => Err(io::ErrorKind::Interrupted.into()),
+                Some(Step::Fail) => Err(io::Error::other("the terminal went away")),
+            }
+        }
+    }
+
+    /// A read as large as macOS hands back while a flood fills the terminal.
+    fn full(byte: u8) -> Step {
+        Step::Bytes(vec![byte; 1024])
+    }
+
+    /// Answers each wait from `answers`, then says readable, and counts the waits.
+    struct FakeWait {
+        answers: VecDeque<bool>,
+        waits: usize,
+    }
+
+    impl FakeWait {
+        fn new(answers: impl IntoIterator<Item = bool>) -> Self {
+            Self {
+                answers: answers.into_iter().collect(),
+                waits: 0,
+            }
+        }
+
+        fn wait(&mut self) -> impl FnMut(Duration) -> bool + '_ {
+            |timeout| {
+                assert_eq!(timeout, GATHER_WAIT);
+                self.waits += 1;
+                self.answers.pop_front().unwrap_or(true)
+            }
+        }
+    }
+
+    /// Gathers once, returning the chunk and whether the reader ended after it.
+    fn gather_once(reader: &mut FakeReader, wait: &mut FakeWait) -> (Vec<u8>, bool) {
+        let mut buffer = vec![0; GATHER_LIMIT];
+        let got = gather(reader, &mut wait.wait(), &mut buffer);
+        (buffer[..got.len].to_vec(), got.ended)
+    }
+
+    #[test]
+    fn short_read_leaves_at_once_without_waiting() {
+        let mut reader = FakeReader::new([Step::Bytes(b"x".to_vec()), full(b'a')]);
+        let mut wait = FakeWait::new([]);
+        assert_eq!(gather_once(&mut reader, &mut wait), (b"x".to_vec(), false));
+        assert_eq!(wait.waits, 0);
+        // The flood after it was left for the next chunk.
+        assert_eq!(gather_once(&mut reader, &mut wait).0, vec![b'a'; 1024]);
+    }
+
+    #[test]
+    fn full_reads_gather_until_a_short_read() {
+        let mut reader = FakeReader::new([
+            full(b'a'),
+            full(b'b'),
+            Step::Bytes(vec![b'c'; 10]),
+            full(b'd'),
+        ]);
+        let mut wait = FakeWait::new([]);
+        let mut expected = vec![b'a'; 1024];
+        expected.extend([b'b'; 1024]);
+        expected.extend([b'c'; 10]);
+        assert_eq!(gather_once(&mut reader, &mut wait), (expected, false));
+        assert_eq!(wait.waits, 2);
+        assert_eq!(gather_once(&mut reader, &mut wait).0[0], b'd');
+    }
+
+    #[test]
+    fn gathering_stops_when_the_wait_times_out() {
+        let mut reader = FakeReader::new([full(b'a'), full(b'b'), full(b'c')]);
+        let mut wait = FakeWait::new([true, false]);
+        let mut expected = vec![b'a'; 1024];
+        expected.extend([b'b'; 1024]);
+        assert_eq!(gather_once(&mut reader, &mut wait), (expected, false));
+        assert_eq!(wait.waits, 2);
+        assert_eq!(gather_once(&mut reader, &mut wait).0, vec![b'c'; 1024]);
+    }
+
+    #[test]
+    fn gathering_stops_at_the_cap_and_the_rest_comes_next_in_order() {
+        // Reads of 1000 bytes, so one straddles the cap and is split by it.
+        let sent: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        let mut reader = FakeReader::new(sent.chunks(1000).map(|c| Step::Bytes(c.to_vec())));
+        let mut wait = FakeWait::new([]);
+        let (first, ended) = gather_once(&mut reader, &mut wait);
+        assert_eq!(first.len(), GATHER_LIMIT);
+        assert!(!ended);
+        let mut received = first;
+        loop {
+            let (chunk, ended) = gather_once(&mut reader, &mut wait);
+            assert!(chunk.len() <= GATHER_LIMIT);
+            received.extend(chunk);
+            if ended {
+                break;
+            }
+        }
+        assert!(received == sent, "bytes lost or out of order");
+    }
+
+    #[test]
+    fn end_of_file_mid_gather_delivers_the_gathered_bytes() {
+        let mut reader = FakeReader::new([full(b'a'), full(b'b')]);
+        let mut wait = FakeWait::new([]);
+        let mut expected = vec![b'a'; 1024];
+        expected.extend([b'b'; 1024]);
+        assert_eq!(gather_once(&mut reader, &mut wait), (expected, true));
+    }
+
+    #[test]
+    fn error_mid_gather_delivers_the_gathered_bytes() {
+        let mut reader = FakeReader::new([full(b'a'), Step::Fail, full(b'b')]);
+        let mut wait = FakeWait::new([]);
+        assert_eq!(
+            gather_once(&mut reader, &mut wait),
+            (vec![b'a'; 1024], true)
+        );
+    }
+
+    #[test]
+    fn interrupted_read_is_tried_again() {
+        let mut reader = FakeReader::new([
+            Step::Interrupt,
+            full(b'a'),
+            Step::Interrupt,
+            Step::Bytes(b"bc".to_vec()),
+        ]);
+        let mut wait = FakeWait::new([]);
+        let mut expected = vec![b'a'; 1024];
+        expected.extend(b"bc");
+        assert_eq!(gather_once(&mut reader, &mut wait), (expected, false));
+    }
+
+    #[test]
+    fn end_of_file_alone_gathers_nothing() {
+        let mut reader = FakeReader::new([]);
+        let mut wait = FakeWait::new([]);
+        assert_eq!(gather_once(&mut reader, &mut wait), (Vec::new(), true));
+        assert_eq!(wait.waits, 0);
+    }
+
+    #[test]
+    fn reader_sends_the_gathered_bytes_before_it_stops() {
+        let reader = FakeReader::new([full(b'a'), full(b'b'), Step::Fail]);
+        let (tx, rx) = unbounded();
+        read_output(Box::new(reader), |_| true, tx, |chunk| chunk);
+        let chunks: Vec<Bytes> = rx.iter().collect();
+        let mut expected = vec![b'a'; 1024];
+        expected.extend([b'b'; 1024]);
+        assert_eq!(chunks, [Bytes::from(expected)]);
+    }
+
+    /// A real terminal running `cat`, whose line discipline echoes each byte typed.
+    #[cfg(unix)]
+    #[test]
+    fn echo_from_a_real_terminal_leaves_without_waiting() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("open a terminal");
+        let mut child = pair
+            .slave
+            .spawn_command(CommandBuilder::new("cat"))
+            .expect("start cat");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("a reader");
+        let mut writer = pair.master.take_writer().expect("a writer");
+        let mut readable = pty::readable_waiter(&*pair.master);
+        let mut waits = 0;
+        let mut wait = |timeout| {
+            waits += 1;
+            readable(timeout)
+        };
+        let mut buffer = vec![0; GATHER_LIMIT];
+        for &byte in b"hello" {
+            writer.write_all(&[byte]).expect("type a byte");
+            let got = gather(&mut reader, &mut wait, &mut buffer);
+            assert_eq!(&buffer[..got.len], &[byte]);
+            assert!(!got.ended);
+        }
+        assert_eq!(waits, 0, "an echo waited to be gathered");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

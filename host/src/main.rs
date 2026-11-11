@@ -1,21 +1,48 @@
+use std::ffi::OsString;
 use std::future::Future;
 use std::process::ExitCode;
 
 use term_host::{auth, hookcmd, paths, server, service};
 
-fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
+const USAGE: &str = "usage: term-host [hook <event> | service install|uninstall|status]";
+
+/// What the arguments after the program's name ask for.
+#[derive(Debug, PartialEq)]
+enum Command {
+    /// No arguments: run the host.
+    Host,
+    /// `term-host hook <event>`.
+    Hook(OsString),
+    /// `term-host service ...`, with the arguments after `service`.
+    Service(Vec<OsString>),
+    /// Anything else, `--help` included. Starts nothing and touches no file.
+    Usage,
+}
+
+fn command(mut args: impl Iterator<Item = OsString>) -> Command {
     match args.next() {
+        None => Command::Host,
+        Some(arg) if arg == "hook" => Command::Hook(args.next().unwrap_or_default()),
+        Some(arg) if arg == "service" => Command::Service(args.collect()),
+        Some(_) => Command::Usage,
+    }
+}
+
+fn main() -> ExitCode {
+    match command(std::env::args_os().skip(1)) {
+        Command::Host => host_main(),
         // Claude runs `term-host hook <event>` for each hook. Checked before the runtime
         // starts, so the call stays quick, and it always exits 0 so Claude never shows an error.
-        Some(arg) if arg == "hook" => {
-            let event = args.next().unwrap_or_default();
+        Command::Hook(event) => {
             hookcmd::run(&event.to_string_lossy());
             std::process::exit(0);
         }
         // `term-host service install|uninstall|status`, which needs no runtime either.
-        Some(arg) if arg == "service" => service::main(args.next()),
-        _ => host_main(),
+        Command::Service(args) => service::main(&args),
+        Command::Usage => {
+            eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -67,4 +94,38 @@ fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
             std::future::pending::<()>().await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        command(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn only_no_arguments_runs_the_host() {
+        assert_eq!(parse(&[]), Command::Host);
+        for wrong in [
+            &["--help"][..],
+            &["-h"],
+            &["help"],
+            &["--version"],
+            &[""],
+            &["Hook"],
+        ] {
+            assert_eq!(parse(wrong), Command::Usage, "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn hook_and_service_keep_their_arguments() {
+        assert_eq!(parse(&["hook", "Stop"]), Command::Hook("Stop".into()));
+        assert_eq!(parse(&["hook"]), Command::Hook(OsString::new()));
+        assert_eq!(
+            parse(&["service", "install", "extra"]),
+            Command::Service(vec!["install".into(), "extra".into()])
+        );
+    }
 }

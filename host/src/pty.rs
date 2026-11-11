@@ -267,6 +267,66 @@ pub(crate) fn output_filter(writer: &SharedWriter) -> impl FnMut(Bytes) -> Bytes
     }
 }
 
+/// Waits up to the given time for the terminal to have output to read, and says whether it
+/// has. Lets the reader gather a flood into large chunks.
+#[cfg(unix)]
+pub(crate) fn readable_waiter(
+    master: &dyn MasterPty,
+) -> impl FnMut(Duration) -> bool + Send + use<> {
+    use std::os::fd::{AsRawFd, BorrowedFd};
+
+    // A copy of its own, since the actor closes the master once the program has exited,
+    // while the reader may still be draining. Without one, nothing is gathered.
+    let fd = master.as_raw_fd().and_then(|fd| {
+        unsafe { BorrowedFd::borrow_raw(fd) }
+            .try_clone_to_owned()
+            .ok()
+    });
+    move |timeout| {
+        fd.as_ref()
+            .is_some_and(|fd| wait_readable(fd.as_raw_fd(), timeout))
+    }
+}
+
+/// ConPTY output comes through a pipe with no wait that can time out, so each read is
+/// forwarded as it is.
+#[cfg(not(unix))]
+pub(crate) fn readable_waiter(
+    _master: &dyn MasterPty,
+) -> impl FnMut(Duration) -> bool + Send + use<> {
+    |_| false
+}
+
+/// select, not poll, since poll counts in whole milliseconds. select cannot take a
+/// descriptor past FD_SETSIZE, so such a terminal only takes what is already there.
+#[cfg(unix)]
+fn wait_readable(fd: std::os::fd::RawFd, timeout: Duration) -> bool {
+    if fd < 0 || fd as usize >= libc::FD_SETSIZE {
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        return unsafe { libc::poll(&mut poll, 1, 0) } > 0;
+    }
+    let mut time = libc::timeval {
+        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+    };
+    unsafe {
+        let mut set: libc::fd_set = std::mem::zeroed();
+        libc::FD_ZERO(&mut set);
+        libc::FD_SET(fd, &mut set);
+        libc::select(
+            fd + 1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut time,
+        ) > 0
+    }
+}
+
 #[cfg(any(windows, test))]
 fn strip_cursor_query(chunk: &[u8]) -> Option<Bytes> {
     const CURSOR_QUERY: &[u8] = b"\x1b[6n";

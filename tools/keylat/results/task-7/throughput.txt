@@ -1,0 +1,9 @@
+app 30 1.070 28.0
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.byipp028GV: Directory not empty
+app 30 0.839 35.8
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.2I9pfuZwtW: Directory not empty
+app 30 0.814 36.8
+rm: /var/folders/xc/ftrg4m_x6n90tgfmzqbghn700000gn/T/term-speed.OjmmeJNX4D: Directory not empty
+kitty 30 0.395 75.9
+kitty 30 0.384 78.1
+kitty 30 0.368 81.6

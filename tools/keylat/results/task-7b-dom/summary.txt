@@ -1,0 +1,23 @@
+release build modified Nov 10 11:02:56 2026
+app typing: samples=180 median=25.4 p95=33.9 over_30ms=46 (26%)
+app backspace: samples=180 median=25.6 p95=34.1 over_30ms=45 (25%)
+  run 1 typing: samples=60 median=25.4 p95=34.0 over_30ms=20 (33%)
+  run 2 typing: samples=60 median=25.5 p95=32.5 over_30ms=14 (23%)
+  run 3 typing: samples=60 median=25.1 p95=34.4 over_30ms=12 (20%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+kitty typing: samples=180 median=14.2 p95=22.3 over_30ms=3 (2%)
+kitty backspace: samples=180 median=14.1 p95=23.0 over_30ms=0 (0%)
+  run 1 typing: samples=60 median=14.0 p95=21.7 over_30ms=1 (2%)
+  run 2 typing: samples=60 median=13.3 p95=22.3 over_30ms=1 (2%)
+  run 3 typing: samples=60 median=14.5 p95=22.9 over_30ms=1 (2%)
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+missed=0 frames shown before the key=0 stopped early=false stream error=none
+app 30 0.330 91.0
+app 30 0.335 89.5
+app 30 0.338 88.8
+kitty 30 0.366 81.9
+kitty 30 0.379 79.2
+kitty 30 0.409 73.3

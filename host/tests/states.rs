@@ -26,7 +26,7 @@ fn tool() -> HookEvent {
     HookEvent::Tool {
         edited: None,
         helper_started: false,
-        from_helper: false,
+        helper: None,
     }
 }
 
@@ -35,7 +35,7 @@ fn edit(file: &str) -> HookEvent {
     HookEvent::Tool {
         edited: Some(PathBuf::from(file)),
         helper_started: false,
-        from_helper: false,
+        helper: None,
     }
 }
 
@@ -44,7 +44,7 @@ fn helper_tool() -> HookEvent {
     HookEvent::Tool {
         edited: None,
         helper_started: false,
-        from_helper: true,
+        helper: Some("h1".to_string()),
     }
 }
 
@@ -98,7 +98,7 @@ fn stop_with_helper_running_stays_working() {
         HookEvent::Tool {
             edited: None,
             helper_started: true,
-            from_helper: false,
+            helper: None,
         },
         t0,
     );
@@ -127,7 +127,13 @@ fn stop_after_last_helper_is_done() {
         t0 + secs(1),
     );
     tracker.on_event("a", helper_tool(), t0 + secs(2));
-    let change = tracker.on_event("a", HookEvent::HelperStop, t0 + secs(3));
+    let change = tracker.on_event(
+        "a",
+        HookEvent::HelperStop {
+            helper: Some("h1".to_string()),
+        },
+        t0 + secs(3),
+    );
     assert_eq!(change.state, Some(AgentState::Working));
     assert!(!change.changed);
 
@@ -163,7 +169,13 @@ fn helper_stop_never_alerts() {
     let t0 = Instant::now();
     let mut tracker = Tracker::default();
     tracker.on_event("a", HookEvent::Prompt, t0);
-    let change = tracker.on_event("a", HookEvent::HelperStop, t0 + secs(1));
+    let change = tracker.on_event(
+        "a",
+        HookEvent::HelperStop {
+            helper: Some("h1".to_string()),
+        },
+        t0 + secs(1),
+    );
     assert_eq!(change.state, Some(AgentState::Working));
     assert!(!change.changed);
     assert!(tracker.tick(t0 + secs(60)).is_empty());
@@ -174,7 +186,12 @@ fn helper_stop_never_alerts() {
         Some(AgentState::Done)
     );
     tracker.seen("a");
-    for ev in [HookEvent::HelperStop, helper_tool()] {
+    for ev in [
+        HookEvent::HelperStop {
+            helper: Some("h1".to_string()),
+        },
+        helper_tool(),
+    ] {
         let change = tracker.on_event("a", ev, t0 + secs(70));
         assert_eq!(change.state, Some(AgentState::Idle));
         assert!(!change.changed);
@@ -182,7 +199,13 @@ fn helper_stop_never_alerts() {
     assert!(tracker.tick(t0 + secs(120)).is_empty());
 
     // A session that only ever saw a helper finish has no state.
-    let change = tracker.on_event("b", HookEvent::HelperStop, t0);
+    let change = tracker.on_event(
+        "b",
+        HookEvent::HelperStop {
+            helper: Some("h1".to_string()),
+        },
+        t0,
+    );
     assert_eq!(change, Change::default());
     assert_eq!(tracker.state("b"), None);
 }
@@ -192,12 +215,17 @@ fn needs_input_is_blocked_until_next_prompt() {
     let t0 = Instant::now();
     let mut tracker = Tracker::default();
     tracker.on_event("a", HookEvent::Prompt, t0);
-    let change = tracker.on_event("a", HookEvent::NeedsInput, t0 + secs(1));
+    let change = tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0 + secs(1));
     assert_eq!(change.state, Some(AgentState::Blocked));
     assert!(change.changed);
 
     // A helper's work and a helper finishing share the session id and must not clear it.
-    for ev in [helper_tool(), HookEvent::HelperStop] {
+    for ev in [
+        helper_tool(),
+        HookEvent::HelperStop {
+            helper: Some("h1".to_string()),
+        },
+    ] {
         assert_eq!(
             tracker.on_event("a", ev, t0 + secs(2)).state,
             Some(AgentState::Blocked)
@@ -211,14 +239,14 @@ fn needs_input_is_blocked_until_next_prompt() {
     assert!(change.changed);
 
     // The main session's own tool call after the answer clears it too.
-    tracker.on_event("b", HookEvent::NeedsInput, t0);
+    tracker.on_event("b", HookEvent::NeedsInput { helper: None }, t0);
     assert_eq!(
         tracker.on_event("b", tool(), t0 + secs(1)).state,
         Some(AgentState::Working)
     );
 
     // So does the end of the turn, which then becomes done.
-    tracker.on_event("c", HookEvent::NeedsInput, t0);
+    tracker.on_event("c", HookEvent::NeedsInput { helper: None }, t0);
     let change = tracker.on_event("c", stop(), t0 + secs(1));
     assert_eq!(change.state, Some(AgentState::Working));
     assert!(change.changed);
@@ -255,7 +283,7 @@ fn seen_turns_done_into_idle() {
 fn seen_does_not_clear_blocked() {
     let t0 = Instant::now();
     let mut tracker = Tracker::default();
-    tracker.on_event("a", HookEvent::NeedsInput, t0);
+    tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0);
     let change = tracker.seen("a");
     assert_eq!(change.state, Some(AgentState::Blocked));
     assert!(!change.changed);
@@ -266,7 +294,7 @@ fn seen_does_not_clear_blocked() {
 fn end_clears_state() {
     let t0 = Instant::now();
     let mut tracker = Tracker::default();
-    tracker.on_event("a", HookEvent::NeedsInput, t0);
+    tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0);
     let change = tracker.on_event("a", HookEvent::End, t0 + secs(1));
     assert_eq!(change.state, None);
     assert!(change.changed);
@@ -288,12 +316,12 @@ fn end_clears_state() {
 fn blocked_list_is_oldest_first() {
     let t0 = Instant::now();
     let mut tracker = Tracker::default();
-    tracker.on_event("a", HookEvent::NeedsInput, t0 + secs(2));
-    tracker.on_event("b", HookEvent::NeedsInput, t0 + secs(1));
-    tracker.on_event("c", HookEvent::NeedsInput, t0 + secs(3));
+    tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0 + secs(2));
+    tracker.on_event("b", HookEvent::NeedsInput { helper: None }, t0 + secs(1));
+    tracker.on_event("c", HookEvent::NeedsInput { helper: None }, t0 + secs(3));
     tracker.on_event("d", HookEvent::Prompt, t0);
     // Asking again while blocked keeps its place.
-    tracker.on_event("a", HookEvent::NeedsInput, t0 + secs(4));
+    tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0 + secs(4));
     assert_eq!(tracker.blocked_oldest_first(), ["b", "a", "c"]);
 
     tracker.on_event("b", HookEvent::Prompt, t0 + secs(5));
@@ -366,7 +394,7 @@ fn parse_reads_edit_path() {
     // A tool that is not an edit has no edited file.
     assert_eq!(
         parse("PreToolUse", &fixture("pre_tool_use_helper_bash.json")),
-        Some(helper_tool())
+        Some(tool_of("a8842aa35560b0d93"))
     );
 }
 
@@ -378,15 +406,81 @@ fn claude_exit_ends_the_session() {
     );
 }
 
+/// A tool call made by the helper `id`.
+fn tool_of(id: &str) -> HookEvent {
+    HookEvent::Tool {
+        edited: None,
+        helper_started: false,
+        helper: Some(id.to_string()),
+    }
+}
+
+#[test]
+fn helper_prompt_is_blocked_until_that_helper_moves_on() {
+    let t0 = Instant::now();
+    let mut tracker = Tracker::default();
+    tracker.on_event("a", HookEvent::Prompt, t0);
+    let asked = HookEvent::NeedsInput {
+        helper: Some("h1".to_string()),
+    };
+    let change = tracker.on_event("a", asked, t0 + secs(1));
+    assert_eq!(change.state, Some(AgentState::Blocked));
+
+    // Another helper's call is no answer to this prompt.
+    let change = tracker.on_event("a", tool_of("h2"), t0 + secs(2));
+    assert_eq!(change.state, Some(AgentState::Blocked));
+
+    // The helper that asked got past its prompt.
+    let change = tracker.on_event("a", tool_of("h1"), t0 + secs(3));
+    assert_eq!(change.state, Some(AgentState::Working));
+    assert!(change.changed);
+
+    // A helper that stops after its prompt clears it too.
+    let asked = HookEvent::NeedsInput {
+        helper: Some("h2".to_string()),
+    };
+    tracker.on_event("a", asked, t0 + secs(4));
+    let stopped = HookEvent::HelperStop {
+        helper: Some("h2".to_string()),
+    };
+    let change = tracker.on_event("a", stopped, t0 + secs(5));
+    assert_eq!(change.state, Some(AgentState::Working));
+}
+
+#[test]
+fn helper_never_clears_the_main_sessions_prompt() {
+    let t0 = Instant::now();
+    let mut tracker = Tracker::default();
+    tracker.on_event("a", HookEvent::NeedsInput { helper: None }, t0);
+    let asked = HookEvent::NeedsInput {
+        helper: Some("h1".to_string()),
+    };
+    tracker.on_event("a", asked, t0 + secs(1));
+    let change = tracker.on_event("a", tool_of("h1"), t0 + secs(2));
+    assert_eq!(change.state, Some(AgentState::Blocked));
+}
+
+#[test]
+fn parse_reads_a_helpers_prompt() {
+    let mut payload = fixture("permission_request.json");
+    payload["agent_id"] = Value::from("a8842aa35560b0d93");
+    assert_eq!(
+        parse("PermissionRequest", &payload),
+        Some(HookEvent::NeedsInput {
+            helper: Some("a8842aa35560b0d93".to_string())
+        })
+    );
+}
+
 #[test]
 fn parse_reads_notification_kinds() {
     assert_eq!(
         parse("Notification", &fixture("notification_permission.json")),
-        Some(HookEvent::NeedsInput)
+        Some(HookEvent::NeedsInput { helper: None })
     );
     assert_eq!(
         parse("PermissionRequest", &fixture("permission_request.json")),
-        Some(HookEvent::NeedsInput)
+        Some(HookEvent::NeedsInput { helper: None })
     );
     // Waiting for the next prompt comes after the turn has ended, which is done, not blocked.
     assert_eq!(
@@ -405,7 +499,7 @@ fn parse_reads_helpers_and_turn_ends() {
         Some(HookEvent::Tool {
             edited: None,
             helper_started: true,
-            from_helper: false,
+            helper: None,
         })
     );
     assert_eq!(
@@ -422,12 +516,19 @@ fn parse_reads_helpers_and_turn_ends() {
     );
     assert_eq!(
         parse("SubagentStop", &fixture("subagent_stop.json")),
-        Some(HookEvent::HelperStop)
+        Some(HookEvent::HelperStop {
+            helper: Some("aabf40971fc1053b7".to_string())
+        })
     );
     // A stop that carries a helper's id is that helper's, so it never ends the turn.
     let mut helper_stop = fixture("stop_empty.json");
     helper_stop["agent_id"] = Value::from("a8842aa35560b0d93");
-    assert_eq!(parse("Stop", &helper_stop), Some(HookEvent::HelperStop));
+    assert_eq!(
+        parse("Stop", &helper_stop),
+        Some(HookEvent::HelperStop {
+            helper: Some("a8842aa35560b0d93".to_string())
+        })
+    );
 
     assert_eq!(
         parse("SessionStart", &fixture("session_start.json")),

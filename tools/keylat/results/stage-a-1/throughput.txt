@@ -1,0 +1,20 @@
+plain-fifo 30 0.240 125.0 (focused: start=yes end=yes)
+plain-fifo 30 0.250 120.2 (focused: start=yes end=yes)
+plain-fifo 30 0.239 125.5 (focused: start=yes end=yes)
+plain-fifo peak memory: 200.9 MB
+plain-immediate 30 0.288 104.3 (focused: start=yes end=yes)
+plain-immediate 30 0.264 113.8 (focused: start=yes end=yes)
+plain-immediate 30 0.316 95.0 (focused: start=yes end=yes)
+plain-immediate peak memory: 202.4 MB
+kitty 30 0.319 94.0 (focused: start=yes end=yes)
+kitty 30 0.315 95.1 (focused: start=yes end=yes)
+kitty 30 0.283 106.0 (focused: start=yes end=yes)
+kitty peak memory: 229.5 MB
+ghostty 30 0.195 153.5 (focused: start=yes end=yes)
+ghostty 30 0.415 72.3 (focused: start=yes end=yes)
+ghostty 30 0.298 100.7 (focused: start=yes end=yes)
+ghostty peak memory: 156.0 MB
+alacritty 30 0.343 87.5 (focused: start=yes end=yes)
+alacritty 30 0.352 85.2 (focused: start=yes end=yes)
+alacritty 30 0.259 115.9 (focused: start=yes end=yes)
+alacritty peak memory: 187.1 MB

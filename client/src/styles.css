@@ -1,0 +1,926 @@
+/* Every value here comes from docs/ui-review.md. The sidebar is the Mac theme, the default. */
+
+:root {
+  --background: #16141f;
+  --foreground: #cdd6f4;
+  --cursor: #f5e0dc;
+  --line: #45475a;
+  --accent: #89b4fa;
+  --text-strong: #cdd6f4;
+  --text-head: #bac2de;
+  --text-name: #a6adc8;
+  --text-dim: #585b70;
+  --hover: rgba(245, 224, 220, 0.06);
+  --gh-rule: rgba(205, 214, 244, 0.11);
+  --gh-fold: #7c87aa;
+  --mac-sel: rgba(205, 214, 244, 0.16);
+  --mac-hover: rgba(205, 214, 244, 0.06);
+  --mac-hair: rgba(205, 214, 244, 0.08);
+  --mono: "JetBrainsMono Nerd Font Mono", monospace;
+  --sys: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background);
+}
+
+#app {
+  display: flex;
+  height: 100%;
+}
+
+/* Sidebar */
+
+#sidebar {
+  --row-h: 28px;
+  --pad-l: 10px;
+  --pad-r: 16px;
+  --slot: 22px;
+  --sb-font: 13px;
+  --sb-small: 12px;
+  position: relative;
+  flex: none;
+  width: 240px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  /* The window drag strip. */
+  padding-top: 10px;
+  background: rgba(205, 214, 244, 0.034);
+  /* Nothing inside the sidebar can make the terminal area lay out again. */
+  contain: strict;
+  font: normal var(--sb-font) var(--sys);
+  color: var(--text-name);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The edge line, drawn over the sidebar so rows keep its full width (mock 386). */
+#sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--mac-hair);
+  pointer-events: none;
+}
+
+#sidebar[hidden] {
+  display: none;
+}
+
+#list {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+#list > * {
+  flex: none;
+}
+
+#list > .fill {
+  flex: 1 0 0;
+}
+
+#list::-webkit-scrollbar {
+  width: 6px;
+}
+
+#list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#list::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+/* One hairline above each group, never above the first thing in the list. */
+.group + .group,
+.loose + .group {
+  position: relative;
+  margin-top: 8px;
+  padding-top: 4px;
+}
+
+.group + .group::before,
+.loose + .group::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--gh-rule);
+}
+
+.slot {
+  flex: none;
+  width: var(--slot);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+}
+
+.ghead {
+  display: flex;
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 var(--pad-r) 0 var(--pad-l);
+  cursor: default;
+  user-select: none;
+}
+
+.ghead:hover {
+  background: var(--hover);
+}
+
+.ghead:has(.slot:focus-visible) {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+button.slot {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: default;
+  outline: none;
+}
+
+.gfold {
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  overflow: visible;
+  color: var(--gh-fold);
+}
+
+.ghead:hover .gfold {
+  color: var(--text-strong);
+}
+
+/* The front flap is open while the group is expanded. */
+.gfold .ff {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  transform: skewX(-22deg) scaleY(0.7);
+  transition: transform 180ms var(--ease);
+}
+
+.collapsed .gfold .ff {
+  transform: none;
+}
+
+.gname {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.branch {
+  flex: 0 100000 auto;
+  min-width: 0;
+  margin-left: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gcount {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.roll {
+  flex: none;
+  box-sizing: border-box;
+  width: calc(var(--slot) + 6px);
+  margin-left: 0;
+  padding-left: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row,
+.pane-row {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+}
+
+/* Hover and selected: a rounded rect inset 8 px from both sidebar edges. */
+.row::before,
+.pane-row::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  right: 8px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.row:hover::before,
+.pane-row:hover::before {
+  background: var(--mac-hover);
+}
+
+.row.selected::before {
+  background: var(--mac-sel);
+}
+
+/* Keyboard focus outlines the same rounded rect, not the row (mock 399-400). */
+.row:focus-visible {
+  outline: none;
+}
+
+.row:focus-visible::before {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.row {
+  height: var(--row-h);
+  padding: 0 var(--pad-r) 0 var(--pad-l);
+  color: var(--text-name);
+}
+
+.row .body {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  display: flex;
+}
+
+.row .name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row.selected .name {
+  color: var(--text-strong);
+}
+
+.panes {
+  padding: 0 0 4px 0;
+}
+
+.pane-row {
+  height: 22px;
+  padding: 0 var(--pad-r) 0 calc(var(--pad-l) + var(--slot));
+  font-size: var(--sb-small);
+  color: var(--text-dim);
+}
+
+.pane-row.focused {
+  color: var(--text-name);
+}
+
+.pane-row .slot {
+  width: 18px;
+  height: 22px;
+}
+
+.pidx {
+  flex: none;
+  margin-left: 4px;
+  margin-right: 1ch;
+  color: var(--line);
+}
+
+.pname {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Holds its height so the list never shifts. The numbers are a later plan. */
+#usage {
+  flex: none;
+  display: block;
+  height: 28px;
+  line-height: 28px;
+  padding: 0 var(--pad-r) 0 calc(var(--pad-l) + var(--slot) + 4px);
+  color: var(--line);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The invisible handle on the right edge that resizes the sidebar. */
+.grip {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+
+/* Collapse motion. */
+.flip-run [data-key],
+.flip-out.flip-run > * {
+  transition:
+    transform 180ms var(--ease),
+    opacity 180ms var(--ease);
+}
+
+.flip-out {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.flip-out > * {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gfold .ff {
+    transition: none;
+  }
+}
+
+/* Terminal area */
+
+#main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#terminal {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  padding: 8px;
+}
+
+.pane,
+.split {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane {
+  position: relative;
+  overflow: hidden;
+}
+
+.split {
+  display: flex;
+}
+
+.split-col {
+  flex-direction: column;
+}
+
+.divider {
+  flex: none;
+  background: var(--line);
+}
+
+.split-row > .divider {
+  width: 1px;
+  margin: 0 8px;
+}
+
+.split-col > .divider {
+  height: 1px;
+  margin: 8px 0;
+}
+
+.parked {
+  display: none;
+}
+
+#status {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 2px 8px;
+  font: 12px/1.4 var(--mono);
+  pointer-events: none;
+}
+
+/* Rename field, Mac theme (docs/ui-review.md "Selection, hover, focus, rename"). The 3 px above
+   and below keep the row height; the -5 and +5 px keep the name's left edge in place. */
+
+.rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 22px;
+  margin: 3px 0 3px -5px;
+  padding: 0 5px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(205, 214, 244, 0.06);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  color: var(--text-strong);
+  caret-color: var(--cursor);
+  font: inherit;
+  user-select: text;
+}
+
+.ghead .rename {
+  margin-left: -1px;
+  font-weight: 600;
+}
+
+.rename::selection {
+  background: rgba(245, 224, 220, 0.82);
+  color: #1e1e2e;
+}
+
+/* Right-click menu, Mac theme. Outside the sidebar, so it carries its own sizes. */
+
+.row.menu-open::before {
+  background: var(--mac-hover);
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 20;
+  width: 200px;
+  box-sizing: border-box;
+  padding: 4px;
+  background: #24222f;
+  border: 1px solid var(--mac-hair);
+  border-radius: 6px;
+  font: normal 13px var(--sys);
+  color: var(--text-name);
+  cursor: default;
+  user-select: none;
+}
+
+.ctx-menu .item {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+.ctx-menu .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctx-menu .hint {
+  flex: none;
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Keyboard focus shows as the hover fill, with no ring of its own. */
+.ctx-menu .item:focus {
+  outline: none;
+}
+
+.ctx-menu .item:not(.disabled):hover,
+.ctx-menu .item:not(.disabled):focus-visible {
+  background: rgba(205, 214, 244, 0.16);
+  color: var(--text-strong);
+}
+
+.ctx-menu .item.disabled {
+  color: var(--text-dim);
+}
+
+/* Drag targets (docs/ui-review.md "Drag targets"). */
+
+.drag-src {
+  opacity: 0.35;
+}
+
+.ghost {
+  position: absolute;
+  z-index: 15;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: calc(100% - 16px);
+  height: var(--row-h);
+  padding: 0 12px 0 4px;
+  background: #24222f;
+  border: 1px solid var(--mac-hair);
+  border-radius: 6px;
+  opacity: 0.96;
+  pointer-events: none;
+  white-space: nowrap;
+  color: var(--text-name);
+}
+
+.ghost .slot {
+  flex: none;
+  width: var(--slot);
+}
+
+.ghost .gtext {
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.insert {
+  position: absolute;
+  z-index: 14;
+  top: 0;
+  left: var(--pad-l);
+  right: var(--pad-r);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.row.join-target::before {
+  background: rgba(137, 180, 250, 0.1);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.join-tag {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 11px;
+  line-height: var(--row-h);
+  color: var(--accent);
+}
+
+/* Split dividers: a 1 px line with a wider invisible grip. */
+
+.divider {
+  position: relative;
+  touch-action: none;
+}
+
+.divider::before {
+  content: "";
+  position: absolute;
+}
+
+.split-row > .divider::before {
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+  cursor: col-resize;
+}
+
+.split-col > .divider::before {
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+  cursor: row-resize;
+}
+
+/* The `dim` setting, off by default (R32): panes without typing drop to 58 percent. */
+
+.dim-panes .pane .xterm-screen {
+  transition: opacity 120ms ease-out;
+}
+
+.dim-panes .pane.dim .xterm-screen {
+  opacity: 0.58;
+}
+
+/* State markers, set a (docs/ui-review.md "State markers" and "Marker morph", mock 116-140,
+   520-630). Every marker is one rig of six strokes in a 13 px SVG; a state is a pose. A new pose
+   class makes every stroke travel to its new place, 18 ms after the one before. Transform and
+   opacity only. Two copies of the rig hold the same pose: the old color stays underneath while
+   the new one fades in on top. The flake ticks on .fspin; .fset takes over its turn at a change. */
+
+:root {
+  --red: #f38ba8;
+  --green: #a6e3a1;
+  --yellow: #f9e2af;
+  --blue: #89b4fa;
+  --bright-black: #585b70;
+}
+
+:root { --mo-ms: 320ms; --mo-step: 18ms; --mo-ease: cubic-bezier(0.34, 1.4, 0.64, 1); }
+
+.mk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-style: normal;
+  line-height: 1;
+}
+
+.mk.a {
+  font-size: 15px;
+  width: 14px;
+}
+
+/* Working is blue (work=blue); blocked stays the loudest. */
+.mk.a.s-working { color: var(--blue); }
+.mk.a.s-blocked { color: var(--red); }
+.mk.a.s-done { color: var(--green); }
+.mk.a.s-idle { color: var(--bright-black); }
+.mk.a.s-handoff { color: var(--yellow); }
+.mk.a.s-failed { color: var(--red); }
+
+/* The margin-right keeps the vertical stroke on a half pixel, so it stays crisp. */
+.mk.a .fset {
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-right: 1px;
+  transform-origin: 50% 50%;
+  transition: transform var(--mo-ms) var(--mo-ease);
+}
+
+.mk.a .fspin {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  transform-origin: 50% 50%;
+}
+
+.mk.a .fset > .fspin { margin-right: 0; }
+
+/* Tick: a 15 degree nudge every second with a soft spring settle; the star repeats every 60
+   degrees, so the 4 s loop is seamless. The script starts it from the clock so all turn in step,
+   and restarts every one from the clock when the window comes back. */
+@keyframes fl-tick {
+  0.000% { transform: rotate(0.00deg); }
+  1.000% { transform: rotate(1.86deg); }
+  2.000% { transform: rotate(5.73deg); }
+  3.000% { transform: rotate(9.77deg); }
+  4.000% { transform: rotate(13.00deg); }
+  5.000% { transform: rotate(15.09deg); }
+  6.250% { transform: rotate(16.27deg); }
+  7.500% { transform: rotate(16.37deg); }
+  9.000% { transform: rotate(15.88deg); }
+  10.750% { transform: rotate(15.26deg); }
+  12.750% { transform: rotate(14.91deg); }
+  15.000% { transform: rotate(14.88deg); }
+  17.500% { transform: rotate(15.00deg); }
+  25.000% { transform: rotate(15.00deg); }
+  26.000% { transform: rotate(16.86deg); }
+  27.000% { transform: rotate(20.73deg); }
+  28.000% { transform: rotate(24.77deg); }
+  29.000% { transform: rotate(28.00deg); }
+  30.000% { transform: rotate(30.09deg); }
+  31.250% { transform: rotate(31.27deg); }
+  32.500% { transform: rotate(31.37deg); }
+  34.000% { transform: rotate(30.88deg); }
+  35.750% { transform: rotate(30.26deg); }
+  37.750% { transform: rotate(29.91deg); }
+  40.000% { transform: rotate(29.88deg); }
+  42.500% { transform: rotate(30.00deg); }
+  50.000% { transform: rotate(30.00deg); }
+  51.000% { transform: rotate(31.86deg); }
+  52.000% { transform: rotate(35.73deg); }
+  53.000% { transform: rotate(39.77deg); }
+  54.000% { transform: rotate(43.00deg); }
+  55.000% { transform: rotate(45.09deg); }
+  56.250% { transform: rotate(46.27deg); }
+  57.500% { transform: rotate(46.37deg); }
+  59.000% { transform: rotate(45.88deg); }
+  60.750% { transform: rotate(45.26deg); }
+  62.750% { transform: rotate(44.91deg); }
+  65.000% { transform: rotate(44.88deg); }
+  67.500% { transform: rotate(45.00deg); }
+  75.000% { transform: rotate(45.00deg); }
+  76.000% { transform: rotate(46.86deg); }
+  77.000% { transform: rotate(50.73deg); }
+  78.000% { transform: rotate(54.77deg); }
+  79.000% { transform: rotate(58.00deg); }
+  80.000% { transform: rotate(60.09deg); }
+  81.250% { transform: rotate(61.27deg); }
+  82.500% { transform: rotate(61.37deg); }
+  84.000% { transform: rotate(60.88deg); }
+  85.750% { transform: rotate(60.26deg); }
+  87.750% { transform: rotate(59.91deg); }
+  90.000% { transform: rotate(59.88deg); }
+  92.500% { transform: rotate(60.00deg); }
+  100.000% { transform: rotate(60.00deg); }
+}
+
+.mk.a .fspin { animation: fl-tick 4s linear infinite; }
+/* A compositor layer only for a flake that ticks, not one per marker. */
+.mk.a.s-working:not(.off) .fspin { will-change: transform; }
+.mk.a.mo:not(.s-working) .fspin { animation: none; }
+/* Scrolled out of the list: no tick (the sidebar's IntersectionObserver sets .off). */
+.mk.a.off .fspin { animation: none; }
+.win-unfocused .mk.a .fspin { animation-play-state: paused; }
+
+.mrig { display: block; overflow: visible; }
+.mrig .sk, .mrig .sa, .mrig .sb, .mrig .tw, .mrig .fl {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transition:
+    transform var(--mo-ms) var(--mo-ease) calc(var(--i, 0) * var(--mo-step)),
+    opacity var(--mo-ms) ease calc(var(--i, 0) * var(--mo-step));
+}
+.mrig .tw { transform: translate(0.85px, 0px) scale(0); opacity: 0; }
+.mrig.p-working .tw { transform: translate(0.85px, 0px) scale(1); opacity: 1; }
+.mrig .ly0 { opacity: 0; }
+.mo-hold .mrig .ly0 { opacity: 1; }
+.mrig .ly1 { transition: opacity var(--mo-ms) ease; }
+.mo-from .mrig .ly1 { opacity: 0; }
+.mo-snap, .mo-snap * { transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mk.a .fspin { animation: none !important; will-change: auto !important; }
+  .mk.a .fset, .mk.a.mo, .mrig * { transition: none !important; }
+}
+
+/* Poses in viewBox units (16 units = 13 px, y down), copied from the mock (mock 552-629). Spare
+   strokes lie on another stroke or inside the filled diamond. */
+.mrig.p-working .k0 { transform: translate(0px, -3.25px) rotate(-90deg); }
+.mrig.p-working .k0 .sa { transform: translateX(-0.95px); } .mrig.p-working .k0 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k1 { transform: translate(2.815px, -1.625px) rotate(-30deg); }
+.mrig.p-working .k1 .sa { transform: translateX(-0.95px); } .mrig.p-working .k1 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k2 { transform: translate(2.815px, 1.625px) rotate(30deg); }
+.mrig.p-working .k2 .sa { transform: translateX(-0.95px); } .mrig.p-working .k2 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k3 { transform: translate(0px, 3.25px) rotate(90deg); }
+.mrig.p-working .k3 .sa { transform: translateX(-0.95px); } .mrig.p-working .k3 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k4 { transform: translate(-2.815px, 1.625px) rotate(150deg); }
+.mrig.p-working .k4 .sa { transform: translateX(-0.95px); } .mrig.p-working .k4 .sb { transform: translateX(0.95px); }
+.mrig.p-working .k5 { transform: translate(-2.815px, -1.625px) rotate(210deg); }
+.mrig.p-working .k5 .sa { transform: translateX(-0.95px); } .mrig.p-working .k5 .sb { transform: translateX(0.95px); }
+.mrig.p-working .fl { transform: translate(0px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-blocked .k0 { transform: translate(0.615px, 0px) rotate(-90deg); }
+.mrig.p-blocked .k0 .sa { transform: translateX(0px); } .mrig.p-blocked .k0 .sb { transform: translateX(0px); }
+.mrig.p-blocked .k1 { transform: translate(3.173px, -2.557px) rotate(45deg); }
+.mrig.p-blocked .k1 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k1 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k2 { transform: translate(3.173px, 2.557px) rotate(-45deg); }
+.mrig.p-blocked .k2 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k2 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k3 { transform: translate(0.615px, 0px) rotate(90deg); }
+.mrig.p-blocked .k3 .sa { transform: translateX(0px); } .mrig.p-blocked .k3 .sb { transform: translateX(0px); }
+.mrig.p-blocked .k4 { transform: translate(-1.942px, 2.557px) rotate(225deg); }
+.mrig.p-blocked .k4 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k4 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .k5 { transform: translate(-1.942px, -2.557px) rotate(135deg); }
+.mrig.p-blocked .k5 .sa { transform: translateX(-1.317px); } .mrig.p-blocked .k5 .sb { transform: translateX(1.317px); }
+.mrig.p-blocked .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0.84); opacity: 1; }
+.mrig.p-idle .k0 { transform: translate(0.615px, 0px) rotate(-90deg); }
+.mrig.p-idle .k0 .sa { transform: translateX(0px); } .mrig.p-idle .k0 .sb { transform: translateX(0px); }
+.mrig.p-idle .k1 { transform: translate(2.215px, -1.6px) rotate(45deg); }
+.mrig.p-idle .k1 .sa { transform: translateX(0px); } .mrig.p-idle .k1 .sb { transform: translateX(0px); }
+.mrig.p-idle .k2 { transform: translate(2.215px, 1.6px) rotate(-45deg); }
+.mrig.p-idle .k2 .sa { transform: translateX(0px); } .mrig.p-idle .k2 .sb { transform: translateX(0px); }
+.mrig.p-idle .k3 { transform: translate(0.615px, 0px) rotate(90deg); }
+.mrig.p-idle .k3 .sa { transform: translateX(0px); } .mrig.p-idle .k3 .sb { transform: translateX(0px); }
+.mrig.p-idle .k4 { transform: translate(-0.985px, 1.6px) rotate(225deg); }
+.mrig.p-idle .k4 .sa { transform: translateX(0px); } .mrig.p-idle .k4 .sb { transform: translateX(0px); }
+.mrig.p-idle .k5 { transform: translate(-0.985px, -1.6px) rotate(135deg); }
+.mrig.p-idle .k5 .sa { transform: translateX(0px); } .mrig.p-idle .k5 .sb { transform: translateX(0px); }
+.mrig.p-idle .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(1); opacity: 1; }
+.mrig.p-done .k0 { transform: translate(1.834px, -0.843px) rotate(-55.864deg); }
+.mrig.p-done .k0 .sa { transform: translateX(-1.833px); } .mrig.p-done .k0 .sb { transform: translateX(1.833px); }
+.mrig.p-done .k1 { transform: translate(2.244px, 0px) rotate(-55.864deg); }
+.mrig.p-done .k1 .sa { transform: translateX(-2.3px); } .mrig.p-done .k1 .sb { transform: translateX(2.3px); }
+.mrig.p-done .k2 { transform: translate(0.954px, 1.903px) rotate(-55.864deg); }
+.mrig.p-done .k2 .sa { transform: translateX(0px); } .mrig.p-done .k2 .sb { transform: translateX(0px); }
+.mrig.p-done .k3 { transform: translate(0.806px, 0.674px) rotate(124.136deg); }
+.mrig.p-done .k3 .sa { transform: translateX(0px); } .mrig.p-done .k3 .sb { transform: translateX(0px); }
+.mrig.p-done .k4 { transform: translate(-2.067px, 2.155px) rotate(224.692deg); }
+.mrig.p-done .k4 .sa { transform: translateX(-0.099px); } .mrig.p-done .k4 .sb { transform: translateX(0.099px); }
+.mrig.p-done .k5 { transform: translate(-1.566px, 1.508px) rotate(224.692deg); }
+.mrig.p-done .k5 .sa { transform: translateX(0px); } .mrig.p-done .k5 .sb { transform: translateX(0px); }
+.mrig.p-done .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-failed .k0 { transform: translate(0.615px, 0.628px) rotate(-45deg); }
+.mrig.p-failed .k0 .sa { transform: translateX(0px); } .mrig.p-failed .k0 .sb { transform: translateX(0px); }
+.mrig.p-failed .k1 { transform: translate(0.354px, 0.367px) rotate(-45deg); }
+.mrig.p-failed .k1 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k1 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k2 { transform: translate(0.354px, 0.889px) rotate(45deg); }
+.mrig.p-failed .k2 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k2 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k3 { transform: translate(0.615px, 0.628px) rotate(45deg); }
+.mrig.p-failed .k3 .sa { transform: translateX(0px); } .mrig.p-failed .k3 .sb { transform: translateX(0px); }
+.mrig.p-failed .k4 { transform: translate(0.876px, 0.889px) rotate(135deg); }
+.mrig.p-failed .k4 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k4 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .k5 { transform: translate(0.876px, 0.367px) rotate(225deg); }
+.mrig.p-failed .k5 .sa { transform: translateX(-1.651px); } .mrig.p-failed .k5 .sb { transform: translateX(1.651px); }
+.mrig.p-failed .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+.mrig.p-handoff .k0 { transform: translate(2.862px, -3.902px) rotate(-136.827deg); }
+.mrig.p-handoff .k0 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k0 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k1 { transform: translate(2.862px, -3.902px) rotate(43.173deg); }
+.mrig.p-handoff .k1 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k1 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k2 { transform: translate(2.862px, -0.726px) rotate(-43.173deg); }
+.mrig.p-handoff .k2 .sa { transform: translateX(-0.02px); } .mrig.p-handoff .k2 .sb { transform: translateX(0.02px); }
+.mrig.p-handoff .k3 { transform: translate(-1.131px, 0.862px) rotate(0deg); }
+.mrig.p-handoff .k3 .sa { transform: translateX(0px); } .mrig.p-handoff .k3 .sb { transform: translateX(0px); }
+.mrig.p-handoff .k4 { transform: translate(-1.954px, 2.653px) rotate(231.147deg); }
+.mrig.p-handoff .k4 .sa { transform: translateX(0px); } .mrig.p-handoff .k4 .sb { transform: translateX(0px); }
+.mrig.p-handoff .k5 { transform: translate(-1.954px, -0.93px) rotate(128.853deg); }
+.mrig.p-handoff .k5 .sa { transform: translateX(0px); } .mrig.p-handoff .k5 .sb { transform: translateX(0px); }
+.mrig.p-handoff .fl { transform: translate(0.615px, 0px) rotate(45deg) scale(0); opacity: 0; }
+
+/* A blocked or done compact row: the name line, then one dim line with the session's title
+   (46 px in the Mac theme: name 28, sub margin-top -4, sub 16, padding-bottom 6). */
+.row.has-sub {
+  height: auto;
+  align-items: flex-start;
+}
+
+.row.has-sub .slot {
+  height: var(--row-h);
+}
+
+.row.has-sub .body {
+  flex-direction: column;
+}
+
+.row.has-sub .name {
+  height: var(--row-h);
+  line-height: var(--row-h);
+}
+
+.row .sub {
+  display: block;
+  margin-top: -4px;
+  padding-bottom: 6px;
+  font-size: var(--sb-small);
+  line-height: 16px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The same marker as the pane's sidebar row, in the pane's top right corner (mock 305). */
+.pane-mk {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 5;
+  width: 22px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  background: var(--background);
+  pointer-events: none;
+}

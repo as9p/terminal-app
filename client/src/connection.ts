@@ -21,8 +21,7 @@ export type SessionItem = {
   rows: number;
 };
 
-// The tree of groups and tabs the host keeps, field for field as it sends it. Nothing uses it
-// yet: the sidebar that shows it comes later.
+// The tree of groups and tabs the host keeps, field for field as it sends it.
 
 export type Dir = "right" | "down";
 
@@ -57,6 +56,12 @@ export type SavedSession = {
 };
 
 export type ClosedTab = { tab: Tab; group: string | null; index: number; panes: SavedSession[] };
+
+/** A Claude session's state, as the host names it. */
+export type AgentState = "working" | "blocked" | "done" | "idle";
+
+/** One session's state. `state` is null for a session that has had no hook event. */
+export type StateItem = { session: string; state: string | null; since_ms: number };
 
 export type GroupDefaults = { name: string | null; collapsed: boolean };
 
@@ -137,6 +142,10 @@ export type ConnectionEvents = {
   onError(code: string, message: string): void;
   /** The shell of a session attached on this connection reported a new folder. */
   onCwd?(session: number, cwd: string): void;
+  /** The whole tree, as the answer to `treeGet` and after every later change to it. */
+  onTree?(tree: Tree): void;
+  /** Every session's Claude state, with the tree after `treeGet` and after every change. */
+  onStates?(items: StateItem[]): void;
 };
 
 type HostFrame =
@@ -149,6 +158,7 @@ type HostFrame =
   | { type: "exited"; session: number; clean: boolean }
   | { type: "detached"; session: number }
   | { type: "tree"; tree: Tree }
+  | { type: "states"; items: StateItem[] }
   | { type: "error"; code: string; message: string };
 
 type Waiting = {
@@ -161,6 +171,7 @@ type Waiting = {
 };
 
 const LIST_CODES: readonly string[] = [];
+const TREE_CODES: readonly string[] = [];
 const CREATE_CODES = ["bad_request", "bad_kind", "bad_cwd", "bad_size", "spawn_failed"];
 const ATTACH_CODES = ["no_session", "bad_size"];
 
@@ -257,9 +268,10 @@ export class Connection {
     cwd: string,
     cols: number,
     rows: number,
+    place?: Place,
   ): Promise<number> {
     return this.request(
-      { type: "create", uuid, kind, cwd, cols, rows } satisfies CreateFrame,
+      { type: "create", uuid, kind, cwd, cols, rows, place } satisfies CreateFrame,
       CREATE_CODES,
       (frame) => frame.type === "created" && frame.uuid === uuid,
       (frame, resolve: (session: number) => void) => {
@@ -290,6 +302,23 @@ export class Connection {
     );
   }
 
+  /** Resolves with the tree, and joins this connection to every later push of it. */
+  treeGet(): Promise<Tree> {
+    return this.request(
+      { type: "tree_get" } satisfies TreeFrame,
+      TREE_CODES,
+      (frame) => frame.type === "tree",
+      (frame, resolve: (tree: Tree) => void) => {
+        if (frame.type === "tree") resolve(frame.tree);
+      },
+    );
+  }
+
+  /** The host answers with a pushed tree, or an `error` frame through `onError`. */
+  treeOp(op: Op): void {
+    this.sendText({ type: "tree_op", op } satisfies TreeFrame);
+  }
+
   detach(session: number): void {
     this.listeners.delete(session);
     this.sendText({ type: "detach", session });
@@ -306,6 +335,11 @@ export class Connection {
   /** `bytes` is the running total taken in since `attached`, snapshot included. */
   ack(session: number, bytes: number): void {
     this.sendText({ type: "ack", session, bytes });
+  }
+
+  /** The user has seen the session's tab, which turns a done session idle. False if not sent. */
+  seen(session: string): boolean {
+    return this.sendText({ type: "seen", session });
   }
 
   /** Sends typed text as UTF-8, synchronously. Dropped if the socket is not open. */
@@ -340,10 +374,13 @@ export class Connection {
     return frame;
   }
 
-  private sendText(frame: object): void {
+  // False when the socket is not open and the frame is dropped.
+  private sendText(frame: object): boolean {
     if (this.ready && this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame));
+      return true;
     }
+    return false;
   }
 
   private request<T>(
@@ -393,6 +430,12 @@ export class Connection {
         break;
       case "cwd":
         this.events.onCwd?.(frame.session, frame.cwd);
+        break;
+      case "tree":
+        this.events.onTree?.(frame.tree);
+        break;
+      case "states":
+        this.events.onStates?.(frame.items);
         break;
       case "exited": {
         const listener = this.listeners.get(frame.session);

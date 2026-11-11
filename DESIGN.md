@@ -85,7 +85,7 @@ Alex's PC crashes now and then, and Orca once closed on it while Alex was out, w
 - Each computer runs a small host process written in Rust. It owns the terminals, keeps them alive when the window closes, and keeps a copy of each screen so a client can reconnect. A Rust renderer is built only if xterm.js misses the speed targets below, and the host stays the same either way.
 - A terminal has one size, set by the device Alex last typed in. Other devices showing the same terminal scale or letterbox it and never resize it. Alex hit random resizes on a remote host in Orca. **(my call on the rule)**
 - Clients attach to any host over Tailscale. Only devices on Alex's tailnet can connect. **(Alex)**
-- Mac and Windows clients are Tauri apps with xterm.js using WebGL. The phone is a web page using the same terminal code.
+- Mac and Windows clients are Tauri apps with xterm.js using WebGL. The phone is a web page using the same terminal code. Changed on 2026-11-11: the desktop clients move to a native Rust engine, see "What changed on 2026-11-11".
 - The host runs on Mac and Windows from the first build, because the PC is the main host. Any terminal-process layer must handle both Unix terminals and Windows ConPTY. The Mac client comes first and the Windows client follows once the host and tabs work.
 - Hosts accept connections only over Tailscale, and each new device pairs once to get its own token, so being on the tailnet isn't enough by itself.
 - The host serves the phone page over HTTPS using a Tailscale certificate. The phone's Face ID lock is a passkey, which requires that HTTPS. Both are built together with the phone web app, last in the build order, so the first host has no HTTPS listener. **(my call, 2026-11-09)**
@@ -107,7 +107,7 @@ Alex's PC crashes now and then, and Orca once closed on it while Alex was out, w
 | macOS Terminal | 18 |
 | Orca, visible tab | 9.7 |
 
-Test build memory was about 500 MB from a debug build with one tab. Orca used 2.2 to 2.6 GB with all of Alex's sessions open. The test build has no sidebar or host process, so the real app will lose some speed.
+Test build memory was about 500 MB from a debug build with one tab. Orca used 2.2 to 2.6 GB with all of Alex's sessions open. The test build has no sidebar or host process, so the real app will lose some speed. For the real app see the 2026-11-10 results below.
 
 Typing latency, 60 presses of a key in each terminal running `cat`, measured from key press to the first changed screen frame at 120 fps on Alex's Mac:
 
@@ -120,12 +120,12 @@ Typing latency, 60 presses of a key in each terminal running `cat`, measured fro
 
 Terminal, Orca and kitty are effectively tied: the median gap is 3.2 ms and one screen frame is about 8 ms. In this test xterm.js in Electron does not lose to native terminals on typing.
 
-The test build passes the latency target on its typing median, 2.4 ms behind kitty, so the native Mac client path is not triggered. Both were watched across the whole window, so kitty's 19.0 ms is the fair comparison, not its 17.4 ms spot-only rerun. Two weaker results remain:
+The test build passes the latency target on its typing median, 2.4 ms behind kitty, so the native Mac client path is not triggered. This held for the test build only; for the real app see the 2026-11-10 results below. Both were watched across the whole window, so kitty's 19.0 ms is the fair comparison, not its 17.4 ms spot-only rerun. Two weaker results remain:
 
 - Backspace median is 6.2 ms behind kitty, and the 95th percentile is 9.7 ms behind. Both gaps are about one screen frame or less.
 - 11 of 60 presses took over 30 ms, against 1 for kitty and Orca and 0 for Terminal. The cause isn't known.
 
-The test build is a debug build that sends every key through a Node server and a WebSocket, which the Rust host would replace. Measure the real app again as a release build.
+The test build is a debug build that sends every key through a Node server and a WebSocket, which the Rust host would replace. Measure the real app again as a release build. That was done on 2026-11-10; see the results below.
 
 Limits of this test:
 
@@ -136,6 +136,55 @@ Limits of this test:
 - Orca ran at its normal 1728x1084 with its sessions open, the test build ran at 1728x1084, and kitty and Terminal ran at about 1200x800.
 - ghostty-web has no typing number, because the tool's calibration fails on it. Calibration also fails on xterm.js, but its run doesn't need calibration because its screen doesn't change when idle.
 - Orca's window changes about 13 times per second on its own, so its test watched only the 18x36 pixel spot where the character appears. kitty and Terminal were watched across the whole window. Rerunning kitty with the spot-only method gave a median of 17.4 ms against 19.0 ms, so the method difference is small, and that kitty rerun is level with Orca's 17.8 ms.
+
+#### Real app through the host (2026-11-10)
+
+First measurements of the real app, going through the Rust host process. All on Alex's MacBook Pro, release build, with `tools/keylat` and `tools/speed`. kitty was measured in the same sitting each time, because kitty's own numbers moved between days. Raw files are under `tools/keylat/results/task-7`, `task-7b` and `task-7b-dom`.
+
+Three sittings:
+
+1. Before the output fix, with WebGL.
+2. After the fix, with WebGL.
+3. After the fix, with the xterm.js DOM renderer.
+
+Output speed, 30 MB burst, three runs each, in MB/s:
+
+| Sitting | Terminal | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|---|
+| 1, before the fix, WebGL | App | 28.0 | 35.8 | 36.8 |
+| 1, before the fix, WebGL | kitty | 75.9 | 78.1 | 81.6 |
+| 2, after the fix, WebGL | App | 78.1 | 71.5 | 77.6 |
+| 2, after the fix, WebGL | kitty | 79.5 | 81.8 | 84.8 |
+| 3, after the fix, DOM | App | 91.0 | 89.5 | 88.8 |
+| 3, after the fix, DOM | kitty | 81.9 | 79.2 | 73.3 |
+
+Typing, with the same method as the test-build table above:
+
+| Sitting | Terminal | Median | 95th percentile | Over 30 ms | Backspace median |
+|---|---|---|---|---|---|
+| 1, before the fix, WebGL | App | 20.8 ms | 31.9 ms | 11% | 20.8 ms |
+| 1, before the fix, WebGL | kitty | 12.8 ms | 20.8 ms | 2% | 12.4 ms |
+| 2, after the fix, WebGL | App | 23.7 ms | 36.8 ms | 24% | 24.3 ms |
+| 2, after the fix, WebGL | kitty | 14.3 ms | 23.0 ms | 2% | 14.4 ms |
+| 3, after the fix, DOM | App | 25.4 ms | 33.9 ms | 26% | 25.6 ms |
+| 3, after the fix, DOM | kitty | 14.2 ms | 22.3 ms | 2% | 14.1 ms |
+
+What it means:
+
+- The output target (at least 40 MB/s) is met after the fix. Before it, the app got 28 to 37 MB/s.
+- The cause of the first miss: macOS hands the host about 1,000 bytes per terminal read, and each read went out as its own WebSocket message. That was about 31,000 messages per burst, and the web view pays a cost per message.
+- The fix: when a read comes back full, the host keeps reading for up to 0.1 ms and sends up to 64 KiB as one message. A short read, such as a key echo, is sent at once. Messages per burst fell to about 1,000.
+- The typing target (median within 5 ms of kitty) is missed, by 8.0 ms, 9.4 ms and 11.2 ms in the three sittings.
+- The host is not the cause. A key's round trip through the host measures about 0.2 ms headless.
+- The renderer is not the cause. WebGL and DOM both miss.
+- The app's 20.8 ms in sitting 1 equals the earlier no-host test build (21.4 ms). kitty got faster between test days: 19.0 ms then, 12.8 to 14.3 ms now. That is why the earlier "2.4 ms behind kitty" no longer holds.
+- The gap is about one screen frame at 120 Hz (8.3 ms), and it sits in the Mac web view's own drawing pipeline. This is inferred from the shape of the numbers, not measured directly.
+- Per the rule below, a typing miss opens the question of replacing the terminal drawing on the Mac, or building a native Mac client. That decision is open and is Alex's. Sidebar work continues in the web client meanwhile, because the web client is also the Windows client. **(my call)**
+
+Known limits of these runs:
+
+- `keylat` resizes kitty to 1200x800 but leaves the app at its own size.
+- The app's share of slow presses (11% to 26%) is much higher than kitty's 2%. The cause isn't known yet.
 
 Speed targets for the real app **(my call)**: at least 40 MB/s with a visible tab through the host process, and typing and backspace medians within 5 ms of kitty on the same machine, measured on a release build. Missing the latency target triggers the native Mac client path. Also report the 95th percentile and the share of presses over 30 ms, since a good median can hide slow presses.
 
@@ -205,7 +254,7 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 - On Windows a window without a title bar can lose edge resizing and snapping. The PC build must show that both still work, and the title bar is a per-computer setting. **(my call)**
 - No top tab bar, no title strip on panes, no bottom status bar and no right-hand panel. **(Alex)**
 - The sidebar has no search box, no back and forward buttons, no Tasks, Automations, Mobile or Artifacts buttons, no "Projects" title and no button row. Alex: "we use keyboard commands around here". **(Alex)**
-- The sidebar uses the terminal's background with no divider line, as cmux does. **(my call)**
+- The sidebar has a faint edge line between it and the terminal and a faint hairline above each group. The Mac sidebar theme is the default and the Terminal theme is the other. **(Alex)**
 - Every project group and session sits in the always-visible sidebar, with no pop-out workspace panel. **(Alex)**
 
 ### Tabs
@@ -214,21 +263,21 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 - Cmd+T opens a plain shell tab at once. It starts in the folder the current tab is in right now and joins that folder's group. If that folder is no group, it joins the current tab's group. With no group at all it starts in the home folder, ungrouped. **(Alex asked for Cmd+T and no lock-in, the folder rule is my call)**
 - A new tab can open on another paired computer, so Alex can start a PC terminal from the Mac. **(Alex)** Cmd+T follows the tab Alex is on, so inside a PC group it opens on the PC. A second key, Cmd+Shift+N, opens the new tab on the other computer, in the same project's folder there if that computer has it, otherwise the home folder. With more than two computers it asks which one. `ta new --on <computer>` does the same. **(my call)**
 - The sidebar scrolls as one plain list. A group's name scrolls away with its rows and never sticks to the top, which Orca's does. **(Alex)**
-- A row is compact by default: the state marker and the name. A group's header shows its folder and git branch. Longer text, such as what the agent last said, shows only on a session that needs Alex. **(my call, from "far less on screen")** cmux's taller three-line rows are the comparison in the review.
+- A row is compact by default: the state marker and the name. Two-line rows exist behind one setting, `sidebar_rows`. **(Alex)** A group's header shows its folder, git branch, a session count and, when collapsed, a rolled-up blocked marker. **(Alex)** Longer text, such as what the agent last said, shows only on a session that needs Alex. **(my call, from "far less on screen")** cmux's taller three-line rows are the comparison in the review.
 - Rows have no icons unless Alex turns them on, and no `[primary]` or `main` labels. **(Alex)**
 - Rows keep the order Alex drags them into. There are no Recent, Repo, Pinned or Active views. New groups start sorted by folder. **(Alex)**
-- Each group has an arrow that collapses it in place. **(Alex)**
-- With more than one computer paired, a small pill-shaped switch in the sidebar filters by device: all, Mac or PC. **(Alex)** It is hidden with one computer. **(my call)**
+- A group has no arrow. The folder icon in the marker column is the open and closed control. **(Alex)**
+- With more than one computer paired, a borderless picker with a menu in the sidebar filters by device: all, Mac or PC. **(Alex)** It is hidden with one computer. **(my call)**
 - Helper agents and agent team members are child rows under their session, collapsed by default. A filter shows or hides them. **(Alex)**
 - Showing each session's and helper's model in its row is a later add-on, off by default. **(Alex called it an add-on)**
 - Rename is inline: one key or a double click, type, Enter. A name Alex set is never overwritten by the terminal title or anything automatic. **(Alex, the never-overwritten rule is from cmux)**
-- The right-click menu on a row is short: rename, pin, close, move to group. **(Alex)**
+- The right-click menu on a row is short: rename, pin, close, move to group. **(Alex)** Close shows Cmd+Shift+W, matching the keys table. **(my call)**
 
 ### Splits
 
 - A split is made the kitty way, or by dragging one existing tab onto another to join them. A pane can be pulled back out into its own tab. **(Alex asked to combine terminals that already exist)**
 - Focus follows the mouse between panes, as on Linux. It is a setting, on by default. **(Alex)**
-- With no title strip, the pane Alex is typing in stays at full brightness and the others dim slightly. The sidebar row lists its panes beneath it. **(my call)**
+- With no title strip, the pane Alex is typing in stays at full brightness and the others do not dim by default. Dimming is a setting, off by default. **(Alex)** The sidebar row lists its panes beneath it. **(my call)**
 - There is no floating or pop-out terminal. **(Alex)**
 
 ### Focus
@@ -245,7 +294,7 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 - A group goes away when its last tab is closed or moved out, however it was made. **(Alex)** Its few saved defaults are kept, so opening the folder again brings the group back as it was. **(my call)**
 - Dragging a tab by hand pins it, and it stops moving by itself. **(my call)**
 - The `cd` rule applies while a shell sits at its prompt. While an agent runs in a tab that is still ungrouped, the tab moves on the agent's first edit instead. A tab that is already in a group never moves because of an edit. Claude Code `PreToolUse` and `PostToolUse` hooks report `Edit` and `Write` calls with `tool_input.file_path`, and the app resolves the file to its git root. It moves on edits, not on reads. **(my call on the rule, Alex asked for the behavior)**
-- A project is identified by its git remote, or its folder name if it has none, so the same project matches across computers. **(my call)**
+- A project is identified by its git remote, or its folder name if it has none, so the same project matches across computers. **(my call)** On one computer a folder group's key is the folder's whole path, so two folders with the same name stay two groups; matching across computers is not built yet, and when it is it compares the last part of that path. **(my call, 2026-11-10)**
 - A group is the project, not the project on one computer. Sessions from every computer sit in the same group, and the device filter narrows it. The order Alex drags things into is one shared order, synced like the project list. **(my call)**
 - Every host keeps a full copy of the project list and session groupings and exchanges changes with other hosts when they're both online. If two hosts changed the same item, the newest change wins. There is no central store, so the Mac still shows projects when the PC is off. **(my call)**
 - Sessions on an offline computer stay in the sidebar, greyed, with when they were last seen. Claude chats on them offer a manual reopen here, as long as the chat history is available on this computer. Plain terminals only show as offline. **(my call)**
@@ -254,7 +303,7 @@ The look is Alex's kitty config. The feel is cmux (see "cmux" above). Everything
 
 ### Session states
 
-- Every agent session shows one of four states: working, blocked (waiting on Alex), done (finished its turn, not yet looked at) and idle. **(Alex, from Herdr)** It is one small marker, not text, and it holds still, with no spinner. **(Alex)** The marker stays visible however narrow the sidebar gets. **(Alex)**
+- Every agent session shows one of four built states: working, blocked (waiting on Alex), done (finished its turn, not yet looked at) and idle. **(Alex, from Herdr)** Two further looks, handoff requested and failed, are recorded in `docs/ui-review.md` and built in a later plan. **(Alex for handoff, my call for failed)** It is one small marker, not text. The working marker is a drawn snowflake that ticks, a 15 degree nudge every second. The other markers hold still, and a marker reshapes into the next one when the state changes. **(Alex)** The marker stays visible however narrow the sidebar gets. **(Alex)**
 - Blocked rolls up: a blocked session marks its row, its pane and its group, even when the group is collapsed, and one key jumps to the blocked session. With several blocked, the key goes through them oldest first. **(Alex asked for Herdr's rollup, the order is my call)**
 - Done clears when Alex looks at the session. **(my call)**
 - Blocked and done both mean "your move". They follow the rule in "Alerts", so a helper agent finishing never sets them. **(Alex)**
@@ -431,10 +480,10 @@ The goal, in Alex's words: "optimalness would be i always respond when something
 Alex accepted the reminder times. The three kinds were Claude's guess, and Allow and Deny came from Alex's round 1 answers.
 
 **Look (Alex, 2026-11-09):** simple, and it fits the terminal. Alex finds Orca's notifications annoying, and dropped the kitten buddy and the alert themes: "remove the cats", "make it fit".
-- Inside the app: the marker on the row, the rollup on its group, and one sound. No popup inside the window. **(my call)**
+- Inside the app: the marker on the row, the rollup on its group, and that state's sound. No popup inside the window. **(my call)**
 - When the app isn't in front: one system notification that opens the session when clicked. None for the session Alex is looking at. **(my call, from cmux)**
 - The one-click answers live on the board card and in the system notification. **(my call)**
-- Each kind has its own sound, aimed at satisfying rather than just polite. **(Alex)**
+- Each state can be set to sound, banner, dock badge or nothing, per state. **(Alex)** A sound is aimed at satisfying rather than just polite. **(Alex)**
 
 **Rules:**
 - Quiet during the Monday stream, 4:30 to 6:30 PM ET, because OBS could pick up sounds. **(Alex)** Quiet means no sounds and no notifications, while the sidebar still updates. **(my call)** In the public version this is a general quiet hours setting, empty by default. **(my call)** Quiet hours are set per computer, for the one that runs OBS, and the phone is not affected. **(my call)**
@@ -478,21 +527,29 @@ Alex went through Orca's settings on 2026-11-09 (`orca-settings-notes.md`). What
 
 ## Keys
 
-kitty's keys stay for everything kitty has. **(Alex)** The keys below are new, and where one differs from kitty's, the one below wins. They are first guesses for the UI review. **(my call unless marked)**
+kitty's keys stay for everything kitty has. **(Alex)** The keys below are new, and where one differs from kitty's, the one below wins. The table is final after the UI review, as recorded in `docs/ui-review.md` "Keys". **(Alex)** **(my call unless marked)**
 
 | Action | Key |
 |---|---|
 | New tab | Cmd+T **(Alex)** |
+| Close pane | Cmd+W **(Alex)** |
+| Close tab | Cmd+Shift+W **(Alex)** |
 | New tab on the other computer | Cmd+Shift+N |
 | Reopen closed tab | Cmd+Shift+T **(Alex)** |
+| Next, previous tab | Cmd+Shift+] and [ **(Alex)** |
 | Jump to group 1 to 9 | Cmd+1 to Cmd+9 **(Alex)** |
 | Jump to tab 1 to 9 in the group | Ctrl+1 to Ctrl+9 |
+| Split right, split down | Cmd+D, Cmd+Shift+D **(Alex)** |
+| Move between panes | Cmd+Option+arrows **(Alex)** |
+| Fill the tab with one pane | Cmd+Shift+Enter **(Alex)** |
 | Show or hide the sidebar | Cmd+B |
 | Jump to the oldest blocked session | Cmd+Shift+U |
 | Board | Cmd+Shift+B |
 | Rename | Cmd+Shift+R |
+| Zoom in, out, reset | Cmd+= and Cmd+plus, Cmd+minus, Cmd+0 **(Alex)** |
+| Copy, paste | Cmd+C, Cmd+V **(Alex)** |
 
-- No default uses the Option key, because AeroSpace on Alex's Mac owns Option with letters and numbers. **(my call)**
+- No default uses the Option key with a letter or number, because AeroSpace on Alex's Mac owns those. Cmd+Option+arrows for moving between panes is the one exception. **(my call, the exception is Alex's)**
 - Jumping to a group lands on the tab Alex last used in it. A group's master, if it has one, is tab 1. **(my call)**
 - Reopen closed tab brings back a Claude tab with its chat resumed, and a plain shell as a fresh shell in the same folder. Either way it returns to the same group and the same place, including under its master. **(my call)**
 - A key never puts up a popup (see the anti-goals).
@@ -590,3 +647,49 @@ For Alex's approval. Each line points at the section that holds the detail.
 - The sidebar scrolls as a plain list with no sticky group names ("Tabs").
 - The Claude UI mod (`msg-ui`) is installed by the app once it exists, and the sidebar shares its marks and colors ("Claude UI mod").
 - A setting adds Alex's flags to a typed `claude`, and `claude master` opens the master ("Other agent tools and local models", "Master agent").
+
+## What changed on 2026-11-10
+
+For Alex's approval. The settled values are in `docs/ui-review.md`.
+
+- The sidebar has a faint edge line and a faint hairline above each group; the Mac theme is the default ("What is on screen").
+- No group arrow: the folder icon is the open and closed control ("Tabs").
+- A group header shows folder, branch, session count and a rolled-up blocked marker ("Tabs").
+- Compact rows by default, two-line rows behind `sidebar_rows`; the device filter is a borderless picker ("Tabs").
+- Unfocused panes do not dim by default ("Splits").
+- The working marker is a snowflake that ticks; markers reshape on a state change. Handoff requested and failed are recorded looks ("Session states").
+- Each state can be set to sound, banner, dock badge or nothing ("Alerts").
+- The keys table is final and Cmd+Option+arrows is the one Option exception ("Keys").
+
+## What changed on 2026-11-11
+
+Approved by Alex on 2026-11-11. The full design is in `docs/superpowers/specs/2026-11-11-native-renderer-design.md`.
+
+- The native path is triggered: in same-sitting runs the app typed about 9 ms behind kitty and printed at 22 to 30 MB/s, and a native prototype matched kitty with and without a web sidebar ("Architecture", "Speed evidence").
+- Terminals are drawn by a Rust GPU engine. A plain terminal is the base and the benchmark; the app with the sidebar is built around the same engine. The sidebar stays a web page ("Architecture").
+- The Mac and Windows clients stop being Tauri apps with xterm.js once the app runs on the engine ("Architecture").
+- The phone web app, last in the build order, would keep a web terminal of its own, because the engine does not run in a browser ("Phone", "Build order").
+- The host and its protocol do not change.
+
+### Stage A results (the plain terminal, measured 2026-11-11)
+
+The plain terminal is named Paw (Alex, 2026-11-11); its program is `paw`. Snowflake stays the name of the app with the sidebar. The plan and the result files written before the rename still say `snowflake`.
+
+Two sittings on Alex's Mac, each measuring every terminal in turn: 60 keys per round in three rounds, then three runs of 30 MB of coloured text. Same window size (about 1280 by 800 points), font size 14 and 20,000 lines of scrollback for all. The folders are `tools/keylat/results/stage-a-1` and `tools/keylat/results/stage-a-2`. Numbers compare only within one sitting.
+
+Second sitting (`stage-a-2`):
+
+| Terminal | Typing median | Typing p95 | Backspace median | Output median | Peak memory |
+|---|---|---|---|---|---|
+| Plain terminal (default, `fifo`) | 14.1 ms | 27.5 ms | 13.1 ms | 107.5 MB/s | 200.9 MB |
+| Plain terminal (`immediate`) | 13.5 ms | 25.5 ms | 14.0 ms | 75.3 MB/s | 201.4 MB |
+| kitty | 15.4 ms | 29.6 ms | 15.5 ms | 75.9 MB/s | 230.4 MB |
+| Alacritty 0.17.0 | 14.7 ms | 28.7 ms | 14.6 ms | 78.4 MB/s | 183.9 MB |
+| Ghostty 1.4.0 | 19.3 ms | 32.5 ms | 19.3 ms | 129.8 MB/s | 156.2 MB |
+
+First sitting (`stage-a-1`), plain terminal default against the same three: typing median 14.9 ms (kitty 15.9, Alacritty 15.4, Ghostty 19.2), typing p95 26.8 ms (29.2, 30.2, 35.5), output median 125.0 MB/s (95.1, 87.5, 100.7).
+
+- All six stage rules pass in both sittings (`tools/speed/plain-targets.sh`). The plain terminal draws 0 frames in 5 idle seconds and holds 115 MB when idle.
+- `ratio to kitty: typing 0.94 output 1.31` (first sitting) and `ratio to kitty: typing 0.92 output 1.42` (second). Later stages must not fall behind this: typing at or below kitty's median, output at or above it, in the same sitting.
+- Ghostty prints faster than the plain terminal in the second sitting (129.8 against 107.5 MB/s). On peak memory the plain terminal is third of the four in both sittings: Ghostty and Alacritty both use less, kitty uses more. Output speed and memory are the two places the plain terminal is not first.
+- Limits of these runs: four typing rounds out of thirty were cut short when another app took the front (CotEditor twice in the first sitting, Roblox Studio twice in the second); the keys measured before each cut are kept. The thinnest case is the first sitting, where round 1 gave 8 keys for the default mode and none for `immediate`, so that sitting's two plain medians rest on about two rounds each; the second sitting has 158 and 180 keys. Output runs are a quarter of a second long, so single runs swing widely; the rule uses the median of three. Warp was not measured, because nothing lets a script start a program inside it.

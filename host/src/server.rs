@@ -10,10 +10,11 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use bytes::{Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::spawn_blocking;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_tungstenite::tungstenite::Message;
@@ -41,6 +42,8 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 // A stuck program must not grow the host without limit.
 const MAX_QUEUED_INPUT: usize = 16 * 1024 * 1024;
+// The most output one binary frame carries when waiting chunks are merged.
+const MERGED_OUTPUT_BYTES: usize = 64 * 1024;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 // How often a finished turn is checked for having waited long enough to show as done.
 const STATE_TICK: Duration = Duration::from_millis(250);
@@ -48,7 +51,7 @@ const STATE_TICK: Duration = Duration::from_millis(250);
 const RESTORE_SIZE: Size = Size { cols: 80, rows: 24 };
 
 type Ws = WebSocketStream<TcpStream>;
-type Out = UnboundedSender<Message>;
+type Out = UnboundedSender<Outgoing>;
 /// `Err` is an error frame to send back, which reads better with `?` than building a reply.
 type Answer = Result<Option<HostFrame>, HostFrame>;
 
@@ -210,18 +213,11 @@ fn judge_hello(first: Option<Message>, token: &str) -> Hello {
 }
 
 async fn serve_sessions(ws: Ws, registry: Arc<Registry>) {
-    let (mut sink, mut stream) = ws.split();
+    let (sink, mut stream) = ws.split();
     // Unbounded because unacked bytes are what bound it: a socket that stops reading costs
     // at most the flood limit per session, since no acks arrive.
-    let (out, mut outgoing) = unbounded_channel();
-    let writer = tokio::spawn(async move {
-        while let Some(message) = outgoing.recv().await {
-            if sink.send(message).await.is_err() {
-                return;
-            }
-        }
-        let _ = sink.close().await;
-    });
+    let (out, outgoing) = unbounded_channel();
+    let writer = tokio::spawn(write_out(outgoing, sink));
     let stop_writer = writer.abort_handle();
 
     let mut connection = Connection {
@@ -385,7 +381,8 @@ impl Connection {
         rows: u16,
         place: Place,
     ) -> Answer {
-        let size = checked_size(cols, rows)?;
+        // Still refused here, though the program takes its size from the first attach.
+        checked_size(cols, rows)?;
         let parsed = Uuid::parse_str(&uuid)
             .map_err(|_| HostFrame::error(code::BAD_REQUEST, "uuid does not parse"))?;
         let (kind, kind_name) = match kind.as_str() {
@@ -404,36 +401,37 @@ impl Connection {
             Kind::Claude { chat, .. } => Some(chat),
             Kind::Shell => None,
         };
-        let spec = SpawnSpec {
-            kind,
-            cwd: PathBuf::from(cwd),
-            uuid: parsed,
-            data_dir: self.registry.data_dir.clone(),
-            known_cwd: false,
-        };
-        let cwd = spec.cwd.clone();
+        let cwd = PathBuf::from(cwd);
 
-        // Forking is slow, and looking at a folder can stall on a network mount.
-        let tokens = self.registry.tokens.clone();
-        let spawned = spawn_blocking(move || {
-            let Some(folder) = resolve_dir(&spec.cwd) else {
+        // Looking at a folder can stall on a network mount. The program starts at the first
+        // attach, so the tab shows without waiting for a fork.
+        let looked_at = cwd.clone();
+        let looked = spawn_blocking(move || {
+            let Some(folder) = resolve_dir(&looked_at) else {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
             };
-            let project = project::resolve(&folder);
-            Ok((start_program(spec, size, &tokens)?, project))
+            Ok(project::resolve(&folder))
         })
         .await;
-        let (running, project) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
+        let project = looked.unwrap_or_else(|_| Err(start_failed()))?;
 
-        // The pane goes in before the session is listed. Its folders and exits reach the tree
-        // only through the registry, so none can arrive before there is a pane for them.
         let shell = kind_name == "shell";
-        lock(&self.registry.tree).add_session_in(&uuid, place, &project, shell);
-        let served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
-        let _ = served.running.set(running);
-        let session = self.registry.add(served);
+        let mut served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
+        served.fresh = true;
+        {
+            // Held so a tree pushed from elsewhere, which may already show the pane, cannot
+            // reach this client before `created`.
+            let _watchers = lock(&self.registry.watchers);
+            // The pane goes in before the session is listed. Its folders and exits reach the
+            // tree only through the registry, so none can arrive before there is a pane for
+            // them.
+            lock(&self.registry.tree).add_session_in(&uuid, place, &project, shell);
+            let session = self.registry.add(served);
+            hand_text(&self.out, &HostFrame::Created { session, uuid });
+        }
+        // After `created`, so the client holds the session number when the tree arrives.
         self.registry.push_tree();
-        Ok(Some(HostFrame::Created { session, uuid }))
+        Ok(None)
     }
 
     async fn attach(&mut self, session: u32, cols: u16, rows: u16) -> Answer {
@@ -441,13 +439,20 @@ impl Connection {
         let served = self.registry.get(session).ok_or_else(no_session)?;
         self.drop_attachment(session);
         if served.running.get().is_none() {
-            // A restored Claude session starts here, so a reboot does not start every chat at
-            // once.
+            // A new session starts here, so its tab shows without waiting for a fork. So does
+            // a restored Claude session, so a reboot does not start every chat at once.
             let starting = Arc::clone(&served);
-            let data_dir = self.registry.data_dir.clone();
-            let tokens = self.registry.tokens.clone();
-            let started = spawn_blocking(move || starting.start(size, &data_dir, &tokens)).await;
-            started.unwrap_or_else(|_| Err(start_failed()))?;
+            let registry = Arc::clone(&self.registry);
+            let started = spawn_blocking(move || starting.start(size, &registry)).await;
+            if let Err(error) = started.unwrap_or_else(|_| Err(start_failed())) {
+                // Nothing saved calls for a new session, so one that cannot start leaves its
+                // tab. A restored one stays, and its next attach tries again. One killed while
+                // it started is gone already, and this attach leaves nothing behind.
+                if served.fresh {
+                    let _ = self.registry.kill(session);
+                }
+                return Err(error);
+            }
         }
         let running = served.running()?;
 
@@ -531,8 +536,10 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
         out,
         wanted,
     } = pumped;
+    // An event that was waiting but could not join merged output. It goes next.
+    let mut pending = None;
     loop {
-        let event = events.recv();
+        let event = pending.take().map_or_else(|| events.recv(), Ok);
         let mut wanted = lock(&wanted);
         if !*wanted {
             return;
@@ -545,9 +552,13 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
                     snapshot_bytes,
                 };
                 hand_text(&out, &attached);
-                hand_binary(&out, session, &bytes);
+                hand_snapshot(&out, session, &bytes);
             }
-            Ok(ClientEvent::Output(bytes)) => hand_binary(&out, session, &bytes),
+            Ok(ClientEvent::Output(bytes)) => {
+                let (merged, next) = merge_waiting(bytes, || events.try_recv().ok());
+                pending = next;
+                hand_output(&out, session, &merged);
+            }
             Ok(ClientEvent::Title(title)) => {
                 hand_text(&out, &HostFrame::Title { session, title });
             }
@@ -579,12 +590,125 @@ fn pump_events(pumped: Pumped, events: Receiver<ClientEvent>) {
     }
 }
 
+/// Adds the output already waiting behind `first` to it, so a burst costs the client one frame
+/// per `MERGED_OUTPUT_BYTES` rather than one per terminal read. `next` must only take what is
+/// already there, never wait, so a lone chunk such as a key's echo goes out at once and as it
+/// is. Returns the first waiting event that could not join, which must be handled next.
+/// Acks count bytes, not frames, so merging leaves them as they were.
+fn merge_waiting(
+    first: Bytes,
+    mut next: impl FnMut() -> Option<ClientEvent>,
+) -> (Bytes, Option<ClientEvent>) {
+    let mut merged: Option<BytesMut> = None;
+    let mut len = first.len();
+    loop {
+        match next() {
+            Some(ClientEvent::Output(chunk)) if len + chunk.len() <= MERGED_OUTPUT_BYTES => {
+                len += chunk.len();
+                merged
+                    .get_or_insert_with(|| {
+                        let mut merged = BytesMut::with_capacity(MERGED_OUTPUT_BYTES);
+                        merged.extend_from_slice(&first);
+                        merged
+                    })
+                    .extend_from_slice(&chunk);
+            }
+            other => return (merged.map_or(first, BytesMut::freeze), other),
+        }
+    }
+}
+
+/// What goes to a connection's writer task. Output is kept apart from frames that are
+/// already built, so the writer merges a session's output and nothing else.
+#[derive(Debug)]
+enum Outgoing {
+    /// Sent as it is: text frames and snapshots.
+    Frame(Message),
+    /// A session's output, already encoded as a binary frame.
+    Output { session: u32, frame: Bytes },
+}
+
+impl Outgoing {
+    fn output(session: u32, bytes: &[u8]) -> Outgoing {
+        let frame = Bytes::from(encode_binary(session, bytes));
+        Outgoing::Output { session, frame }
+    }
+}
+
+/// Takes a connection's outgoing frames to its socket until every sender is gone, then closes
+/// it. Output that piled up while the socket was busy goes out merged, so a slow client pays
+/// per `MERGED_OUTPUT_BYTES` rather than per terminal read. Flushes after every frame.
+async fn write_out<S: Sink<Message> + Unpin>(
+    mut outgoing: UnboundedReceiver<Outgoing>,
+    mut sink: S,
+) {
+    // A frame that was waiting but could not join merged output. It goes next.
+    let mut held = None;
+    loop {
+        let first = match held.take() {
+            Some(first) => first,
+            None => match outgoing.recv().await {
+                Some(first) => first,
+                None => break,
+            },
+        };
+        let (message, next) = merge_outgoing(first, || outgoing.try_recv().ok());
+        held = next;
+        if sink.send(message).await.is_err() {
+            return;
+        }
+    }
+    let _ = sink.close().await;
+}
+
+/// Adds the same session's output already waiting behind `first` to it, up to
+/// `MERGED_OUTPUT_BYTES` of payload. `next` must only take what is already there, never wait,
+/// so a lone frame such as a key's echo goes out at once and without a copy. Returns the
+/// first waiting frame that could not join, which must be sent next. Acks count payload
+/// bytes, not frames, so merging leaves them as they were.
+fn merge_outgoing(
+    first: Outgoing,
+    mut next: impl FnMut() -> Option<Outgoing>,
+) -> (Message, Option<Outgoing>) {
+    let (session, first) = match first {
+        Outgoing::Frame(message) => return (message, None),
+        Outgoing::Output { session, frame } => (session, frame),
+    };
+    // The session number that starts every binary frame.
+    let header = mem::size_of::<u32>();
+    let mut merged: Option<BytesMut> = None;
+    let mut len = first.len() - header;
+    loop {
+        match next() {
+            Some(Outgoing::Output {
+                session: from,
+                frame,
+            }) if from == session && len + frame.len() - header <= MERGED_OUTPUT_BYTES => {
+                len += frame.len() - header;
+                merged
+                    .get_or_insert_with(|| {
+                        let mut merged = BytesMut::with_capacity(header + MERGED_OUTPUT_BYTES);
+                        merged.extend_from_slice(&first);
+                        merged
+                    })
+                    .extend_from_slice(&frame[header..]);
+            }
+            other => {
+                let frame = merged.map_or(first, BytesMut::freeze);
+                return (Message::Binary(frame), other);
+            }
+        }
+    }
+}
+
 /// Everything the host serves, shared by all connections. The locks only cover quick
 /// lookups, so they are safe to take on the async runtime.
 ///
 /// Lock order: `watchers` before `tree`, and only to copy the tree. `tree` is otherwise held
 /// alone, and only for work in memory: folders are resolved before it is taken, and it is
-/// never held while calling into a session, sending to a client or saving.
+/// never held while calling into a session, sending to a client or saving. `sessions` comes
+/// after `watchers` and after a session's `starting` gate, and under it only a session's `cwd`,
+/// which is always held alone, is taken.
 struct Registry {
     last_session: AtomicU32,
     sessions: Mutex<HashMap<u32, Arc<Served>>>,
@@ -635,7 +759,8 @@ impl Registry {
         drop(removed);
     }
 
-    /// A restored Claude session that has not started yet reports a size of 0 by 0.
+    /// A session that has not started yet reports a size of 0 by 0, and the folder it is to
+    /// start in, so a tab or split opened from it starts there too.
     fn items(&self) -> Vec<SessionItem> {
         let sessions = lock(&self.sessions);
         let mut items: Vec<SessionItem> = sessions
@@ -650,9 +775,13 @@ impl Registry {
                     uuid: served.uuid.clone(),
                     kind: served.kind.to_string(),
                     title: served.title(status.as_ref()),
-                    cwd: status
-                        .as_ref()
-                        .and_then(|status| status.cwd.as_ref()?.to_str().map(String::from)),
+                    cwd: match &status {
+                        Some(status) => status
+                            .cwd
+                            .as_ref()
+                            .and_then(|cwd| cwd.to_str().map(String::from)),
+                        None => lock(&served.cwd).to_str().map(String::from),
+                    },
                     exited: status.and_then(|status| status.exited),
                     cols: size.cols,
                     rows: size.rows,
@@ -672,9 +801,21 @@ impl Registry {
             self.push_tree();
         }
         self.forget(&served);
-        let Some(running) = served.running.get() else {
-            self.remove(session);
-            return Ok(());
+        // Under the lock `start` checks `kill_asked` and stores `running` under, so a start in
+        // progress either sees this kill and ends its program itself, or has stored `running`
+        // already and the program is ended below.
+        let running = {
+            let mut sessions = lock(&self.sessions);
+            match served.running.get() {
+                Some(running) => running,
+                None => {
+                    served.kill_asked.store(true, Ordering::SeqCst);
+                    let removed = sessions.remove(&session);
+                    drop(sessions);
+                    drop(removed);
+                    return Ok(());
+                }
+            }
         };
         if running.handle.status().exited.is_some() {
             self.remove(session);
@@ -734,8 +875,7 @@ impl Registry {
         let session = self.add(served);
         if shell
             && let Some(served) = self.get(session)
-            && let Err(HostFrame::Error { message, .. }) =
-                served.start(RESTORE_SIZE, &self.data_dir, &self.tokens)
+            && let Err(HostFrame::Error { message, .. }) = served.start(RESTORE_SIZE, self)
         {
             // Stays listed, and its first attach tries again.
             eprintln!("term-host: could not restore a shell: {message}");
@@ -817,7 +957,16 @@ impl Registry {
             return;
         };
         let ended = event == HookEvent::End;
-        let change = lock(&self.states).on_event(session, event, std::time::Instant::now());
+        let change = {
+            let mut states = lock(&self.states);
+            // Checked again under the states lock: `forget` stops a session's token before it
+            // clears its state under this lock, so a call for a session that ended since it was
+            // read cannot bring back a state nothing would clear.
+            if !self.tokens.matches(session, &request.token) {
+                return;
+            }
+            states.on_event(session, event, std::time::Instant::now())
+        };
         if change.changed {
             self.push_states();
         }
@@ -1142,9 +1291,11 @@ struct Served {
     cwd: Mutex<PathBuf>,
     /// Saved before a restart, and shown until the program sets a title of its own.
     saved_title: Option<String>,
-    /// Empty only for a restored session that has not started yet.
+    /// Empty until the session starts: a new one or a restored Claude one at its first attach.
     running: OnceLock<Running>,
     starting: Mutex<()>,
+    /// Made by `create`. If its start fails it goes, since nothing saved calls for it.
+    fresh: bool,
     kill_asked: AtomicBool,
     /// The last folder passed to the tree.
     seen_cwd: Mutex<Option<PathBuf>>,
@@ -1179,6 +1330,7 @@ impl Served {
             saved_title,
             running: OnceLock::new(),
             starting: Mutex::new(()),
+            fresh: false,
             kill_asked: AtomicBool::new(false),
             seen_cwd: Mutex::new(None),
             seen_exit: AtomicBool::new(false),
@@ -1218,13 +1370,19 @@ impl Served {
             .or_else(|| self.saved_title.clone())
     }
 
-    /// Starts a restored session, in its saved folder or the home folder if that is gone. A
-    /// Claude chat resumes only if it has a transcript, since one that never got a first
-    /// message cannot be resumed and starts fresh with the same id. Blocks.
-    fn start(&self, size: Size, data_dir: &Path, tokens: &Tokens) -> Result<(), HostFrame> {
+    /// Starts a new or restored session, in its folder or the home folder if that is gone. A
+    /// restored Claude chat resumes only if it has a transcript, since one that never got a
+    /// first message cannot be resumed and starts fresh with the same id. One killed while it
+    /// starts ends its program here and answers that the session is gone. Blocks.
+    fn start(&self, size: Size, registry: &Registry) -> Result<(), HostFrame> {
         let _gate = lock(&self.starting);
         if self.running.get().is_some() {
             return Ok(());
+        }
+        // A session killed before it started, or a new one whose start failed, is on its way
+        // out, so an attach that waited on the gate must not start it after all.
+        if self.kill_asked.load(Ordering::Relaxed) {
+            return Err(no_session());
         }
         let wanted = lock(&self.cwd).clone();
         let cwd = if wanted.is_dir() {
@@ -1235,20 +1393,53 @@ impl Served {
         let kind = match self.chat {
             Some(chat) => Kind::Claude {
                 chat,
-                resume: state::transcript_exists(chat),
+                // A new chat never resumes.
+                resume: !self.fresh && state::transcript_exists(chat),
             },
             None => Kind::Shell,
         };
         *lock(&self.cwd) = cwd.clone();
         let spec = SpawnSpec {
-            known_cwd: kind == Kind::Shell,
+            // A new shell's folder comes from its hook at the first prompt, as the client
+            // already knows where it asked for it.
+            known_cwd: kind == Kind::Shell && !self.fresh,
             kind,
             cwd,
             uuid: self.id,
-            data_dir: data_dir.to_path_buf(),
+            data_dir: registry.data_dir.clone(),
         };
-        let _ = self.running.set(start_program(spec, size, tokens)?);
-        Ok(())
+        let running = match start_program(spec, size, &registry.tokens) {
+            Ok(running) => running,
+            Err(error) => {
+                if self.fresh {
+                    self.kill_asked.store(true, Ordering::Relaxed);
+                }
+                return Err(error);
+            }
+        };
+        // `kill` looks at `running` and sets `kill_asked` under this same lock, so a kill lands
+        // either before the check, and is seen here, or after the store, and finds the program
+        // to end. Held for the check and the store only, never the fork. Taken under the
+        // `starting` gate, the order the registry documents.
+        let refused = {
+            let _sessions = lock(&registry.sessions);
+            if self.kill_asked.load(Ordering::SeqCst) {
+                Some(running)
+            } else {
+                let _ = self.running.set(running);
+                None
+            }
+        };
+        let Some(running) = refused else {
+            return Ok(());
+        };
+        // Nothing else will end it: the session left the registry before it had a program.
+        running.handle.kill();
+        let uuid = self.id.to_string();
+        if registry.tokens.matches(&uuid, &running.token) {
+            registry.tokens.remove(&uuid);
+        }
+        Err(no_session())
     }
 
     /// What to save, or None if the session should not come back: it was closed with `kill`,
@@ -1401,12 +1592,19 @@ fn no_session() -> HostFrame {
 // The writer task only goes away with the connection, when nobody is left to tell.
 fn hand_text(out: &Out, frame: &HostFrame) {
     if let Ok(text) = serde_json::to_string(frame) {
-        let _ = out.send(Message::text(text));
+        let _ = out.send(Outgoing::Frame(Message::text(text)));
     }
 }
 
-fn hand_binary(out: &Out, session: u32, bytes: &[u8]) {
-    let _ = out.send(Message::binary(encode_binary(session, bytes)));
+fn hand_output(out: &Out, session: u32, bytes: &[u8]) {
+    let _ = out.send(Outgoing::output(session, bytes));
+}
+
+/// Never merged with output, since the client takes it whole as the screen.
+fn hand_snapshot(out: &Out, session: u32, bytes: &[u8]) {
+    let _ = out.send(Outgoing::Frame(Message::binary(encode_binary(
+        session, bytes,
+    ))));
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1421,4 +1619,317 @@ async fn send_frame(ws: &mut Ws, frame: &HostFrame) -> Result<()> {
 
 async fn close(ws: &mut Ws) {
     let _ = timeout(CLOSE_TIMEOUT, ws.close(None)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn output(text: &str) -> ClientEvent {
+        ClientEvent::Output(Bytes::copy_from_slice(text.as_bytes()))
+    }
+
+    /// What a client is handed for `queued`, everything already waiting, the way
+    /// `pump_events` takes it.
+    fn pump(queued: Vec<ClientEvent>) -> Vec<ClientEvent> {
+        let mut queue = VecDeque::from(queued);
+        let mut handed = Vec::new();
+        let mut pending = None;
+        while let Some(event) = pending.take().or_else(|| queue.pop_front()) {
+            match event {
+                ClientEvent::Output(bytes) => {
+                    let (merged, next) = merge_waiting(bytes, || queue.pop_front());
+                    pending = next;
+                    handed.push(ClientEvent::Output(merged));
+                }
+                other => handed.push(other),
+            }
+        }
+        handed
+    }
+
+    fn payloads(handed: &[ClientEvent]) -> Vec<Vec<u8>> {
+        handed
+            .iter()
+            .map(|event| match event {
+                ClientEvent::Output(bytes) => bytes.to_vec(),
+                other => panic!("expected output, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lone_chunk_goes_out_as_it_is() {
+        let chunk = Bytes::from_static(b"a");
+        let mut asked = 0;
+        let (merged, next) = merge_waiting(chunk.clone(), || {
+            asked += 1;
+            None
+        });
+        assert_eq!(merged, chunk);
+        assert_eq!(
+            merged.as_ptr(),
+            chunk.as_ptr(),
+            "a lone chunk is not copied"
+        );
+        assert_eq!(next, None);
+        assert_eq!(asked, 1, "only one look at the queue, never a wait");
+    }
+
+    #[test]
+    fn queued_chunks_go_out_as_one_frame_in_order() {
+        let handed = pump(vec![output("one "), output("two "), output("three")]);
+        assert_eq!(payloads(&handed), vec![b"one two three".to_vec()]);
+    }
+
+    #[test]
+    fn merged_frame_stays_within_the_cap() {
+        // A macOS terminal read is about 1013 bytes.
+        let input: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let queued = input
+            .chunks(1013)
+            .map(|chunk| ClientEvent::Output(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let chunks = queued.len();
+        let frames = payloads(&pump(queued));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() <= MERGED_OUTPUT_BYTES),
+            "a frame went over {MERGED_OUTPUT_BYTES} bytes"
+        );
+        assert_eq!(frames.concat(), input);
+        // Every frame but the last stopped only because the next read would not fit, so it
+        // holds more than the cap less one read.
+        let most = input.len().div_ceil(MERGED_OUTPUT_BYTES - 1013);
+        assert!(
+            frames.len() <= most,
+            "{} frames for {chunks} chunks, wanted at most {most}",
+            frames.len()
+        );
+    }
+
+    #[test]
+    fn chunk_that_would_go_over_waits_for_the_next_frame() {
+        let full = "x".repeat(MERGED_OUTPUT_BYTES - 1);
+        let handed = pump(vec![output(&full), output("ab"), output("c")]);
+        assert_eq!(payloads(&handed), vec![full.into_bytes(), b"abc".to_vec()]);
+    }
+
+    #[test]
+    fn other_events_keep_their_place() {
+        let title = ClientEvent::Title("t".to_string());
+        let cwd = ClientEvent::Cwd(PathBuf::from("/tmp"));
+        let exited = ClientEvent::Exited {
+            clean: true,
+            signal: None,
+        };
+        let handed = pump(vec![
+            output("a"),
+            output("b"),
+            title.clone(),
+            output("c"),
+            cwd.clone(),
+            cwd.clone(),
+            output("d"),
+            output("e"),
+            exited.clone(),
+        ]);
+        assert_eq!(
+            handed,
+            vec![
+                output("ab"),
+                title,
+                output("c"),
+                cwd.clone(),
+                cwd,
+                output("de"),
+                exited,
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_is_never_merged() {
+        let snapshot = ClientEvent::Snapshot(Bytes::from_static(b"screen"));
+        let handed = pump(vec![snapshot.clone(), output("a"), output("b")]);
+        assert_eq!(handed, vec![snapshot, output("ab")]);
+    }
+
+    fn queued_output(session: u32, bytes: &[u8]) -> Outgoing {
+        Outgoing::output(session, bytes)
+    }
+
+    fn queued_text(text: &str) -> Outgoing {
+        Outgoing::Frame(Message::text(text))
+    }
+
+    fn queued_snapshot(session: u32, bytes: &[u8]) -> Outgoing {
+        Outgoing::Frame(Message::binary(encode_binary(session, bytes)))
+    }
+
+    fn binary(session: u32, bytes: &[u8]) -> Message {
+        Message::binary(encode_binary(session, bytes))
+    }
+
+    /// What the socket is sent for `queued`, everything already waiting when the writer
+    /// starts and the channel closed behind it.
+    async fn written(queued: Vec<Outgoing>) -> Vec<Message> {
+        let (out, outgoing) = unbounded_channel();
+        for message in queued {
+            out.send(message).expect("queue a message");
+        }
+        drop(out);
+        let mut sent = Vec::new();
+        let sink = futures_util::sink::unfold(&mut sent, |sent, message| async move {
+            sent.push(message);
+            Ok::<_, std::convert::Infallible>(sent)
+        });
+        write_out(outgoing, std::pin::pin!(sink)).await;
+        sent
+    }
+
+    #[test]
+    fn lone_output_goes_to_the_socket_as_it_is() {
+        let lone = queued_output(3, b"a");
+        let Outgoing::Output { frame, .. } = &lone else {
+            panic!("expected output");
+        };
+        let at = frame.as_ptr();
+        let mut asked = 0;
+        let (message, next) = merge_outgoing(lone, || {
+            asked += 1;
+            None
+        });
+        assert_eq!(message, binary(3, b"a"));
+        let Message::Binary(sent) = &message else {
+            panic!("expected a binary frame");
+        };
+        assert_eq!(sent.as_ptr(), at, "a lone frame is not copied");
+        assert!(next.is_none());
+        assert_eq!(asked, 1, "only one look at the queue, never a wait");
+    }
+
+    #[tokio::test]
+    async fn waiting_output_goes_to_the_socket_as_one_frame_in_order() {
+        let sent = written(vec![
+            queued_output(1, b"one "),
+            queued_output(1, b"two "),
+            queued_output(1, b"three"),
+        ])
+        .await;
+        assert_eq!(sent, vec![binary(1, b"one two three")]);
+    }
+
+    #[tokio::test]
+    async fn socket_frame_may_hold_exactly_the_cap() {
+        let first = vec![b'x'; MERGED_OUTPUT_BYTES - 1];
+        let sent = written(vec![queued_output(1, &first), queued_output(1, b"y")]).await;
+        let mut whole = first;
+        whole.push(b'y');
+        assert_eq!(sent, vec![binary(1, &whole)]);
+    }
+
+    #[tokio::test]
+    async fn output_one_byte_over_the_cap_goes_in_the_next_socket_frame() {
+        let first = vec![b'x'; MERGED_OUTPUT_BYTES - 1];
+        let sent = written(vec![
+            queued_output(1, &first),
+            queued_output(1, b"ab"),
+            queued_output(1, b"c"),
+        ])
+        .await;
+        assert_eq!(sent, vec![binary(1, &first), binary(1, b"abc")]);
+    }
+
+    #[tokio::test]
+    async fn text_between_outputs_keeps_its_place_on_the_socket() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_output(1, b"b"),
+            queued_text("title"),
+            queued_output(1, b"c"),
+            queued_text("cwd"),
+            queued_text("exited"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![
+                binary(1, b"ab"),
+                Message::text("title"),
+                binary(1, b"c"),
+                Message::text("cwd"),
+                Message::text("exited"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_never_share_a_socket_frame() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_output(2, b"b"),
+            queued_output(2, b"c"),
+            queued_output(1, b"d"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![binary(1, b"a"), binary(2, b"bc"), binary(1, b"d")]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_never_joins_a_socket_frame() {
+        let sent = written(vec![
+            queued_output(1, b"a"),
+            queued_snapshot(1, b"screen"),
+            queued_output(1, b"b"),
+            queued_output(1, b"c"),
+        ])
+        .await;
+        assert_eq!(
+            sent,
+            vec![binary(1, b"a"), binary(1, b"screen"), binary(1, b"bc")]
+        );
+    }
+
+    #[tokio::test]
+    async fn burst_goes_to_the_socket_whole_within_the_cap() {
+        let input: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let queued = input
+            .chunks(1013)
+            .map(|chunk| queued_output(5, chunk))
+            .collect::<Vec<_>>();
+        let chunks = queued.len();
+        let sent = written(queued).await;
+        let payloads: Vec<&[u8]> = sent
+            .iter()
+            .map(|message| match message {
+                Message::Binary(frame) => {
+                    let (session, bytes) = decode_binary(frame).expect("a session number");
+                    assert_eq!(session, 5);
+                    bytes
+                }
+                other => panic!("expected output, got {other:?}"),
+            })
+            .collect();
+        assert!(
+            payloads
+                .iter()
+                .all(|bytes| bytes.len() <= MERGED_OUTPUT_BYTES),
+            "a frame went over {MERGED_OUTPUT_BYTES} bytes"
+        );
+        assert_eq!(payloads.concat(), input);
+        // Every frame but the last stopped only because the next read would not fit, so it
+        // holds more than the cap less one read.
+        let most = input.len().div_ceil(MERGED_OUTPUT_BYTES - 1013);
+        assert!(
+            payloads.len() <= most,
+            "{} frames for {chunks} chunks, wanted at most {most}",
+            payloads.len()
+        );
+    }
 }

@@ -6,15 +6,55 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 
 import type { Connection, SessionListener } from "./connection";
+import { followLeftOption } from "./option-key";
 import { fontFamily, fontSize, lineHeight, theme } from "./theme";
+import { ZOOM_DEFAULT, spacingFor } from "./zoom";
 
 const ACK_BYTES = 128 * 1024;
 const ACK_QUIET_MS = 100;
 const REATTACH_PAUSE_MS = 1000;
+// Each fit re-wraps the whole buffer and each host resize makes the program redraw, so a drag
+// does both once, for the size it ends on, and a held zoom key resizes the host once.
+const RESIZE_SETTLE_MS = 100;
 const SHIFT_ENTER = "\x1b\r";
+// What Cmd or Option with a line-editing key sends, as kitty and iTerm do on a Mac.
+const CMD_BACKSPACE = "\x15";
+const CMD_LEFT = "\x01";
+const CMD_RIGHT = "\x05";
+const CMD_DELETE = "\x0b";
+const CMD_Z = "\x1f";
+const OPTION_LEFT = "\x1bb";
+const OPTION_RIGHT = "\x1bf";
+const OPTION_BACKSPACE = "\x1b\x7f";
+const OPTION_DELETE = "\x1bd";
+// Ctrl+L, so the shell draws its prompt again on the cleared screen.
+const REDRAW = "\x0c";
 // Full reset through the write queue, so it lands after output still waiting to be parsed.
 const FULL_RESET = "\x1bc";
 const STOPPED_LINE = "\r\n\x1b[2mThe program stopped unexpectedly.\x1b[0m\r\n";
+
+export type Renderer = "webgl" | "dom";
+
+// The natural cell width at 14 px in CSS pixels, from the stage 1 handoff (16.8 device pixels at
+// ratio 2), for when the font cannot be measured.
+const REFERENCE_CELL_CSS = 8.4;
+let measureCanvas: HTMLCanvasElement | undefined;
+
+/** The terminal font's natural cell width at 14 px in device pixels, before xterm rounds it. */
+function referenceCellWidth(): number {
+  try {
+    measureCanvas ??= document.createElement("canvas");
+    const context = measureCanvas.getContext("2d");
+    if (context) {
+      context.font = `${ZOOM_DEFAULT}px ${fontFamily}`;
+      const width = context.measureText("W").width;
+      if (width > 0) return width * devicePixelRatio;
+    }
+  } catch {
+    // Falls back to the measured value below.
+  }
+  return REFERENCE_CELL_CSS * devicePixelRatio;
+}
 
 export type TerminalViewEvents = {
   /** The selection changed to this non-empty text. */
@@ -47,10 +87,21 @@ export class TerminalView {
   private readonly fitAddon = new FitAddon();
   private readonly observer: ResizeObserver;
   private readonly subscriptions: { dispose(): void }[] = [];
+  private readonly stopOption: () => void;
+  private readonly renderer: Renderer;
+  private webgl: WebglAddon | undefined;
 
   private connection: Connection | undefined;
   private session = 0;
   private fitFrame = 0;
+  // The size the host has, and a fit waiting for a drag to stop.
+  private sentCols = 0;
+  private sentRows = 0;
+  private resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  // No box seen yet, or parked (no box) at the last one; the next size fits at once.
+  private parked = true;
+  // A fit waiting for the next frame must also send the size then, not after the settle.
+  private sendInFrame = false;
 
   // Bumped per attachment, so a write finishing late cannot count toward a newer total.
   private generation = 0;
@@ -61,18 +112,29 @@ export class TerminalView {
   private attachedAt = 0;
   private reattachTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(parent: HTMLElement, events: TerminalViewEvents) {
+  /**
+   * `renderer` is for speed runs: `dom` leaves out WebGL, so xterm draws with the DOM. `fontPx`
+   * is the zoomed text size, so a new terminal opens at the saved size.
+   */
+  constructor(
+    parent: HTMLElement,
+    events: TerminalViewEvents,
+    renderer: Renderer = "webgl",
+    fontPx: number = fontSize,
+  ) {
     this.parent = parent;
     this.events = events;
+    this.renderer = renderer;
     this.term = new Terminal({
       allowProposedApi: true,
       cursorStyle: "bar",
       cursorBlink: false,
       drawBoldTextInBrightColors: false,
       fontFamily,
-      fontSize,
-      // xterm rounds a glyph's width down and kitty rounds it up. One device pixel matches kitty.
-      letterSpacing: 1,
+      fontSize: fontPx,
+      // xterm rounds a glyph's width down and kitty rounds it up. The spacing makes up the
+      // difference at each size: one device pixel at 14 px.
+      letterSpacing: spacingFor(fontPx, referenceCellWidth()),
       lineHeight,
       scrollback: 20000,
       theme,
@@ -82,7 +144,16 @@ export class TerminalView {
     this.term.unicode.activeVersion = "11";
     this.term.attachCustomKeyEventHandler(this.onKey);
     this.term.open(parent);
-    this.loadWebgl();
+    // Without these, macOS offers corrections and writing suggestions over the terminal.
+    const textarea = this.term.textarea;
+    if (textarea) {
+      textarea.setAttribute("autocorrect", "off");
+      textarea.setAttribute("autocapitalize", "off");
+      textarea.setAttribute("autocomplete", "off");
+      textarea.setAttribute("writingsuggestions", "false");
+      textarea.spellcheck = false;
+    }
+    if (renderer === "webgl") this.loadWebgl();
 
     this.subscriptions.push(
       this.term.onData((data) => this.connection?.sendInput(this.session, data)),
@@ -93,13 +164,12 @@ export class TerminalView {
       }),
     );
 
-    // Capture, so xterm sees the new setting on the same key press that follows.
-    window.addEventListener("keydown", this.onWindowKeyDown, true);
-    window.addEventListener("keyup", this.onWindowKeyUp, true);
-    window.addEventListener("blur", this.onWindowBlur);
+    this.stopOption = followLeftOption((meta) => {
+      this.term.options.macOptionIsMeta = meta;
+    });
 
     this.fitAddon.fit();
-    this.observer = new ResizeObserver(this.fitSoon);
+    this.observer = new ResizeObserver(this.onResize);
     this.observer.observe(parent);
   }
 
@@ -119,6 +189,11 @@ export class TerminalView {
     this.session = session;
     this.startCounting();
     this.attachedAt = performance.now();
+    // The attach carries the size, so nothing waiting needs to follow it.
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = undefined;
+    this.sentCols = this.term.cols;
+    this.sentRows = this.term.rows;
     return connection.attach(session, this.term.cols, this.term.rows, this.listener);
   }
 
@@ -133,16 +208,58 @@ export class TerminalView {
     this.term.focus();
   }
 
+  /** Text zoom. The view fits each step; the host hears the size once the steps stop. */
+  setFontSize(px: number): void {
+    if (this.term.options.fontSize === px) return;
+    this.term.options.letterSpacing = spacingFor(px, referenceCellWidth());
+    this.term.options.fontSize = px;
+    this.fitSoon(false);
+  }
+
+  /** Whether the view draws with WebGL now. */
+  webglOn(): boolean {
+    return this.webgl !== undefined;
+  }
+
+  /**
+   * Loads or drops the view's WebGL context. Panes keeps only a few live (WEBGL_CAP); without one
+   * xterm draws with the DOM. With the `dom` renderer there is never one.
+   */
+  setWebgl(on: boolean): void {
+    if (!on) {
+      this.dropWebgl();
+    } else if (!this.webgl && this.renderer === "webgl") {
+      this.loadWebgl();
+    }
+  }
+
+  /** Only used with the `dim` setting on: the pane drops to 58 percent (styles.css). */
+  setDimmed(on: boolean): void {
+    this.parent.classList.toggle("dim", on);
+  }
+
+  /** One cell in CSS pixels, read from the drawn screen. Only for a divider drag ending. */
+  cellSize(): { width: number; height: number } {
+    const screen = this.term.element?.querySelector<HTMLElement>(".xterm-screen");
+    const rect = screen?.getBoundingClientRect();
+    if (rect && rect.width > 0 && this.term.cols > 0 && this.term.rows > 0) {
+      return { width: rect.width / this.term.cols, height: rect.height / this.term.rows };
+    }
+    const px = this.term.options.fontSize ?? fontSize;
+    return { width: px * 0.6, height: px * lineHeight };
+  }
+
   dispose(): void {
     this.connection = undefined;
     this.startCounting();
     cancelAnimationFrame(this.fitFrame);
+    clearTimeout(this.resizeTimer);
     clearTimeout(this.reattachTimer);
     this.observer.disconnect();
-    window.removeEventListener("keydown", this.onWindowKeyDown, true);
-    window.removeEventListener("keyup", this.onWindowKeyUp, true);
-    window.removeEventListener("blur", this.onWindowBlur);
+    this.stopOption();
     for (const subscription of this.subscriptions) subscription.dispose();
+    // Disposing the terminal disposes the addon too.
+    this.webgl = undefined;
     this.term.dispose();
     this.parent.replaceChildren();
   }
@@ -217,26 +334,85 @@ export class TerminalView {
     }
   }
 
-  private readonly fitSoon = (): void => {
+  // Window, sidebar and divider drags all reach here. While the size keeps changing the grid stays
+  // as it is, top-left and clipped by the pane, as kitty does: a fit per frame wrapped the buffer
+  // for sizes the program never drew for.
+  private readonly onResize = (entries: ResizeObserverEntry[]): void => {
+    const box = entries[entries.length - 1]?.contentRect;
+    const parked = !box || box.width === 0 || box.height === 0;
+    const shown = this.parked && !parked;
+    this.parked = parked;
+    if (shown) {
+      this.fitSoon(true);
+      return;
+    }
+    clearTimeout(this.resizeTimer);
+    // A parked pane fits when it is shown again.
+    this.resizeTimer = parked ? undefined : setTimeout(this.fitNow, RESIZE_SETTLE_MS);
+  };
+
+  // The first size, a pane shown again and a zoom fit in the next frame, without waiting. The
+  // first two tell the program in that frame too; a zoom leaves that to the settle wait.
+  private fitSoon(sendAtOnce: boolean): void {
+    if (sendAtOnce) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = undefined;
+      this.sendInFrame = true;
+    }
     if (this.fitFrame) return;
-    this.fitFrame = requestAnimationFrame(() => {
-      this.fitFrame = 0;
-      const { cols, rows } = this.term;
-      this.fitAddon.fit();
-      if (this.term.cols !== cols || this.term.rows !== rows) {
-        this.connection?.resize(this.session, this.term.cols, this.term.rows);
-      }
-    });
+    this.fitFrame = requestAnimationFrame(this.fitInFrame);
+  }
+
+  private readonly fitInFrame = (): void => {
+    this.fitFrame = 0;
+    if (this.sendInFrame) {
+      this.sendInFrame = false;
+      this.fitNow();
+      return;
+    }
+    // A held zoom key steps about 30 times a second: the view follows each step, the program is
+    // told once they stop, so the shell does not redraw at the key repeat rate.
+    this.fitAddon.fit();
+    const { cols, rows } = this.term;
+    if (!this.connection || this.parked || (cols === this.sentCols && rows === this.sentRows)) return;
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(this.fitNow, RESIZE_SETTLE_MS);
+  };
+
+  // xterm and the program change size in the same step. A fit in the frame also takes a wait
+  // started since, as it measures the latest size.
+  private readonly fitNow = (): void => {
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = undefined;
+    this.fitAddon.fit();
+    const { cols, rows } = this.term;
+    if (!this.connection || (cols === this.sentCols && rows === this.sentRows)) return;
+    this.sentCols = cols;
+    this.sentRows = rows;
+    this.connection.resize(this.session, cols, rows);
   };
 
   private loadWebgl(): void {
     try {
       const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
+      webgl.onContextLoss(() => {
+        if (this.webgl !== webgl) return;
+        this.dropWebgl();
+        // On screen it draws with WebGL again at once. A parked pane (display: none, so it has no
+        // boxes) gets one back when it is shown.
+        if (this.parent.getClientRects().length > 0) this.loadWebgl();
+      });
       this.term.loadAddon(webgl);
+      this.webgl = webgl;
     } catch {
       // No WebGL here. xterm's default renderer stays in place.
     }
+  }
+
+  private dropWebgl(): void {
+    const webgl = this.webgl;
+    this.webgl = undefined;
+    webgl?.dispose();
   }
 
   private readonly onKey = (event: KeyboardEvent): boolean => {
@@ -249,22 +425,82 @@ export class TerminalView {
       }
       return false;
     }
+    // Plain typing leaves here, before any of the Mac line keys below.
+    if (!event.metaKey && !event.altKey) return true;
     // Left to the browser, so the Edit menu copies and pastes and the shell never sees them.
     if (event.metaKey && (event.code === "KeyC" || event.code === "KeyV")) return false;
-    return true;
+    // Exactly one of Cmd or Option. Cmd+Option+arrows move between panes (keys.ts).
+    if (event.ctrlKey || event.shiftKey || event.metaKey === event.altKey) return true;
+    const run = event.metaKey ? this.cmdKey(event) : this.optionKey(event.key);
+    if (run === undefined) return true;
+    if (event.type === "keydown") {
+      // Also stops the browser's own select all, and a character landing in the textarea.
+      event.preventDefault();
+      run();
+    }
+    return false;
   };
 
-  // Left Option acts as Alt while right Option still types special characters. xterm has one
-  // setting for both, so it follows the left key.
-  private readonly onWindowKeyDown = (event: KeyboardEvent): void => {
-    if (event.code === "AltLeft") this.term.options.macOptionIsMeta = true;
-  };
+  // Either Option key, unlike Option with a letter, which follows option-key.ts.
+  private optionKey(key: string): (() => void) | undefined {
+    switch (key) {
+      case "ArrowLeft":
+        return () => this.term.input(OPTION_LEFT, true);
+      case "ArrowRight":
+        return () => this.term.input(OPTION_RIGHT, true);
+      case "Backspace":
+        return () => this.term.input(OPTION_BACKSPACE, true);
+      case "Delete":
+        return () => this.term.input(OPTION_DELETE, true);
+    }
+    return undefined;
+  }
 
-  private readonly onWindowKeyUp = (event: KeyboardEvent): void => {
-    if (event.code === "AltLeft") this.term.options.macOptionIsMeta = false;
-  };
-
-  private readonly onWindowBlur = (): void => {
-    this.term.options.macOptionIsMeta = false;
-  };
+  private cmdKey(event: KeyboardEvent): (() => void) | undefined {
+    // A full-screen program owns the screen, so there is no scrollback to move or clear.
+    const alternate = () => this.term.buffer.active.type === "alternate";
+    switch (event.key) {
+      case "Backspace":
+        return () => this.term.input(CMD_BACKSPACE, true);
+      case "ArrowLeft":
+        return () => this.term.input(CMD_LEFT, true);
+      case "ArrowRight":
+        return () => this.term.input(CMD_RIGHT, true);
+      case "Delete":
+        return () => this.term.input(CMD_DELETE, true);
+      case "ArrowUp":
+        return () => {
+          if (!alternate()) this.term.scrollPages(-1);
+        };
+      case "ArrowDown":
+        return () => {
+          if (!alternate()) this.term.scrollPages(1);
+        };
+      case "Home":
+        return () => {
+          if (!alternate()) this.term.scrollToTop();
+        };
+      case "End":
+        return () => {
+          if (!alternate()) this.term.scrollToBottom();
+        };
+    }
+    // Letters by what they type, as the menu bar matches them, by position on a non-Latin layout.
+    const { key, code } = event;
+    let letter = "";
+    if (key.length === 1 && key.charCodeAt(0) < 0x80) letter = key.toLowerCase();
+    else if (code.startsWith("Key")) letter = code.slice(3).toLowerCase();
+    switch (letter) {
+      case "z":
+        return () => this.term.input(CMD_Z, true);
+      case "a":
+        return () => this.term.selectAll();
+      case "k":
+        return () => {
+          if (!alternate()) this.term.clear();
+          this.term.input(REDRAW, true);
+        };
+    }
+    return undefined;
+  }
 }

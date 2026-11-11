@@ -1,6 +1,6 @@
 """Small command line client for the terminal host. Standard library only.
 
-Talks to the host over a WebSocket on 127.0.0.1 using protocol version 1: JSON text
+Talks to the host over a WebSocket on 127.0.0.1 using protocol version 3: JSON text
 frames, and binary frames made of a 4-byte little-endian session number plus bytes.
 """
 
@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 
-PROTO = 1
+PROTO = 3
 DEFAULT_PORT = 47211
 APP_FOLDER = "terminal-app"
 TOKEN_FILE = "host-token"

@@ -1,0 +1,42 @@
+name: engine
+
+# Only when the engine can have changed. On a private repo a macOS minute costs ten of the free
+# monthly minutes and a Windows minute costs two.
+on:
+  push:
+    paths:
+      - "engine/**"
+      - "plain/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/engine.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      # A failure on one system says nothing about the other, so let both finish.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The hosted Windows runner is not expected to have a GPU adapter, so it runs only the
+      # windowless tests that need none.
+      - if: runner.os == 'Windows'
+        run: cargo test -p term-engine --test gate --test keys --test view --test glyphs --test replay --test replies --lib
+      # The shell tests need a Unix pty; on Windows the program only has to compile.
+      - if: runner.os == 'Windows'
+        run: cargo check -p term-plain
+      - if: runner.os == 'macOS'
+        run: cargo test -p term-engine
+        # If the hosted Mac runner has no GPU adapter, this skips the drawing tests with a notice:
+        # env: { TERM_ENGINE_NO_GPU: "1" }
+      - if: runner.os == 'macOS'
+        run: cargo test -p term-plain

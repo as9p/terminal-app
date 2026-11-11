@@ -5,6 +5,7 @@
 
 #![cfg(target_os = "macos")]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -90,6 +91,47 @@ impl Launchctl for FakeLaunchctl {
 
 fn bootstrap_call(plist: &Path) -> String {
     format!("bootstrap gui/501 {}", plist.display())
+}
+
+#[test]
+fn service_takes_exactly_one_known_action() {
+    let args = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+    assert_eq!(
+        service::action(&args(&["install"])),
+        Some(service::Action::Install)
+    );
+    assert_eq!(
+        service::action(&args(&["uninstall"])),
+        Some(service::Action::Uninstall)
+    );
+    assert_eq!(
+        service::action(&args(&["status"])),
+        Some(service::Action::Status)
+    );
+    for wrong in [
+        &[][..],
+        &["--help"],
+        &["help"],
+        &["-h"],
+        &["Install"],
+        &["install", "now"],
+        &["status", "--help"],
+    ] {
+        assert_eq!(service::action(&args(wrong)), None, "{wrong:?}");
+    }
+}
+
+#[test]
+fn plist_runs_the_host_with_no_arguments() {
+    let text = service::plist(
+        Path::new("/Applications/Terminal.app/Contents/MacOS/term-host"),
+        Path::new("/Users/me/Library/Application Support/terminal-app"),
+    );
+    let start = text
+        .find("<key>ProgramArguments</key>")
+        .expect("the arguments");
+    let array = &text[start..start + text[start..].find("</array>").expect("their end")];
+    assert_eq!(array.matches("<string>").count(), 1, "{array}");
 }
 
 #[test]

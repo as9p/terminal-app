@@ -54,8 +54,11 @@ pub fn load(dir: &Path) -> State {
             return State::default();
         }
     };
-    match serde_json::from_slice(&bytes) {
-        Ok(state) => state,
+    match serde_json::from_slice::<State>(&bytes) {
+        Ok(mut state) => {
+            state.tree.upgrade_folder_keys();
+            state
+        }
         Err(error) => {
             let millis = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

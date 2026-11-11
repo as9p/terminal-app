@@ -52,12 +52,16 @@ impl Drop for Host {
 
 impl Host {
     fn spawn(port: u16, dir: DataDir, stderr: Stdio) -> Host {
+        // So a test can never start the real login shell, which is slow and varies.
+        Host::spawn_with_shell(port, dir, stderr, "/bin/sh")
+    }
+
+    fn spawn_with_shell(port: u16, dir: DataDir, stderr: Stdio, shell: &str) -> Host {
         term_host::prepare_for_fork();
         let child = Command::new(env!("CARGO_BIN_EXE_term-host"))
             .env("TERM_APP_DATA", &dir.0)
             .env("TERM_HOST_PORT", port.to_string())
-            // So a test can never start the real login shell, which is slow and varies.
-            .env("SHELL", "/bin/sh")
+            .env("SHELL", shell)
             // So a login shell never reads the real startup files.
             .env("HOME", &dir.0)
             .stdin(Stdio::null())
@@ -76,6 +80,14 @@ impl Host {
 
     fn start() -> Host {
         Host::start_in(DataDir::fresh())
+    }
+
+    /// A host whose programs start with `shell`, which may not exist.
+    #[cfg(unix)]
+    fn start_in_with_shell(dir: DataDir, shell: &str) -> Host {
+        let mut host = Host::spawn_with_shell(free_port(), dir, Stdio::inherit(), shell);
+        host.wait_ready();
+        host
     }
 
     /// Ready means the port answers and a whole token is on disk.
@@ -655,12 +667,18 @@ async fn partial_token_file_is_replaced() {
 #[cfg(unix)]
 mod sessions {
     use super::*;
+    use std::collections::HashMap;
     use term_host::protocol::{decode_binary, encode_binary};
 
     const FLOOD_LIMIT: usize = 4 * 1024 * 1024;
     const LARGEST_CHUNK: usize = 64 * 1024;
     const UUID: &str = "7f1d9b3e-2a4c-4e8f-9a6b-0c1d2e3f4a5b";
     const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// Held for the whole of each test that floods a terminal, so no two run at once: a
+    /// flood starves the other shells of CPU, which shrinks their reads and frames. A tokio
+    /// mutex, because it is held across awaits and a failed test does not poison it.
+    static FLOODING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     enum Heard {
         Text(Value),
@@ -857,8 +875,9 @@ mod sessions {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
+        // Not started yet, so the folder it was asked for.
         let items = list(&mut ws).await;
-        assert_eq!(items[0]["cwd"], Value::Null, "{items:?}");
+        assert_eq!(items[0]["cwd"], "/", "{items:?}");
         attach(&mut ws, session).await;
         type_line(&mut ws, session, REPORT_TMP).await;
         wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
@@ -951,6 +970,7 @@ mod sessions {
 
     #[tokio::test]
     async fn ack_lets_a_flood_continue() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
 
         let mut acking = signed_in(&host).await;
@@ -975,8 +995,249 @@ mod sessions {
         read_acking(&mut silent, session, &mut total, target).await;
     }
 
+    /// The `seq` lines from `from` to `to`, without the terminal's carriage returns.
+    fn seq_lines(prefix: &str, from: u32, to: u32) -> String {
+        (from..=to).map(|i| format!("{prefix}{i}\n")).collect()
+    }
+
+    /// The output as text without carriage returns, since a macOS terminal now and then
+    /// prints a newline as `\r\r\n` when a write crosses its buffer's end.
+    fn without_returns(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).replace('\r', "")
+    }
+
+    #[tokio::test]
+    async fn merged_output_arrives_whole_and_acks_still_count() {
+        let _flooding = FLOODING.lock().await;
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut total = attach(&mut ws, session).await.len();
+        // More than the flood limit, so it only gets through if acks of merged frames count.
+        type_line(&mut ws, session, "seq 1 700000; echo END$((1+1))").await;
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("END2") {
+            match hear_any(&mut ws, PATIENCE).await {
+                Some(Heard::Bytes(from, bytes)) => {
+                    assert_eq!(from, session);
+                    assert!(
+                        bytes.len() <= LARGEST_CHUNK,
+                        "a frame of {} bytes",
+                        bytes.len()
+                    );
+                    total += bytes.len();
+                    seen.extend(bytes);
+                    ack(&mut ws, session, total).await;
+                }
+                Some(Heard::Text(_)) => {}
+                None => panic!("the output stopped at {total} bytes"),
+            }
+        }
+        assert!(total > FLOOD_LIMIT, "only {total} bytes");
+        assert!(
+            without_returns(&seen).contains(&seq_lines("", 1, 700000)),
+            "the lines arrived out of order or with gaps"
+        );
+    }
+
+    /// How much the app lets go unacked before it acks, from `client/src/terminal.ts`.
+    const ACK_BYTES: usize = 128 * 1024;
+
+    /// Reads like the app when each message costs it something: about 1 ms per frame, then
+    /// an ack of the running total once `ACK_BYTES` are unacked, snapshot included.
+    #[derive(Default)]
+    struct SlowClient {
+        taken: HashMap<u32, usize>,
+        acked: HashMap<u32, usize>,
+        seen: HashMap<u32, Vec<u8>>,
+        /// Each output frame's session and payload length, in the order they arrived.
+        frames: Vec<(u32, usize)>,
+    }
+
+    impl SlowClient {
+        fn attached(&mut self, session: u32, snapshot: &[u8]) {
+            self.taken.insert(session, snapshot.len());
+        }
+
+        fn printed(&self, session: u32, needle: &str) -> bool {
+            self.seen
+                .get(&session)
+                .is_some_and(|bytes| String::from_utf8_lossy(bytes).contains(needle))
+        }
+
+        async fn read_until(&mut self, ws: &mut Ws, done: impl Fn(&SlowClient) -> bool) {
+            while !done(self) {
+                match hear_any(ws, PATIENCE).await {
+                    Some(Heard::Bytes(session, bytes)) => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        self.frames.push((session, bytes.len()));
+                        let taken = self.taken.entry(session).or_default();
+                        *taken += bytes.len();
+                        let taken = *taken;
+                        let acked = self.acked.entry(session).or_default();
+                        if taken - *acked >= ACK_BYTES {
+                            *acked = taken;
+                            ack(ws, session, taken).await;
+                        }
+                        self.seen.entry(session).or_default().extend(bytes);
+                    }
+                    Some(Heard::Text(_)) => {}
+                    None => panic!("the output stopped at {:?}", self.taken),
+                }
+            }
+        }
+
+        fn assert_frames_within_the_cap(&self) {
+            for &(session, len) in &self.frames {
+                assert!(
+                    len <= LARGEST_CHUNK,
+                    "session {session} got a frame of {len} bytes"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_client_gets_output_whole_in_large_frames() {
+        let _flooding = FLOODING.lock().await;
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut client = SlowClient::default();
+        let snapshot = attach(&mut ws, session).await;
+        client.attached(session, &snapshot);
+        // More than the flood limit, so acks have to keep it going.
+        type_line(&mut ws, session, "seq 1 600000; echo END$((1+1))").await;
+        client
+            .read_until(&mut ws, |client| client.printed(session, "END2"))
+            .await;
+
+        let bytes = client.seen[&session].len();
+        assert!(bytes > FLOOD_LIMIT, "only {bytes} bytes");
+        assert!(
+            without_returns(&client.seen[&session]).contains(&seq_lines("", 1, 600000)),
+            "the lines arrived out of order or with gaps"
+        );
+        client.assert_frames_within_the_cap();
+        // One frame per terminal read averages about 1000 bytes here, but only while the shell
+        // is not starved of CPU, which is why the flood tests take turns. The socket's own buffers
+        // take most of a backlog before the writer has to wait, so merging only fires once
+        // they are full: about 1600 bytes a frame on macOS.
+        let frames = client.frames.len();
+        assert!(
+            bytes / frames > 1100,
+            "{frames} frames for {bytes} bytes, {} bytes a frame",
+            bytes / frames
+        );
+    }
+
+    #[tokio::test]
+    async fn flood_arrives_whole_in_large_frames() {
+        let _flooding = FLOODING.lock().await;
+        let scratch = DataDir::fresh();
+        std::fs::create_dir_all(&scratch.0).expect("make a scratch folder");
+        let file = scratch.0.join("flood.txt");
+        let text: String = (0..100_000)
+            .map(|i| format!("line {i:08} abcdefghijklmnopqrstuvwxyz0123456789\n"))
+            .collect();
+        std::fs::write(&file, &text).expect("write the file");
+
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        let mut total = attach(&mut ws, session).await.len();
+        let line = format!("cat '{}'; echo END$((1+1))", file.display());
+        type_line(&mut ws, session, &line).await;
+        let mut seen = Vec::new();
+        let mut frames = 0;
+        // Only the tail is searched, since searching all of it after every frame takes long.
+        while !String::from_utf8_lossy(&seen[seen.len().saturating_sub(256)..]).contains("END2") {
+            match hear_any(&mut ws, PATIENCE).await {
+                Some(Heard::Bytes(from, bytes)) => {
+                    assert_eq!(from, session);
+                    assert!(
+                        bytes.len() <= LARGEST_CHUNK,
+                        "a frame of {} bytes",
+                        bytes.len()
+                    );
+                    frames += 1;
+                    total += bytes.len();
+                    seen.extend(bytes);
+                    ack(&mut ws, session, total).await;
+                }
+                Some(Heard::Text(_)) => {}
+                None => panic!("the output stopped at {total} bytes"),
+            }
+        }
+        assert!(
+            without_returns(&seen).contains(&text),
+            "the file arrived out of order or with gaps"
+        );
+        // One frame per terminal read would be about 1000 bytes on macOS. Gathering the reads
+        // of a flood makes them far larger.
+        let bytes = seen.len();
+        assert!(
+            bytes / frames > 8 * 1024,
+            "{frames} frames for {bytes} bytes, {} bytes a frame",
+            bytes / frames
+        );
+    }
+
+    #[tokio::test]
+    async fn two_sessions_on_one_connection_never_share_a_frame() {
+        let _flooding = FLOODING.lock().await;
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let first = create(&mut ws).await;
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let second = reply["session"].as_u64().expect("a session number") as u32;
+        let mut client = SlowClient::default();
+        let snapshot = attach(&mut ws, first).await;
+        client.attached(first, &snapshot);
+        let snapshot = attach(&mut ws, second).await;
+        client.attached(second, &snapshot);
+
+        // Neither typed line has the other session's letter in it, nor does the prompt.
+        type_line(&mut ws, first, "seq -f 'a%g' 1 300000; echo AEND$((1+1))").await;
+        type_line(&mut ws, second, "seq -f 'b%g' 1 300000; echo BEND$((1+1))").await;
+        client
+            .read_until(&mut ws, |client| {
+                client.printed(first, "AEND2") && client.printed(second, "BEND2")
+            })
+            .await;
+
+        assert!(
+            !client.seen[&first].contains(&b'b'),
+            "a frame mixed sessions"
+        );
+        assert!(
+            !client.seen[&second].contains(&b'a'),
+            "a frame mixed sessions"
+        );
+        assert!(without_returns(&client.seen[&first]).contains(&seq_lines("a", 1, 300000)));
+        assert!(without_returns(&client.seen[&second]).contains(&seq_lines("b", 1, 300000)));
+        client.assert_frames_within_the_cap();
+        // Otherwise the writer was never offered two sessions' output at once.
+        let switches = client
+            .frames
+            .windows(2)
+            .filter(|pair| pair[0].0 != pair[1].0)
+            .count();
+        assert!(
+            switches >= 4,
+            "the sessions took turns only {switches} times"
+        );
+    }
+
     #[tokio::test]
     async fn stale_client_hears_detached() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
@@ -1065,6 +1326,7 @@ mod sessions {
 
     #[tokio::test]
     async fn closing_the_socket_detaches() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut watching = signed_in(&host).await;
         let session = create(&mut watching).await;
@@ -1242,8 +1504,11 @@ mod sessions {
     async fn created_session_gets_a_tab() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        // `create` asserts `created` is the first frame, so the session number is known
+        // before the pushed tree shows its pane.
         create(&mut ws).await;
-        let tree = tree(&mut ws).await;
+        let tree = pushed_tree(&mut ws, |_| true).await;
         assert_eq!(tree["ungrouped"][0]["split"], leaf(UUID), "{tree}");
     }
 
@@ -1269,7 +1534,9 @@ mod sessions {
     async fn create_with_split_place_adds_pane() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
         create(&mut ws).await;
+        pushed_tree(&mut ws, |_| true).await;
         say(
             &mut ws,
             json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80,
@@ -1277,7 +1544,7 @@ mod sessions {
         )
         .await;
         assert_eq!(hear_text(&mut ws).await["type"], "created");
-        let tree = tree(&mut ws).await;
+        let tree = pushed_tree(&mut ws, |_| true).await;
         let tabs = tree["ungrouped"].as_array().expect("tabs");
         assert_eq!(tabs.len(), 1, "{tree}");
         assert_eq!(tabs[0]["split"]["type"], "row", "{tree}");
@@ -1356,8 +1623,409 @@ mod sessions {
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
         tree(&mut ws).await;
+        // Never attached, so its program never started.
         say(&mut ws, json!({"type": "kill", "session": session})).await;
         let tree = pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
         assert_eq!(tree["closed"], json!([]), "{tree}");
+        wait_for_list(&mut ws, |items| items.is_empty()).await;
+        say(&mut ws, json!({"type": "kill", "session": session})).await;
+        assert_eq!(hear_text(&mut ws).await["code"], "no_session");
+    }
+
+    #[tokio::test]
+    async fn new_shell_starts_at_its_first_attach() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        // Not started yet, so it has no size.
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cols"], 0, "{items:?}");
+        assert_eq!(items[0]["rows"], 0, "{items:?}");
+
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "echo he''llo").await;
+        read_until(&mut ws, session, "hello").await;
+        assert_eq!(list(&mut ws).await[0]["cols"], 80);
+    }
+
+    #[tokio::test]
+    async fn keys_sent_right_after_the_attach_arrive_in_order() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        for n in 1..=3 {
+            type_line(&mut ws, session, &format!("echo ke''y{n}")).await;
+        }
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "attached", "{reply}");
+        let seen = read_until(&mut ws, session, "key3").await;
+        let at = |needle: &str| seen.find(needle).unwrap_or_else(|| panic!("{seen:?}"));
+        assert!(
+            at("key1") < at("key2") && at("key2") < at("key3"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_attach_does_not_start_a_second_shell() {
+        let host = Host::start();
+        let mut first = signed_in(&host).await;
+        let mut second = signed_in(&host).await;
+        let session = create(&mut first).await;
+        // Both ask before either start has finished.
+        let attach_frame = json!({"type": "attach", "session": session, "cols": 80, "rows": 24});
+        say(&mut first, attach_frame.clone()).await;
+        say(&mut second, attach_frame).await;
+        assert_eq!(hear_text(&mut first).await["type"], "attached");
+        assert_eq!(hear_text(&mut second).await["type"], "attached");
+
+        type_line(&mut first, session, "echo pid=$$ fir''st").await;
+        let one = read_until(&mut first, session, "first").await;
+        type_line(&mut second, session, "echo pid=$$ sec''ond").await;
+        let other = read_until(&mut second, session, "second").await;
+        assert_eq!(pid_in(&one), pid_in(&other));
+        let children = Command::new("pgrep")
+            .args(["-P", &host.child.id().to_string()])
+            .output()
+            .expect("run pgrep");
+        let children = String::from_utf8_lossy(&children.stdout);
+        assert_eq!(children.lines().count(), 1, "{children:?}");
+    }
+
+    /// A folder passes the check that sends a missing `SHELL` to the account's shell, then
+    /// cannot be started, so starting a program always fails.
+    const NO_SHELL: &str = "/";
+
+    #[tokio::test]
+    async fn new_session_that_cannot_start_leaves_its_tab() {
+        let host = Host::start_in_with_shell(DataDir::fresh(), NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        let session = create(&mut ws).await;
+        pushed_tree(&mut ws, |tree| tree["ungrouped"][0]["split"] == leaf(UUID)).await;
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        let emptied = pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+        assert_eq!(emptied["closed"], json!([]), "{emptied}");
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await, Vec::<Value>::new());
+    }
+
+    /// Also passes on the code from before new sessions waited for their first attach, since
+    /// a restored session never left on a failed start. Kept as a guard: it fails if a failed
+    /// start removes every session rather than only a new one.
+    #[tokio::test]
+    async fn restored_session_that_cannot_start_stays() {
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        let saved = json!({"sessions": [
+            {"uuid": UUID, "kind": "shell", "cwd": "/", "title": null, "chat": null}
+        ]});
+        std::fs::write(dir.0.join("state.json"), saved.to_string()).expect("seed the state");
+        let host = Host::start_in_with_shell(dir, NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        let session = items[0]["session"].as_u64().expect("a session number");
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn new_session_is_saved_before_it_starts() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        let file = host.dir.0.join("state.json");
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let state: Value = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(Value::Null);
+            if state["sessions"][0]["uuid"] == UUID {
+                // So it comes back as a plain shell in its folder.
+                assert_eq!(state["sessions"][0]["kind"], "shell", "{state}");
+                assert_eq!(state["sessions"][0]["cwd"], "/", "{state}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "never saved: {state}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Waits until the host has no program running, since a killed one takes a moment to go.
+    async fn wait_for_no_programs(host: &Host) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let children = Command::new("pgrep")
+                .args(["-P", &host.child.id().to_string()])
+                .output()
+                .expect("run pgrep");
+            let children = String::from_utf8_lossy(&children.stdout).into_owned();
+            if children.trim().is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a program is still running: {children:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The write end of a fifo, if a reader has it open. Never waits.
+    fn fifo_writer(fifo: &std::path::Path) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(fifo)
+    }
+
+    /// Holds every reader of a fifo put in place of a file the host reads. Letting go, also
+    /// when the test fails, puts a plain file in its place first, so a reader that comes later
+    /// never waits, then ends the fifo for each reader still on it, through a second name. The
+    /// host's state saver reads the same file, so it must never be left waiting either.
+    struct Held {
+        path: std::path::PathBuf,
+        fifo: std::path::PathBuf,
+        writer: Option<std::fs::File>,
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let plain = self.path.with_extension("plain");
+            let _ = std::fs::write(&plain, "");
+            let _ = std::fs::rename(&plain, &self.path);
+            self.writer = None;
+            // A reader that opened as the writer closed waits for the next one. No panic in
+            // here, as this also runs while a failed test unwinds.
+            let deadline = Instant::now() + PATIENCE;
+            while Instant::now() < deadline && fifo_writer(&self.fifo).is_ok() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_during_the_first_start_ends_the_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        // Stays running whatever it is asked to run, so a program left behind shows, and the
+        // real `claude` never starts.
+        let shell = dir.0.join("slow-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexec sleep 60\n").expect("write the shell");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755))
+            .expect("make the shell runnable");
+        let host = Host::start_in_with_shell(dir, shell.to_str().expect("a text path"));
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+
+        // A Claude tab reads its flags file while it starts, before the fork. As a fifo, the
+        // file holds the start there until the test lets it go. Renamed into place, so the
+        // host's own rewrite of the file never finds it missing. The fifo keeps its first
+        // name too, which only the test knows.
+        let flags = host.dir.0.join("claude-args");
+        let fifo = host.dir.0.join("claude-args-fifo");
+        let placed = host.dir.0.join("claude-args-placed");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed");
+        std::fs::hard_link(&fifo, &placed).expect("name the fifo twice");
+        std::fs::rename(&placed, &flags).expect("put the fifo in place");
+
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": UUID, "kind": "claude", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let session = reply["session"].as_u64().expect("a session number");
+        pushed_tree(&mut ws, |tree| tree["ungrouped"][0]["split"] == leaf(UUID)).await;
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+        // The writing end opens only once a reader has the fifo open, so from here the start
+        // is held. The state saver, which rewrites the file every 2 seconds, can be that
+        // reader instead. Then the kill may land before the start reaches the file, which
+        // the start must refuse just the same, so the checks below hold either way.
+        let deadline = Instant::now() + PATIENCE;
+        let held = loop {
+            match fifo_writer(&fifo) {
+                Ok(writer) => {
+                    break Held {
+                        path: flags.clone(),
+                        fifo: fifo.clone(),
+                        writer: Some(writer),
+                    };
+                }
+                Err(error) => assert!(
+                    Instant::now() < deadline,
+                    "the start never read its flags: {error}"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
+        // From another connection, since this one handles nothing else until its attach ends.
+        let mut other = signed_in(&host).await;
+        say(&mut other, json!({"type": "kill", "session": session})).await;
+        pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+        wait_for_list(&mut other, |items| items.is_empty()).await;
+        // The start reads the end of the fifo, or the plain file, and goes on to fork.
+        drop(held);
+
+        let answer = loop {
+            let frame = hear_text(&mut ws).await;
+            if frame["type"] != "tree" && frame["type"] != "states" {
+                break frame;
+            }
+        };
+        assert_eq!(answer["code"], "no_session", "{answer}");
+        assert_eq!(list(&mut ws).await, Vec::<Value>::new());
+        assert_eq!(tree(&mut ws).await["ungrouped"], json!([]));
+        wait_for_no_programs(&host).await;
+    }
+
+    #[tokio::test]
+    async fn list_shows_the_folder_of_a_session_that_has_not_started() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let folder = scratch_folder("waiting");
+        let cwd = folder.to_str().expect("a text path");
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["type"], "created");
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cols"], 0, "{items:?}");
+        assert_eq!(items[0]["cwd"], cwd, "{items:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn pane_that_has_not_started_moves_and_then_starts() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        let first = create(&mut ws).await;
+        pushed_tree(&mut ws, |_| true).await;
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let second = reply["session"].as_u64().expect("a session number") as u32;
+        let tabs = |count: usize| {
+            move |tree: &Value| tree["ungrouped"].as_array().map(Vec::len) == Some(count)
+        };
+        let both = pushed_tree(&mut ws, tabs(2)).await;
+
+        tree_op(
+            &mut ws,
+            json!({"type": "join_tabs", "tab": both["ungrouped"][1]["id"], "into": both["ungrouped"][0]["id"], "dir": "right"}),
+        )
+        .await;
+        let joined = pushed_tree(&mut ws, tabs(1)).await;
+        let shown = joined["ungrouped"][0].to_string();
+        assert!(
+            shown.contains(UUID) && shown.contains(OTHER_UUID),
+            "{joined}"
+        );
+        // Moving a pane does not start it.
+        let items = list(&mut ws).await;
+        assert!(items.iter().all(|item| item["cols"] == 0), "{items:?}");
+
+        attach(&mut ws, second).await;
+        type_line(&mut ws, second, "echo mo''ved").await;
+        read_until(&mut ws, second, "moved").await;
+        attach(&mut ws, first).await;
+        type_line(&mut ws, first, "echo st''ayed").await;
+        read_until(&mut ws, first, "stayed").await;
+    }
+
+    #[tokio::test]
+    async fn saved_session_that_never_started_comes_back_and_stays() {
+        let folder = scratch_folder("never-started");
+        let cwd = folder.to_str().expect("a text path").to_string();
+        let saved = {
+            let host = Host::start();
+            let mut ws = signed_in(&host).await;
+            say(
+                &mut ws,
+                json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": cwd, "cols": 80, "rows": 24}),
+            )
+            .await;
+            assert_eq!(hear_text(&mut ws).await["type"], "created");
+            let file = host.dir.0.join("state.json");
+            let deadline = Instant::now() + PATIENCE;
+            loop {
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                let state: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                if state["sessions"][0]["uuid"] == UUID {
+                    break text;
+                }
+                assert!(Instant::now() < deadline, "never saved: {state}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+
+        // The first host has gone with its folder. What it saved comes back in a new one,
+        // where no program can start.
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        std::fs::write(dir.0.join("state.json"), saved).expect("seed the state");
+        let host = Host::start_in_with_shell(dir, NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["kind"], "shell", "{items:?}");
+        assert_eq!(items[0]["cwd"], cwd.as_str(), "{items:?}");
+        let session = items[0]["session"].as_u64().expect("a session number");
+        let shown = tree(&mut ws).await;
+        assert_eq!(
+            shown["ungrouped"].as_array().map(Vec::len),
+            Some(1),
+            "{shown}"
+        );
+        assert_eq!(shown["ungrouped"][0]["split"], leaf(UUID), "{shown}");
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await.len(), 1);
+        assert_eq!(tree(&mut ws).await["ungrouped"][0]["split"], leaf(UUID));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
