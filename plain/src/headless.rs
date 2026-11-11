@@ -39,7 +39,7 @@ pub fn run(options: Options) -> i32 {
     let backlog = Arc::new(Backlog::new(QUEUE_LIMIT));
     let on_event = counted(backlog.clone(), move |event| {
         // The receiver is gone only when this function has returned, and then nobody listens.
-        let _ = tx.send(event);
+        tx.send(event).is_ok()
     });
     if !session::can_record(options.record.as_deref()) {
         return 1;

@@ -239,7 +239,7 @@ impl Term {
         // Runs on the shell's threads: hand the event over, then wait while the backlog is full.
         let on_event = counted(backlog.0.clone(), move |event| {
             // The loop is gone only after the window closed, and then nobody listens.
-            let _ = proxy.send_event(event);
+            proxy.send_event(event).is_ok()
         });
         let shell = Shell::spawn(options.command, options.cwd, grid, on_event).map_err(|e| {
             eprintln!("snowflake: cannot start the command: {e}");

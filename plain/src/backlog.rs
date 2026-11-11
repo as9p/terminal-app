@@ -26,29 +26,42 @@ impl Backlog {
         }
     }
 
-    /// Called on the reader thread after it has sent `bytes` to the loop. Blocks while the
-    /// queued total is over the limit and the backlog is open.
-    pub fn added(&self, bytes: usize) {
+    /// Reader thread, before handing `bytes` to the loop: counts them. Never blocks. Counting
+    /// first means the loop can never feed, and give back, bytes that were not counted yet.
+    pub fn reserve(&self, bytes: usize) {
         let mut state = self.lock();
-        // Counted before the wait, so one read bigger than the limit waits for the view to take
-        // it rather than for room that can never come.
         state.0 = state.0.saturating_add(bytes);
+    }
+
+    /// Reader thread, after the hand-over: blocks while the queued total is over the limit and
+    /// the backlog is open. One read bigger than the limit waits for the view to take it, which
+    /// it can, since the loop already has it.
+    pub fn wait(&self) {
+        let state = self.lock();
         let _state = self
             .drained
             .wait_while(state, |(queued, closed)| *queued > self.limit && !*closed)
             .unwrap_or_else(PoisonError::into_inner);
     }
 
-    /// Called on the loop thread after feeding `bytes` to the view. Wakes a blocked reader.
+    /// Loop thread, after feeding `bytes` to the view (or reader thread, when a hand-over
+    /// failed). Wakes a blocked reader.
     pub fn fed(&self, bytes: usize) {
         let mut state = self.lock();
+        // Every byte fed was reserved first, so the count cannot run short; if it does, the
+        // accounting is wrong and the clamp below would only hide it.
+        debug_assert!(
+            bytes <= state.0,
+            "fed {bytes} bytes with only {} queued",
+            state.0
+        );
         state.0 = state.0.saturating_sub(bytes);
         if state.0 <= self.limit {
             self.drained.notify_all();
         }
     }
 
-    /// Called before the session is dropped. A blocked reader returns at once, and `added` never
+    /// Called before the session is dropped. A blocked reader returns at once, and `wait` never
     /// blocks again.
     pub fn close(&self) {
         self.lock().1 = true;
@@ -85,20 +98,27 @@ impl Drop for CloseOnDrop {
     }
 }
 
-/// The shell's event callback around `send`: each output is handed over first and then counted,
-/// so the reader waits only on bytes the other side already has. The exit is never held up.
+/// The shell's event callback around `send`, which says whether the loop took the event: each
+/// output is counted, handed over, then waited on, so the reader waits only on bytes the loop
+/// already has. Bytes the loop did not take are given back at once. The exit is never held up.
 pub fn counted(
     backlog: Arc<Backlog>,
-    send: impl Fn(ShellEvent) + Send + 'static,
+    send: impl Fn(ShellEvent) -> bool + Send + 'static,
 ) -> Box<dyn Fn(ShellEvent) + Send> {
     Box::new(move |event| {
         let bytes = match &event {
             ShellEvent::Output(bytes) => bytes.len(),
             ShellEvent::Exited(_) => 0,
         };
-        send(event);
-        if bytes > 0 {
-            backlog.added(bytes);
+        if bytes == 0 {
+            send(event);
+            return;
+        }
+        backlog.reserve(bytes);
+        if send(event) {
+            backlog.wait();
+        } else {
+            backlog.fed(bytes);
         }
     })
 }
@@ -108,25 +128,48 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Long enough for a reader that is not blocked to have finished.
     const BLOCKED: Duration = Duration::from_millis(50);
     /// A reader that was let go finishes well within this.
     const SOON: Duration = Duration::from_secs(1);
+    /// The longest a loaded machine may take to start a thread and run it to its first wait.
+    const STARTED: Duration = Duration::from_secs(2);
 
-    /// Calls `added` for each size on its own thread; the receiver hears once all have returned.
-    fn reader(backlog: &Arc<Backlog>, sizes: &[usize]) -> mpsc::Receiver<()> {
+    /// Runs `work` on its own thread; the receiver hears once it has returned.
+    fn spawn(
+        backlog: &Arc<Backlog>,
+        work: impl FnOnce(&Backlog) + Send + 'static,
+    ) -> mpsc::Receiver<()> {
         let (done, finished) = mpsc::channel();
         let backlog = backlog.clone();
-        let sizes = sizes.to_vec();
         thread::spawn(move || {
-            for bytes in sizes {
-                backlog.added(bytes);
-            }
+            work(&backlog);
             let _ = done.send(());
         });
         finished
+    }
+
+    /// Hands over each size as the reader does: counted first, then the wait.
+    fn reader(backlog: &Arc<Backlog>, sizes: &[usize]) -> mpsc::Receiver<()> {
+        let sizes = sizes.to_vec();
+        spawn(backlog, move |backlog| {
+            for bytes in sizes {
+                backlog.reserve(bytes);
+                backlog.wait();
+            }
+        })
+    }
+
+    /// Waits until the reader's count is in, so a thread that has not run yet is never taken for
+    /// one that is blocked.
+    fn until_queued(backlog: &Backlog, total: usize) {
+        let start = Instant::now();
+        while backlog.queued() != total && start.elapsed() < STARTED {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(backlog.queued(), total);
     }
 
     #[test]
@@ -140,8 +183,8 @@ mod tests {
     fn over_the_limit_blocks_until_fed() {
         let backlog = Arc::new(Backlog::new(100));
         let finished = reader(&backlog, &[60, 60]);
+        until_queued(&backlog, 120);
         assert!(finished.recv_timeout(BLOCKED).is_err());
-        assert_eq!(backlog.queued(), 120);
         backlog.fed(60);
         assert!(finished.recv_timeout(SOON).is_ok());
         assert_eq!(backlog.queued(), 60);
@@ -151,6 +194,7 @@ mod tests {
     fn one_oversized_read_gets_through() {
         let backlog = Arc::new(Backlog::new(100));
         let finished = reader(&backlog, &[500]);
+        until_queued(&backlog, 500);
         assert!(finished.recv_timeout(BLOCKED).is_err());
         backlog.fed(500);
         assert!(finished.recv_timeout(SOON).is_ok());
@@ -161,6 +205,7 @@ mod tests {
     fn close_releases_a_blocked_reader() {
         let backlog = Arc::new(Backlog::new(100));
         let finished = reader(&backlog, &[500]);
+        until_queued(&backlog, 500);
         assert!(finished.recv_timeout(BLOCKED).is_err());
         backlog.close();
         assert!(finished.recv_timeout(SOON).is_ok());
@@ -168,10 +213,27 @@ mod tests {
     }
 
     #[test]
-    fn fed_never_underflows() {
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn fed_without_a_reserve_is_a_bug() {
         let backlog = Backlog::new(100);
-        backlog.added(10);
+        backlog.reserve(10);
         backlog.fed(50);
+    }
+
+    #[test]
+    fn reserve_never_blocks() {
+        let backlog = Backlog::new(100);
+        backlog.reserve(500);
+        assert_eq!(backlog.queued(), 500);
+    }
+
+    #[test]
+    fn fed_before_wait_leaves_nothing_counted() {
+        let backlog = Arc::new(Backlog::new(100));
+        backlog.reserve(500);
+        backlog.fed(500);
+        assert!(spawn(&backlog, Backlog::wait).recv_timeout(SOON).is_ok());
         assert_eq!(backlog.queued(), 0);
     }
 }
