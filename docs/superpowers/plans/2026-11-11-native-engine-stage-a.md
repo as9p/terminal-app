@@ -368,7 +368,8 @@ One test per table, each row an `assert_eq!` on `encode_key` or `encode_mouse`. 
 | 1 | `Up`; `Up` with CTRL | | `\x1b[A`; `\x1b[1;5A` |
 | 3 | `Escape`, `kind: Release` | none | `\x1b[27;1:3u` |
 | 3 | `Enter`, `kind: Repeat` | SHIFT | `\x1b[13;2:2u` |
-| 3 | `Char('a')`, `kind: Release` | none | `\x1b[97;1:3u` |
+| 3 | `Char('a')`, `kind: Release` | none | `None` (a key that came out as plain text has no release report unless flag 8 is set) |
+| 11 | `Char('a')`, `kind: Release` | none | `\x1b[97;1:3u` |
 | 3 | `Enter`, `kind: Release` | none | `None` (Enter, Tab and Backspace report no release unless flag 8 is set) |
 | 8 | `Char('a')` text `a`; `Enter` | none | `\x1b[97u`; `\x1b[13u` |
 | 12 | `Char('a')` text `A` | SHIFT | `\x1b[97:65;2u` |
