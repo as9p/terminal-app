@@ -673,6 +673,8 @@ Approved by Alex on 2026-11-11. The full design is in `docs/superpowers/specs/20
 
 ### Stage A results (the plain terminal, measured 2026-11-11)
 
+The plain terminal is named Paw (Alex, 2026-11-11); its program is `paw`. Snowflake stays the name of the app with the sidebar. The plan and the result files written before the rename still say `snowflake`.
+
 Two sittings on Alex's Mac, each measuring every terminal in turn: 60 keys per round in three rounds, then three runs of 30 MB of coloured text. Same window size (about 1280 by 800 points), font size 14 and 20,000 lines of scrollback for all. The folders are `tools/keylat/results/stage-a-1` and `tools/keylat/results/stage-a-2`. Numbers compare only within one sitting.
 
 Second sitting (`stage-a-2`):
