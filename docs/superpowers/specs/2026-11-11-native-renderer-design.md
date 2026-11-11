@@ -139,6 +139,33 @@ Each stage ends with something Alex can use and a speed sitting. Each gets its o
 
 Until stage B ends, the current app stays the daily driver and gets no more speed work. Work in `DESIGN.md`'s build order that lives in the host or the sidebar (accounts, Tailscale attach, alerts) is not blocked by this and carries over.
 
+### Carried out of stage A
+
+Known gaps stage A left on purpose, so the next plans start from them. None of them shows in the plain terminal's day-one list.
+
+For stage B, drawing with several views on one glyph image:
+
+- A view does not notice that another view reset the shared glyph image, so an idle terminal could lose its text or its cursor until it next redraws. It needs a check per view before drawing. This is the first drawing task of stage B.
+- A frame whose three tries all reset the glyph image is not tried again.
+- Moving a view's origin rebuilds every row, and a text size change uploads the whole glyph image again.
+- Next speed knob: showing frames without waiting for the display, with a cap on draws during heavy output. Plain `immediate` printed 17 to 30% slower in stage A, so it is not the answer by itself.
+- Memory is a place to improve: about 115 MB idle and 201 MB at peak at the test size, and 387 MB at peak in a 3456 by 2110 window.
+
+For stage B, behaviour:
+
+- Cmd+K and Cmd+A match the typed character only, so they miss on non-Latin layouts.
+- Dragging a selection past the window edge does not scroll.
+- Selected hidden text shows. A theme change of only the cursor colour is not seen until the row rebuilds.
+- A program that ignores the hang-up signal outlives its window. Output can be lost if the reader is starved for more than 200 ms after the program exits.
+- The terminal name query is answered only in its usual forms (`ESC [ > q` and `ESC [ > 0 q`). The text area pixel size query answers zero cell sizes.
+- A cell reads at most 16 zero-width characters. The library still stores every one it is sent, and a copy that includes such a cell builds the full text before cutting it down.
+
+For stage C, Windows:
+
+- Links open through `/usr/bin/open` with no platform switch.
+- The Windows test run leaves out the memory test, and the Windows and Linux builds of the plain terminal have never been built.
+- The largest texture is the default 8192 px.
+
 ## Testing
 
 - The engine is tested without a window: feed it bytes, check the grid, the selection and the bytes it sends back for keys and mouse.
