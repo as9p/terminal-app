@@ -18,8 +18,6 @@ pub struct Palette {
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub palette: Palette,
-    pub font_px: f32,
-    pub line_height: f32,
 }
 
 pub const FONT_PX_DEFAULT: f32 = 14.0;
@@ -59,8 +57,6 @@ impl Theme {
                     hex(0xA6ADC8),
                 ],
             },
-            font_px: FONT_PX_DEFAULT,
-            line_height: 1.1,
         }
     }
 }
