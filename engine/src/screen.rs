@@ -1,6 +1,7 @@
 //! Screen state behind our own types. This is the only file that names the screen library, so a
 //! different library can be swapped in without touching the rest of the engine.
 
+use std::cell::OnceCell;
 use std::mem;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
@@ -8,7 +9,7 @@ use std::time::Instant;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side as LibSide};
-use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::{Cell as LibCell, Flags};
 use alacritty_terminal::term::color::COUNT as COLOR_COUNT;
 use alacritty_terminal::term::{Config, MIN_COLUMNS, MIN_SCREEN_LINES, Term, TermDamage, TermMode};
@@ -203,6 +204,11 @@ pub struct Screen {
     touched: bool,
     /// Set by selection, scrolling and resize, which the library does not track as damage.
     full_damage: bool,
+    /// The selection's extent in grid lines. Working it out walks the grid for word and line
+    /// selections, and drawing asks `is_selected` once per cell, so it is worked out on the first
+    /// ask after a change and kept until the next. Filled lazily rather than at each change so a
+    /// burst of output between two frames pays for it once.
+    selection_range: OnceCell<Option<SelectionRange>>,
 }
 
 impl Screen {
@@ -224,6 +230,7 @@ impl Screen {
             events: Vec::new(),
             touched: true,
             full_damage: true,
+            selection_range: OnceCell::new(),
         }
     }
 
@@ -233,6 +240,7 @@ impl Screen {
         }
         self.parser.advance(&mut self.term, bytes);
         self.touched = true;
+        self.forget_selection_range();
         self.collect();
     }
 
@@ -256,6 +264,7 @@ impl Screen {
         }
         self.term.resize(Dims(size));
         self.full_damage = true;
+        self.forget_selection_range();
     }
 
     pub fn modes(&self) -> Modes {
@@ -297,6 +306,7 @@ impl Screen {
             Some(deadline) if now >= deadline => {
                 self.parser.stop_sync(&mut self.term);
                 self.touched = true;
+                self.forget_selection_range();
                 self.collect();
                 true
             },
@@ -311,6 +321,7 @@ impl Screen {
     pub fn clear_history(&mut self) {
         self.term.clear_screen(ClearMode::Saved);
         self.full_damage = true;
+        self.forget_selection_range();
     }
 
     pub fn scroll_offset(&self) -> usize {
@@ -416,6 +427,10 @@ impl Screen {
         let damage = match self.term.damage() {
             TermDamage::Full => Damage::Full,
             _ if full => Damage::Full,
+            // The library counts these lines from the top of the live screen and adds the scroll
+            // offset itself, leaving out lines that fall below the view, so they are view rows
+            // already. Output that scrolls the screen, and any change of the scroll offset,
+            // arrive as `Full`.
             TermDamage::Partial(lines) => {
                 let rows: Vec<u16> = lines.map(|bounds| bounds.line as u16).collect();
                 if rows.is_empty() { Damage::None } else { Damage::Rows(rows) }
@@ -433,6 +448,7 @@ impl Screen {
         };
         self.term.selection = Some(Selection::new(ty, self.point(at), lib_side(side)));
         self.full_damage = true;
+        self.forget_selection_range();
     }
 
     pub fn select_to(&mut self, at: CellPoint, side: Side) {
@@ -440,6 +456,7 @@ impl Screen {
         if let Some(selection) = &mut self.term.selection {
             selection.update(point, lib_side(side));
             self.full_damage = true;
+            self.forget_selection_range();
         }
     }
 
@@ -451,11 +468,13 @@ impl Screen {
         selection.update(end, LibSide::Right);
         self.term.selection = Some(selection);
         self.full_damage = true;
+        self.forget_selection_range();
     }
 
     pub fn clear_selection(&mut self) {
         if self.term.selection.take().is_some() {
             self.full_damage = true;
+            self.forget_selection_range();
         }
     }
 
@@ -465,10 +484,9 @@ impl Screen {
 
     pub fn is_selected(&self, at: CellPoint) -> bool {
         let point = self.point(at);
-        self.term
-            .selection
+        self.selection_range
+            .get_or_init(|| self.term.selection.as_ref().and_then(|s| s.to_range(&self.term)))
             .as_ref()
-            .and_then(|selection| selection.to_range(&self.term))
             .is_some_and(|range| range.contains(point))
     }
 
@@ -483,6 +501,13 @@ impl Screen {
         if self.scroll_offset() != before {
             self.full_damage = true;
         }
+        self.forget_selection_range();
+    }
+
+    /// Called wherever the selection, the grid's contents, the scroll position or the size can
+    /// change. The library moves or drops a selection when output scrolls or erases under it.
+    fn forget_selection_range(&mut self) {
+        self.selection_range = OnceCell::new();
     }
 
     /// Moves what the library sent during the last read into the reply and event buffers.

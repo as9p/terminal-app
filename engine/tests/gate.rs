@@ -219,6 +219,75 @@ fn damage_names_only_changed_rows() {
     assert_eq!(s.take_damage(), Damage::None);
 }
 
+/// The characters on every cell `is_selected` names, in reading order.
+fn selected_text(s: &Screen) -> Option<String> {
+    let text: String = (0..24u16)
+        .flat_map(|row| (0..80u16).map(move |col| at(col, row)))
+        .filter(|p| s.is_selected(*p))
+        .map(|p| s.row_text(p.row).chars().nth(usize::from(p.col)).unwrap_or(' '))
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+#[test]
+fn selection_survives_scrolling_and_output() {
+    let mut s = screen(80, 24);
+    for n in 1..=30 {
+        s.feed(format!("row{n} brave\r\n").as_bytes());
+    }
+    // Rows 0 to 22 show row8 to row30, so row 5 shows row13.
+    s.select(SelectKind::Word, at(0, 5), Side::Left);
+    assert_eq!(s.selection_text().as_deref(), Some("row13"));
+    assert!(s.is_selected(at(2, 5)));
+    assert_eq!(selected_text(&s), s.selection_text());
+
+    // One line up, row13 is on row 6 and row 5 shows row12.
+    s.scroll_by(1);
+    assert_eq!(s.row_text(5), "row12 brave");
+    assert!(!s.is_selected(at(2, 5)));
+    assert!(s.is_selected(at(2, 6)));
+    assert_eq!(selected_text(&s), s.selection_text());
+
+    // Output that scrolls the screen moves the selection with its text, and while scrolled up
+    // the view stays on the same lines, so row13 is still selected on row 6.
+    s.feed(b"row31 brave\r\n");
+    assert_eq!(s.row_text(6), "row13 brave");
+    assert_eq!(s.selection_text().as_deref(), Some("row13"));
+    assert!(s.is_selected(at(2, 6)));
+    assert!(!s.is_selected(at(2, 7)));
+    assert_eq!(selected_text(&s), s.selection_text());
+}
+
+/// Feeds `bytes` and checks the damage is `Full`, or rows in view whose text really changed.
+fn damage_from(s: &mut Screen, bytes: &[u8]) -> Damage {
+    let before: Vec<String> = (0..24).map(|r| s.row_text(r)).collect();
+    s.feed(bytes);
+    let damage = s.take_damage();
+    if let Damage::Rows(rows) = &damage {
+        for &row in rows {
+            assert!(row < 24, "{damage:?}");
+            assert_ne!(s.row_text(row), before[usize::from(row)], "row {row} in {damage:?}");
+        }
+    }
+    damage
+}
+
+#[test]
+fn damage_while_scrolled_up_is_in_view_rows() {
+    let mut s = screen(80, 24);
+    for n in 1..=100 {
+        s.feed(format!("line {n}\r\n").as_bytes());
+    }
+    s.take_damage();
+    s.scroll_by(10);
+    s.take_damage();
+    damage_from(&mut s, b"line 101\r\n");
+
+    // A change on a line still in view names its row counted from the top of the view.
+    let offset = s.scroll_offset() as u16;
+    assert_eq!(damage_from(&mut s, b"\x1b[5;1Hchanged"), Damage::Rows(vec![4 + offset]));
+}
+
 #[test]
 fn title_and_bell_are_events() {
     let mut s = screen(80, 24);
