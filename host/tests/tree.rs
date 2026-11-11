@@ -10,6 +10,13 @@ use term_host::state::{self, SavedSession, State};
 use term_host::tree::{
     ClosedTab, Dir, Effects, GroupDefaults, Op, Place, Split, Tab, Tree, TreeError,
 };
+
+/// The key the host gives a folder with no remote. On Windows a resolved path starts with
+/// `\\?\`, which the host leaves out of its keys.
+fn folder_key(folder: &Path) -> String {
+    let text = folder.display().to_string();
+    format!("folder:{}", text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
 use uuid::Uuid;
 
 const CHAT: Uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
@@ -283,7 +290,7 @@ fn open_folder_makes_group_for_non_git() {
     assert_eq!(spawn.chat, None);
     assert_eq!(tree.groups.len(), 1);
     let group = &tree.groups[0];
-    assert_eq!(group.key, format!("folder:{}", notes.display()));
+    assert_eq!(group.key, folder_key(&notes));
     assert_eq!(group.path, notes);
     assert_eq!(group.branch, None);
 
@@ -295,10 +302,7 @@ fn open_folder_makes_group_for_non_git() {
     let other = shell(&mut tree, "t", &elsewhere);
     assert!(tree.ungrouped.iter().any(|tab| tab.id == other));
     assert!(tree.on_cwd("t", &notes));
-    assert_eq!(
-        layout(&tree)[0],
-        (format!("folder:{}", notes.display()), vec![id, other])
-    );
+    assert_eq!(layout(&tree)[0], (folder_key(&notes), vec![id, other]));
 }
 
 #[test]
@@ -380,14 +384,14 @@ fn reopen_under_an_old_key_with_no_group_uses_the_tabs_folder() {
     assert_eq!(tree.groups.len(), 1);
     assert!(tree.groups[0].path.is_absolute());
     assert_eq!(tree.groups[0].path, app);
-    assert_eq!(tree.groups[0].key, format!("folder:{}", app.display()));
+    assert_eq!(tree.groups[0].key, folder_key(&app));
 
     // Never upgraded: a reopen still builds no group on a relative folder.
     let mut tree = closed_under_old_key(&app);
     ok(&mut tree, Op::ReopenTab);
     assert_eq!(tree.groups.len(), 1);
     assert_eq!(tree.groups[0].path, app);
-    assert_eq!(tree.groups[0].key, format!("folder:{}", app.display()));
+    assert_eq!(tree.groups[0].key, folder_key(&app));
 }
 
 #[test]
@@ -434,17 +438,8 @@ fn name_only_folder_keys_from_before_take_their_path() {
 
     tree.upgrade_folder_keys();
     let keys: Vec<_> = tree.groups.iter().map(|group| group.key.clone()).collect();
-    assert_eq!(
-        keys,
-        vec![
-            format!("folder:{}", one.display()),
-            format!("folder:{}", two.display())
-        ]
-    );
-    assert_eq!(
-        tree.closed[0].group,
-        Some(format!("folder:{}", two.display()))
-    );
+    assert_eq!(keys, vec![folder_key(&one), folder_key(&two)]);
+    assert_eq!(tree.closed[0].group, Some(folder_key(&two)));
     assert!(tree.defaults.is_empty());
 
     // The reopened tab goes back to its own folder's group.
