@@ -27,4 +27,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p term-engine
+      # The hosted Windows runner is not expected to have a GPU adapter, so it runs only the
+      # windowless tests that need none.
+      - if: runner.os == 'Windows'
+        run: cargo test -p term-engine --test gate --test keys --test view --test glyphs --lib
+      - if: runner.os == 'macOS'
+        run: cargo test -p term-engine
+        # If the hosted Mac runner has no GPU adapter, this skips the drawing tests with a notice:
+        # env: { TERM_ENGINE_NO_GPU: "1" }
