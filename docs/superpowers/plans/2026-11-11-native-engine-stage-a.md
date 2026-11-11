@@ -462,7 +462,7 @@ Rules the view owns:
 - `pointer` when `modes().mouse != Off` and Shift is not held: queue `encode_mouse`'s bytes. Otherwise it is ours: a left press starts a selection (`clicks` 1 by character, 2 by word, 3 by line), a move with the left button held extends it, and the release emits `ViewEvent::Copy(text)` when the selection is not empty, because selecting copies in today's app.
 - A left press with Cmd held on Mac (Ctrl elsewhere) over a link emits `OpenLink(url)` and starts no selection. A link is a marked link from `link_at`, else `url_at` over `text_around`. Only `http://` and `https://` are ever emitted.
 - `Wheel(n)` when the mouse is not reported: in the alternate screen with `alternate_scroll`, queue the Up or Down key `|n|` times; otherwise scroll the scrollback by `n` lines.
-- `paste`: line endings become `\r`. With `bracketed_paste`, every `\x1b[201~` inside the text is removed and the text is wrapped in `\x1b[200~` and `\x1b[201~`.
+- `paste`: scrolls to the bottom, as a key press does. Line endings become `\r`. With `bracketed_paste`, every `\x1b[201~` inside the text is removed and the text is wrapped in `\x1b[200~` and `\x1b[201~`.
 - `set_focused`: queues `\x1b[I` or `\x1b[O` when `focus_events` is on.
 - `needs_draw` is true only when what would be drawn has changed: output was fed since `mark_drawn` and no synchronized update is open, or the selection, scroll position, focus or grid changed.
 
@@ -478,7 +478,7 @@ All on `TerminalView::new(GridSize { cols: 80, rows: 24 }, &Theme::builtin(), Pl
 | `drag_selects_and_copies` | feed `hello brave world`; press left at col 0 side Left, move to col 4 side Right, release | `take_events() == [Copy("hello")]` and `copy() == Some("hello")` |
 | `double_click_selects_a_word` | feed `hello brave world`; press and release left at col 7 with `clicks: 2` | `take_events() == [Copy("brave")]` |
 | `mouse_goes_to_the_program_when_it_asks` | feed `\x1b[?1000h\x1b[?1006h`; press left at col 0 | `take_output() == b"\x1b[<0;1;1M"`, no selection |
-| `shift_keeps_the_mouse_for_selecting` | same modes; press with SHIFT, move, release | `take_output()` is empty and `copy()` is `Some` |
+| `shift_keeps_the_mouse_for_selecting` | same modes; feed `hello brave world`; press with SHIFT, move, release | `take_output()` is empty and `copy()` is `Some` |
 | `cmd_click_opens_a_plain_link` | feed `see https://example.com/a?b=1, ok`; press left with SUPER at col 10 | `take_events() == [OpenLink("https://example.com/a?b=1")]` |
 | `cmd_click_opens_a_marked_link` | feed `\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\`; press left with SUPER at col 1 | `[OpenLink("https://example.com")]` |
 | `only_web_links_open` | feed `\x1b]8;;file:///etc/passwd\x1b\\x\x1b]8;;\x1b\\`; press left with SUPER at col 0 | no `OpenLink` event |
@@ -491,6 +491,8 @@ All on `TerminalView::new(GridSize { cols: 80, rows: 24 }, &Theme::builtin(), Pl
 | `cmd_k_clears_scrollback` | feed 100 lines; key `Char('k')` with SUPER | `screen().history_len() == 0`, `take_output() == b"\x0c"` |
 | `cmd_a_selects_all` | feed `one\r\ntwo`; key `Char('a')` with SUPER | `copy()` contains `one` and `two`; `take_output()` empty |
 | `focus_is_reported_when_asked` | feed `\x1b[?1004h`; `set_focused(false)`; `set_focused(true)` | `take_output() == b"\x1b[O\x1b[I"` |
+| `cmd_page_keys_move_one_page` | feed 100 lines; key `Up` with SUPER; then key `Down` with SUPER | after Up `screen().scroll_offset() == 23` (a page is the rows minus 1); after Down it is 0; `take_output()` empty both times |
+| `paste_returns_to_the_bottom` | feed 100 lines; `Wheel(10)`; `paste("x")` | `screen().scroll_offset() == 0` |
 | `cmd_scroll_keys_send_nothing` | feed 100 lines; key `Home` with SUPER; then key `End` with SUPER | after Home `screen().scroll_offset() == screen().history_len()`; after End it is 0; `take_output()` empty both times. If `cmdKey` does something else for these keys, `cmdKey` wins: report it |
 | `idle_needs_no_draw` | feed `x` (`needs_draw()` is true); `mark_drawn()`; `take_output()`; `tick(now)` | `needs_draw()` false |
 | `open_sync_needs_no_draw` | `mark_drawn()`; feed `\x1b[?2026hHELLO` | `needs_draw()` false and `tick(now)` returns `Some(deadline)`; `tick(deadline + 1ms)` makes `needs_draw()` true |
