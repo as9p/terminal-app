@@ -4,7 +4,7 @@
 
 **Goal:** A Rust terminal engine library and a one-window plain terminal built on it, on Mac, that pass the design's day-one list and its Mac speed targets.
 
-**Architecture:** Two new crates in the existing workspace. `engine/` (crate `term-engine`) holds screen state behind our own `Screen` type (the only file that names `alacritty_terminal`), key and mouse encoding, a `TerminalView` that owns input policy, and GPU drawing of a cell grid with `wgpu` from one shared glyph texture. `plain/` (crate `term-plain`) is a winit window with one shell on a pty, plus a windowless mode used by tests and recordings. Nothing in `host/` or `client/` changes.
+**Architecture:** Two new crates in the existing workspace. `engine/` (crate `term-engine`) holds screen state behind our own `Screen` type (the only file that names `alacritty_terminal`), key and mouse encoding, a `TerminalView` that owns input policy, and GPU drawing of a cell grid with `wgpu` from one shared glyph texture. `plain/` (crate `term-plain`, which builds the program `snowflake`) is a winit window with one shell on a pty, plus a windowless mode used by tests and recordings. Nothing in `host/` or `client/` changes.
 
 **Tech Stack:** Rust (workspace resolver 3, rustc 1.99). `alacritty_terminal` 0.26, `wgpu` 23, `winit` 0.30, `cosmic-text` 0.12 (font loading, fallback, shaping, rasterizing through its swash cache), `etagere` 0.2, `portable-pty` 0.9, `arboard` 3, `bitflags` 2, `bytemuck` 1, `pollster` 0.4; `png` as a dev dependency. The wgpu, winit, cosmic-text and portable-pty versions are the ones the measured prototype locked.
 
@@ -12,6 +12,7 @@
 
 ## Global Constraints
 
+- The name. The plain terminal is Snowflake (Alex, 2026-11-11): the program file is `snowflake`, the window title is `Snowflake`, and `TERM_PROGRAM` is `snowflake`. The crate names (`term-engine`, `term-plain`), the folders and the `TERM_PLAIN_*` test switches keep their names. `plain/Cargo.toml` sets the program name with `[[bin]] name = "snowflake"`, `path = "src/main.rs"`.
 - One engine. `term-plain` contains no terminal logic: screen state, input encoding, selection, scrolling rules and drawing all come from `term-engine`.
 - The engine knows nothing about shells, hosts, sockets, sidebars, tabs or windows. `engine/Cargo.toml` must not depend on `winit`, `portable-pty`, `wry`, `tokio`, `arboard` or any socket crate.
 - Only `engine/src/screen.rs` may name `alacritty_terminal` or `vte`. Every other file uses the types in this plan, so a different screen library can be swapped in.
@@ -63,7 +64,7 @@ engine/                       crate term-engine (library)
   src/shader.wgsl
   tests/gate.rs  tests/memory.rs  tests/keys.rs  tests/view.rs
   tests/glyphs.rs  tests/draw.rs  tests/images.rs  tests/images/*.png  tests/replay.rs
-plain/                        crate term-plain (binary term-plain)
+plain/                        crate term-plain (binary snowflake)
   Cargo.toml
   src/main.rs                 arguments, then windowless mode or the window
   src/shell.rs                pty, reader thread, writer thread
@@ -815,15 +816,15 @@ impl Session {
 }
 ```
 
-The shell's environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=term-plain`, `TERM_PROGRAM_VERSION` the crate version. The reader thread reads up to 64 KiB at a time.
+The shell's environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=snowflake`, `TERM_PROGRAM_VERSION` the crate version. The reader thread reads up to 64 KiB at a time.
 
-Command line: `term-plain [--headless --cols N --rows N [--keys FILE] [--timeout SECONDS]] [--record FILE] [--cwd DIR] [-- COMMAND ARGS...]`. In `--headless` mode there is no window: output feeds a `Session`, each line of the keys file (`<milliseconds since start> <text>`, with `\r`, `\n`, `\t`, `\\` and `\xNN` escapes) is written to the shell as raw bytes at its time, and when the command exits the final screen is printed (one `row_text` per line) and the process exits with the command's exit code. A timeout kills the command and exits 124. Without `--headless`, this task prints `window mode is not built yet` and exits 2.
+Command line: `snowflake [--headless --cols N --rows N [--keys FILE] [--timeout SECONDS]] [--record FILE] [--cwd DIR] [-- COMMAND ARGS...]`. In `--headless` mode there is no window: output feeds a `Session`, each line of the keys file (`<milliseconds since start> <text>`, with `\r`, `\n`, `\t`, `\\` and `\xNN` escapes) is written to the shell as raw bytes at its time, and when the command exits the final screen is printed (one `row_text` per line) and the process exits with the command's exit code. A timeout kills the command and exits 124. Without `--headless`, this task prints `window mode is not built yet` and exits 2.
 
 - [ ] **Step 1: Write the failing tests**
 
 In `engine/src/recording.rs` (unit test) `recording_round_trips`: a `Recorder` at 80 by 24 given `output(5, b"hi")` and `resize(9, 100 by 30)` reads back as `[Resize{0, 80x24}, Output{5, "hi"}, Resize{9, 100x30}]`; `read_recording` of bytes without the header is an error; a file cut off mid-record yields the whole records before the cut.
 
-In `plain/tests/headless.rs`, each test runs `env!("CARGO_BIN_EXE_term-plain")` with `--headless --cols 80 --rows 24`:
+In `plain/tests/headless.rs`, each test runs `env!("CARGO_BIN_EXE_snowflake")` with `--headless --cols 80 --rows 24`:
 
 | Test | Arguments after the common ones | Assert |
 |---|---|---|
@@ -833,7 +834,7 @@ In `plain/tests/headless.rs`, each test runs `env!("CARGO_BIN_EXE_term-plain")` 
 | `keys_file_is_typed` | `--keys <file with "300 hi\r" and "600 \x04">` `-- /bin/cat` | stdout has `hi` on two lines (the echo and cat's copy); exit code 0 |
 | `timeout_ends_a_stuck_command` | `--timeout 1 -- /bin/cat` | exit code 124 within 3 seconds |
 | `recording_holds_the_output` | `--record <temp file> -- /bin/sh -c 'printf hello'` | `read_recording` gives a first `Resize` of 80 by 24 and `Output` records whose bytes joined contain `hello` |
-| `environment_names_the_terminal` | `-- /bin/sh -c 'printf "%s %s" "$TERM" "$TERM_PROGRAM"'` | stdout line 1 is `xterm-256color term-plain` |
+| `environment_names_the_terminal` | `-- /bin/sh -c 'printf "%s %s" "$TERM" "$TERM_PROGRAM"'` | stdout line 1 is `xterm-256color snowflake` |
 | `five_megabyte_write_arrives_whole` | keys file: one line at 300 ms holding 65,536 lines of 79 `x` plus `\r` (5,242,880 bytes), then `\x04` at a time after it; `--timeout 30 -- /bin/sh -c 'stty -echo; wc -c'` | stdout contains `5242880` |
 
 Unit test in `plain/src/shell.rs`, `write_after_exit_does_not_panic`: spawn `/usr/bin/true`, wait for `Exited`, call `write(vec![b'x'; 1024])` and `resize(..)`; no panic and `write` returns within 100 ms.
@@ -904,7 +905,7 @@ pub fn may_present(visible: bool, size_px: (u32, u32)) -> bool;      // false wh
 ```
 
 What the window does. Each line is a decision, not a suggestion:
-- Size 1280 by 800 logical pixels, the system's standard title bar, title `term-plain` until the shell sets one. Option is Meta for the left key only (`OptionAsAlt::OnlyLeft`); the composing pop-up is off.
+- Size 1280 by 800 logical pixels, the system's standard title bar, title `Snowflake` until the shell sets one. Option is Meta for the left key only (`OptionAsAlt::OnlyLeft`); the composing pop-up is off.
 - One `Gpu`, one `ViewDraw`, one `Session`. Surface present mode from `TERM_PLAIN_PRESENT` (`fifo` or `immediate`, default `fifo`), `desired_maximum_frame_latency: 1`.
 - The reader thread's events reach the event loop through an `EventLoopProxy`. On a wake: take everything waiting, feed it, and ask for a redraw only if `view.needs_draw()`. While output keeps arriving, at most 8 ms of it is fed before a frame is drawn, so a flood never starves the screen or the keyboard.
 - A redraw calls `prepare` and `draw` once and presents. Nothing else presents. Every configure and every present is guarded by `may_present`, so while the window is fully hidden or minimised nothing is drawn, and a surface is never configured with a zero width or height.
@@ -948,7 +949,7 @@ Expected before: does not compile. After: PASS.
 
 A window appears on Alex's screen for four seconds each time this runs, and takes the keyboard while it is up. The controller tells Alex before dispatching this task; run it as few times as the fix needs.
 
-Build with `cargo build --release -p term-plain`. Start `target/release/term-plain -- /bin/sh -c 'printf "\033[31mred\033[0m \342\224\200\342\224\200 ok\n"; sleep 4'` in the background, find its window id with `aerospace list-windows --monitor all --pid <pid> --format '%{window-id}'`, capture it with `screencapture -x -l <id> <scratch file>.png`, and read the image: dark background, `red` in the theme's red, a joined line, a bar cursor. The process exits by itself after 4 seconds; confirm it has. If the capture is refused, say so in the report and leave this check to the hand list. Do not type into the window and do not run a shell of your own in it.
+Build with `cargo build --release -p term-plain`. Start `target/release/snowflake -- /bin/sh -c 'printf "\033[31mred\033[0m \342\224\200\342\224\200 ok\n"; sleep 4'` in the background, find its window id with `aerospace list-windows --monitor all --pid <pid> --format '%{window-id}'`, capture it with `screencapture -x -l <id> <scratch file>.png`, and read the image: dark background, `red` in the theme's red, a joined line, a bar cursor. The process exits by itself after 4 seconds; confirm it has. If the capture is refused, say so in the report and leave this check to the hand list. Do not type into the window and do not run a shell of your own in it.
 
 - [ ] **Step 5: Run everything**
 
@@ -973,7 +974,7 @@ Dispatch: opus, effort high.
 - Modify: `.gitignore` (add `engine/tests/recordings/*.local.rec`)
 
 **Interfaces:**
-- Consumes: `read_recording`, `Record` (Task 7), `TerminalView` (Task 3), `term-plain --headless --record --keys` (Task 7).
+- Consumes: `read_recording`, `Record` (Task 7), `TerminalView` (Task 3), `snowflake --headless --record --keys` (Task 7).
 - Produces: `engine/tests/recordings/claude.local.rec` on this computer only. It is never committed, because the session's first screen can show the account and folder names.
 
 - [ ] **Step 1: Write the replay tests in `engine/tests/replay.rs`**
@@ -992,7 +993,7 @@ Then add `--test replay` to the Windows line in `.github/workflows/engine.yml` (
 
 - [ ] **Step 3: Write `tools/plain/record-claude.sh`**
 
-It makes a temporary empty folder, writes a keys file (`4000 \r`, `9000 say hi in five words\r`, `30000 /exit\r`), and runs `target/release/term-plain --headless --cols 120 --rows 40 --timeout 45 --cwd <folder> --keys <file> --record engine/tests/recordings/claude.local.rec -- claude`, then removes the folder. It prints the size of the recording.
+It makes a temporary empty folder, writes a keys file (`4000 \r`, `9000 say hi in five words\r`, `30000 /exit\r`), and runs `target/release/snowflake --headless --cols 120 --rows 40 --timeout 45 --cwd <folder> --keys <file> --record engine/tests/recordings/claude.local.rec -- claude`, then removes the folder. It prints the size of the recording.
 
 - [ ] **Step 4: Make the recording and run the real replay**
 
@@ -1017,13 +1018,13 @@ Dispatch: opus, effort high.
 - Modify: `tools/speed/run-sitting.sh`, `tools/speed/README.md`
 
 **Interfaces:**
-- Consumes: the `term-plain` release binary and `TERM_PLAIN_PRESENT`, `TERM_PLAIN_STATS` (Task 8); the existing `tools/keylat/app-window.sh`, `tools/keylat/test-app.sh`, `tools/keylat/cat-shell.sh`, `tools/speed/throughput.sh`, `tools/speed/throughput-shell.sh`, `tools/speed/builds-compare.sh`, `tools/speed/run-sitting.sh`.
+- Consumes: the `snowflake` release binary and `TERM_PLAIN_PRESENT`, `TERM_PLAIN_STATS` (Task 8); the existing `tools/keylat/app-window.sh`, `tools/keylat/test-app.sh`, `tools/keylat/cat-shell.sh`, `tools/speed/throughput.sh`, `tools/speed/throughput-shell.sh`, `tools/speed/builds-compare.sh`, `tools/speed/run-sitting.sh`.
 - Produces: `TA_JOB=plain-compare.sh zsh tools/speed/run-sitting.sh <name>` writes `tools/keylat/results/<name>/summary.txt`; `zsh tools/speed/plain-targets.sh <summary.txt>` prints one `PASS` or `FAIL` line per rule and exits non-zero on any `FAIL`.
 
 Read the existing scripts first; the new ones follow their shape, their paths and their way of handing a job to the runner (`builds-compare.sh` is the closest example, and the README explains the runner). Do not run anything that takes the keyboard: only syntax-check (`zsh -n`) and the dry checks below. The sitting itself is Task 11.
 
 Decisions:
-- `bin-window.sh` is sourced. `open_bin <label> <program run inside the terminal>` starts one of five targets and sets `BIN_PID` and `BIN_WINDOW`; `close_bin` ends it. Targets: `plain-fifo` and `plain-immediate` (`target/release/term-plain -- <program>` with `TERM_PLAIN_PRESENT` set), `kitty`, `ghostty`, `alacritty`.
+- `bin-window.sh` is sourced. `open_bin <label> <program run inside the terminal>` starts one of five targets and sets `BIN_PID` and `BIN_WINDOW`; `close_bin` ends it. Targets: `plain-fifo` and `plain-immediate` (`target/release/snowflake -- <program>` with `TERM_PLAIN_PRESENT` set), `kitty`, `ghostty`, `alacritty`.
 - Every target opens at 1280 by 800 points, font size 14, scrollback 20,000 lines (or the nearest setting it has), set by command-line overrides or by the two files in `tools/speed/configs/`. No script reads or writes any terminal's own config folder. Find each program's flags from its own `--help` output on this computer; do not guess a flag. kitty's existing overrides in `throughput.sh` are the model, plus `-o scrollback_lines=20000`.
 - A target whose program is not installed is skipped with a line `<label>: not installed` in the summary; the sitting goes on.
 - `test-bin.sh <label> <result file> <raw csv>` is `test-app.sh` with `open_bin`. `throughput-bin.sh <label> <runs>` is `throughput.sh` with `open_bin` and prints `<label> <MB> <seconds> <MB/s>` lines in the existing format.
@@ -1104,13 +1105,13 @@ git commit -m "docs: stage A speed sitting and how to run the plain terminal"
 
 - [ ] **Step 8: Hand the plain terminal to Alex**
 
-Alex runs `target/release/term-plain` and checks, in Claude Code: Shift+Enter makes a new line; a long answer scrolls and the wheel scrolls back; select, copy, paste; Cmd+click on a link; Cmd+= and Cmd+0; dragging the window edge; the look of text, boxes and emoji against today's app. Stage A is done when the targets pass and Alex says the hand check is fine.
+Alex runs `target/release/snowflake` and checks, in Claude Code: Shift+Enter makes a new line; a long answer scrolls and the wheel scrolls back; select, copy, paste; Cmd+click on a link; Cmd+= and Cmd+0; dragging the window edge; the look of text, boxes and emoji against today's app. Stage A is done when the targets pass and Alex says the hand check is fine.
 
 ---
 
 ## Decisions made in this plan for Alex to accept or change
 
-- The two crates are named `term-engine` (folder `engine/`) and `term-plain` (folder `plain/`).
+- The two crates are named `term-engine` (folder `engine/`) and `term-plain` (folder `plain/`). The program they build is called `snowflake` and its window says Snowflake, after Alex's note that the fast terminal is Snowflake. The crate names are inside names only and are cheap to change later.
 - The font is built into the engine (four font files, about 10 MB added to the repo and the program), so Mac, Windows and the tests all draw the same glyphs.
 - The plain terminal keeps the system's normal title bar. The frameless window is stage B work.
 - The plain terminal does not remember its zoom between runs, the cursor never blinks, and only `http` and `https` links open on Cmd+click. Links are not underlined when the pointer is over them yet.
