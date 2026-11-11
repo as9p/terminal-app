@@ -17,7 +17,8 @@ if ! pgrep -f runner.command > /dev/null; then
 fi
 rm -f $K/job.log
 # The runner is its own process, so the renderer and tab count have to travel in the job line.
-print -r -- "${TA_RENDERER:+TA_RENDERER=$TA_RENDERER }${TA_SPEED_TABS:+TA_SPEED_TABS=$TA_SPEED_TABS }zsh $here/sitting.sh $out" > $K/job.tmp
+# TA_JOB picks another script in this folder to run in place of the whole sitting.
+print -r -- "${TA_RENDERER:+TA_RENDERER=$TA_RENDERER }${TA_SPEED_TABS:+TA_SPEED_TABS=$TA_SPEED_TABS }${TA_APP_A:+TA_APP_A=$TA_APP_A }${TA_APP_B:+TA_APP_B=$TA_APP_B }zsh $here/${TA_JOB:-sitting.sh} $out" > $K/job.tmp
 mv $K/job.tmp $K/job.sh
 echo "Test running. Hands off the keyboard for about 4 minutes."
 for i in {1..600}; do

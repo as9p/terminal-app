@@ -2,7 +2,8 @@
 # with its own data folder, so a test can never reach the real host on 47211.
 
 REPO=${${(%):-%x}:A:h:h:h}
-APP=$REPO/target/release/bundle/macos/terminal-app.app/Contents/MacOS/terminal-app
+# TA_APP points a run at another build of the app, to compare two builds in one sitting.
+APP=${TA_APP:-$REPO/target/release/bundle/macos/terminal-app.app/Contents/MacOS/terminal-app}
 
 # Only a process with the host's exact name gets stopped, whatever else holds the port.
 test_host_pids() {
