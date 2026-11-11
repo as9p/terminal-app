@@ -43,7 +43,11 @@ const FACES: [&[u8]; 4] = [
     include_bytes!("../fonts/JetBrainsMonoNerdFontMono-Italic.ttf"),
     include_bytes!("../fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf"),
 ];
-const LINE_HEIGHT: f64 = 1.1;
+/// Today's app sets a line height of 1.1, which multiplies the font's own line height.
+const LINE_HEIGHT_TENTHS: u32 = 11;
+/// Room for float noise, so a font line height that is a whole number of pixels (25 px times
+/// 1.32 em is 33.000001) does not round up to the next pixel.
+const NOISE_PX: f64 = 1e-3;
 /// Pixel sizes are kept in this range so a wild zoom or scale factor cannot ask for a bitmap
 /// too large to allocate.
 const MIN_PX: f64 = 1.0;
@@ -55,6 +59,8 @@ struct Metrics {
     advance: f32,
     ascent: f32,
     descent: f32,
+    /// Ascent plus descent plus line gap, worked out from the font units in double precision.
+    line: f64,
 }
 
 /// JetBrains Mono's own values, used only if the built-in face somehow cannot be read.
@@ -62,6 +68,7 @@ const FALLBACK_METRICS: Metrics = Metrics {
     advance: 0.6,
     ascent: 1.02,
     descent: 0.3,
+    line: 1.32,
 };
 
 pub struct Fonts {
@@ -103,9 +110,10 @@ impl Fonts {
 
     pub fn cell_size(&mut self, font_px: f32, scale: f64) -> CellSize {
         let px = physical_px(font_px, scale);
+        let natural = (px * self.metrics.line - NOISE_PX).ceil().max(0.0) as u32;
         CellSize {
             w: ((px * f64::from(self.metrics.advance)).round() as u32).max(1),
-            h: ((px * LINE_HEIGHT).round() as u32).max(1),
+            h: (natural.max(1) * LINE_HEIGHT_TENTHS / 10).max(1),
         }
     }
 
@@ -161,8 +169,8 @@ impl Fonts {
         let box_w = if wide { cell.w * 2 } else { cell.w };
         let ascent = px * self.metrics.ascent;
         let descent = px * self.metrics.descent;
-        // Ascent and descent are centred in the line height, so the extra space (or the
-        // overflow, for this font at 1.1) is shared evenly above and below.
+        // Ascent and descent are centred in the row, so the extra space is shared evenly above
+        // and below.
         let baseline = ((cell.h as f32 - (ascent + descent)) / 2.0 + ascent).round() as i32;
         // A fallback glyph narrower than its box (a Han character in a wide cell) sits centred.
         let advance = layout.iter().map(|l| l.w).fold(0.0, f32::max);
@@ -217,6 +225,7 @@ fn regular_metrics(system: &mut FontSystem) -> Option<Metrics> {
         advance: advance / em,
         ascent: m.ascent / em,
         descent: m.descent / em,
+        line: f64::from(m.ascent + m.descent + m.leading) / f64::from(em),
     })
 }
 

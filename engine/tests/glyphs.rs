@@ -93,9 +93,11 @@ fn inside(slot: &AtlasSlot, size: u32) -> bool {
 #[test]
 fn cell_size_follows_the_rule() {
     let mut f = fonts();
-    assert_eq!(f.cell_size(14.0, 2.0), CellSize { w: 17, h: 31 });
-    assert_eq!(f.cell_size(14.0, 1.0), CellSize { w: 8, h: 15 });
-    assert_eq!(f.cell_size(15.0, 2.0).h, 33);
+    assert_eq!(f.cell_size(14.0, 2.0), CellSize { w: 17, h: 40 });
+    assert_eq!(f.cell_size(14.0, 1.0), CellSize { w: 8, h: 20 });
+    assert_eq!(f.cell_size(15.0, 2.0).h, 44);
+    // 25 px times 1.32 em is 33 pixels up to float noise, which must not round up to 34.
+    assert_eq!(f.cell_size(25.0, 1.0).h, 36);
 }
 
 #[test]
@@ -106,7 +108,19 @@ fn plain_letter_fits_its_cell() {
     assert!(g.left >= 0);
     assert!(g.left + g.width as i32 <= 17);
     assert!(g.top >= 0);
-    assert!(g.top + g.height as i32 <= 31);
+    assert!(g.top + g.height as i32 <= 40);
+}
+
+#[test]
+fn descenders_are_not_clipped() {
+    let g = glyph("g", REGULAR, false);
+    assert!(
+        g.top + g.height as i32 <= 39,
+        "g ends at {}",
+        g.top + g.height as i32
+    );
+    let accented = glyph("\u{C1}", REGULAR, false);
+    assert!(accented.top >= 1, "A acute starts at {}", accented.top);
 }
 
 #[test]
