@@ -3,7 +3,8 @@
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use term_engine::{
-    CellSize, Gpu, GridSize, Platform, Rect, Rgb, TerminalView, Theme, ViewDraw, render_to_image,
+    CellPoint, CellSize, Gpu, GridSize, Platform, Rect, Rgb, SelectKind, Side, TerminalView, Theme,
+    ViewDraw, render_to_image,
 };
 
 const MAGENTA: Rgb = Rgb(255, 0, 255);
@@ -341,7 +342,7 @@ fn full_damage_rebuilds_every_row() {
 fn wide_character_spans_two_cells() {
     let Some(mut gpu) = gpu() else { return };
     let mut view = view();
-    view.feed("\u{6F22}".as_bytes());
+    view.feed("\u{6F22}\x1b[3;1H".as_bytes());
     let mut draw = ViewDraw::new(&gpu);
     let img = render_full(&mut gpu, &mut draw, &mut view);
     assert!(
@@ -356,4 +357,185 @@ fn wide_character_spans_two_cells() {
         cell_pixels(&img, 2, 0).iter().all(|&p| p == BG),
         "ink in cell (2,0)"
     );
+}
+
+const CURSOR: Rgb = Rgb(0xF5, 0xE0, 0xDC);
+const CURSOR_TEXT: Rgb = Rgb(0x1E, 0x1E, 0x2E);
+const SELECTION_BG: Rgb = Rgb(0xF5, 0xE0, 0xDC);
+const SELECTION_TEXT: Rgb = Rgb(0x1E, 0x1E, 0x2E);
+
+fn at(col: u16, row: u16) -> CellPoint {
+    CellPoint { col, row }
+}
+
+/// True when some pixel row in `ys` is `color` across the whole of cell (0, 0).
+fn some_row_is(img: &Image, ys: std::ops::Range<u32>, color: Rgb) -> bool {
+    ys.into_iter()
+        .any(|y| (0..CELL_W).all(|x| px(img, x, y) == color))
+}
+
+#[test]
+fn cursor_is_a_bar() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 0, 15), CURSOR);
+    assert_eq!(px(&img, 1, 15), CURSOR);
+    assert_eq!(px(&img, 4, 15), BG);
+}
+
+#[test]
+fn block_cursor_inverts_its_cell() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"\x1b[2 q");
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 8, 2), CURSOR);
+}
+
+#[test]
+fn unfocused_cursor_is_an_outline() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.set_focused(false);
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 0, 15), CURSOR);
+    assert_eq!(px(&img, 16, 15), CURSOR);
+    assert_eq!(px(&img, 8, 15), BG);
+}
+
+#[test]
+fn hidden_cursor_is_not_drawn() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"\x1b[?25l");
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 0, 15), BG);
+}
+
+#[test]
+fn selection_uses_its_colours() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed("\u{2588} \x1b[3;1H".as_bytes());
+    view.screen_mut()
+        .select(SelectKind::Char, at(0, 0), Side::Left);
+    view.screen_mut().select_to(at(1, 0), Side::Right);
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 8, 15), SELECTION_TEXT);
+    assert_eq!(px(&img, CELL_W + 8, 15), SELECTION_BG);
+}
+
+#[test]
+fn underline_is_drawn_below_the_text() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"\x1b[4m \x1b[0m\x1b[3;1H");
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert!(
+        some_row_is(&img, CELL_H * 3 / 4..CELL_H, FG),
+        "no unbroken underline row in the bottom quarter of the cell"
+    );
+    assert!(
+        (0..CELL_H / 2).all(|y| (0..CELL_W).all(|x| px(&img, x, y) == BG)),
+        "ink in the top half of the cell"
+    );
+}
+
+#[test]
+fn strikeout_crosses_the_middle() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"\x1b[9m \x1b[0m\x1b[3;1H");
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert!(
+        some_row_is(&img, 15..26, FG),
+        "no unbroken strikeout row within 5 pixels of y 20"
+    );
+}
+
+#[test]
+fn moving_the_cursor_rebuilds_two_rows() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    let mut draw = ViewDraw::new(&gpu);
+    render_full(&mut gpu, &mut draw, &mut view);
+    view.feed(b"\x1b[3;1H");
+    draw.prepare(&mut gpu, &mut view, FULL, (FULL.w, FULL.h));
+    assert!(
+        draw.rows_rebuilt() <= 2,
+        "rebuilt {} rows",
+        draw.rows_rebuilt()
+    );
+}
+
+#[test]
+fn hiding_the_cursor_rebuilds_its_row() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    let mut draw = ViewDraw::new(&gpu);
+    render_full(&mut gpu, &mut draw, &mut view);
+    view.feed(b"\x1b[?25l");
+    draw.prepare(&mut gpu, &mut view, FULL, (FULL.w, FULL.h));
+    assert_eq!(draw.rows_rebuilt(), 1);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 0, 15), BG);
+    assert_eq!(px(&img, 1, 15), BG);
+}
+
+#[test]
+fn focus_change_redraws_the_cursor() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    let mut draw = ViewDraw::new(&gpu);
+    render_full(&mut gpu, &mut draw, &mut view);
+    view.set_focused(false);
+    draw.prepare(&mut gpu, &mut view, FULL, (FULL.w, FULL.h));
+    assert_eq!(draw.rows_rebuilt(), 1);
+}
+
+#[test]
+fn idle_frame_with_a_cursor_rebuilds_nothing() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"hello");
+    let mut draw = ViewDraw::new(&gpu);
+    render_full(&mut gpu, &mut draw, &mut view);
+    render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(draw.rows_rebuilt(), 0);
+}
+
+#[test]
+fn block_cursor_on_a_letter_shows_the_letter_in_the_cursor_text_colour() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed(b"A\x1b[1;1H\x1b[2 q");
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert!(
+        cell_pixels(&img, 0, 0).contains(&CURSOR_TEXT),
+        "the letter is not in the cursor text colour"
+    );
+    assert_eq!(px(&img, 0, 0), CURSOR);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn selected_wide_character_is_covered_whole() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    view.feed("\u{6F22}".as_bytes());
+    view.screen_mut()
+        .select(SelectKind::Char, at(0, 0), Side::Left);
+    view.screen_mut().select_to(at(0, 0), Side::Right);
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert_eq!(px(&img, 2 * CELL_W - 1, CELL_H - 1), SELECTION_BG);
 }

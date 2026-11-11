@@ -1,18 +1,68 @@
 //! Per-view instance buffers, rebuilt row by row from the screen's damage and drawn in two
-//! instanced draws: cell backgrounds, then glyphs from the shared glyph texture.
+//! instanced draws: cell backgrounds, then glyphs from the shared glyph texture together with the
+//! solid rectangles of text decorations and the cursor.
 
 use bytemuck::Zeroable;
 
 use crate::font::FontStyle;
-use crate::geometry::{CellSize, GridSize, Rect};
+use crate::geometry::{CellPoint, CellSize, GridSize, Rect};
 use crate::gpu::{BgInstance, GlyphInstance, Gpu, ViewUniform, clear_color};
-use crate::screen::{Attrs, Cell, CellWidth, Damage};
+use crate::screen::{Attrs, Cell, CellWidth, CursorShape, Damage};
 use crate::theme::Rgb;
 use crate::view::TerminalView;
 
 /// A frame whose own glyphs keep overflowing the glyph image gives up after this many passes
 /// instead of looping; that takes more distinct glyphs on screen than a 4096 image holds.
 const MAX_PASSES: usize = 3;
+
+/// Glyph buffer slots per cell of a row: its glyph, an underline and a strikeout. A row never
+/// needs more, because each of the three is at most one quad per cell and runs of cells merge.
+const SLOTS_PER_CELL: usize = 3;
+/// After the last row: the cursor's rectangles, at most the four sides of an outline. Being last
+/// in the glyph pass, nothing drawn after can cover them.
+const CURSOR_SLOTS: usize = 4;
+/// `GlyphInstance::color[3]` of a solid rectangle (see the shader).
+const SOLID: u8 = 128;
+
+/// The cursor as last built. Any difference rebuilds the rows it left and entered, because a
+/// cursor change alone reports no damage.
+#[derive(Clone, Copy, PartialEq)]
+struct CursorLook {
+    at: CellPoint,
+    shape: CursorShape,
+    focused: bool,
+}
+
+/// Everything a row build needs besides the cells; the same for every row of a frame.
+#[derive(Clone, Copy)]
+struct Style {
+    cell: CellSize,
+    palette_bg: Rgb,
+    cursor: Rgb,
+    cursor_text: Rgb,
+    selection_bg: Rgb,
+    selection_fg: Rgb,
+    cursor_look: Option<CursorLook>,
+    /// Thickness of cursor bars, outlines and decorations: one pixel per unit of display scale.
+    line: i64,
+    baseline: i64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Line {
+    Single,
+    Double,
+    Dotted,
+    Dashed,
+    Strike,
+}
+
+impl Line {
+    /// Patterned lines start again at every cell's left edge, so only unbroken ones merge.
+    fn joins(self) -> bool {
+        matches!(self, Line::Single | Line::Double | Line::Strike)
+    }
+}
 
 /// What the instance data was built from. Any difference rebuilds every row.
 #[derive(Clone, Copy, PartialEq)]
@@ -36,6 +86,12 @@ pub struct ViewDraw {
     built: Option<Built>,
     dirty: Vec<bool>,
     cells: Vec<Cell>,
+    /// Background and text colour of each cell of the row being built, after the selection and
+    /// a block cursor; kept to reuse its allocation.
+    colors: Vec<(Rgb, Rgb)>,
+    cursor_built: Option<CursorLook>,
+    /// The cursor slots changed since the last upload.
+    cursor_changed: bool,
     /// `None` when the rectangle has no area inside the target.
     scissor: Option<[u32; 4]>,
     rows_rebuilt: usize,
@@ -69,6 +125,9 @@ impl ViewDraw {
             built: None,
             dirty: Vec::new(),
             cells: Vec::new(),
+            colors: Vec::new(),
+            cursor_built: None,
+            cursor_changed: false,
             scissor: None,
             rows_rebuilt: 0,
         }
@@ -86,7 +145,22 @@ impl ViewDraw {
         let grid = view.grid();
         let (cols, rows) = (usize::from(grid.cols), usize::from(grid.rows));
         let cell = gpu.cell_size();
-        let palette_bg = view.theme().palette.bg;
+        let palette = &view.theme().palette;
+        let style = Style {
+            cell,
+            palette_bg: palette.bg,
+            cursor: palette.cursor,
+            cursor_text: palette.cursor_text,
+            selection_bg: palette.selection_bg,
+            selection_fg: palette.selection_fg,
+            cursor_look: view.screen().cursor().map(|c| CursorLook {
+                at: c.at,
+                shape: c.shape,
+                focused: view.focused(),
+            }),
+            line: gpu.scale().round().max(1.0) as i64,
+            baseline: i64::from(gpu.baseline()),
+        };
         if self.built.is_none_or(|b| b.grid != grid) {
             self.resize(gpu, cols, rows);
         }
@@ -107,11 +181,26 @@ impl ViewDraw {
                 }
             }
         }
+        let cursor_moved = style.cursor_look != self.cursor_built;
+        if cursor_moved {
+            for look in [self.cursor_built, style.cursor_look].into_iter().flatten() {
+                if let Some(dirty) = self.dirty.get_mut(usize::from(look.at.row)) {
+                    *dirty = true;
+                }
+            }
+            self.cursor_built = style.cursor_look;
+        }
+        if full || cursor_moved {
+            // Building the cursor's row fills them again; a hidden cursor leaves them empty.
+            let tail = self.glyphs.len() - CURSOR_SLOTS;
+            self.glyphs[tail..].fill(GlyphInstance::zeroed());
+            self.cursor_changed = true;
+        }
         for _ in 0..MAX_PASSES {
             generation = gpu.glyph_generation();
             for row in 0..rows {
                 if self.dirty[row] {
-                    self.build_row(gpu, view, row, cols, cell, palette_bg);
+                    self.build_row(gpu, view, row, cols, &style);
                 }
             }
             if gpu.glyph_generation() == generation {
@@ -126,13 +215,14 @@ impl ViewDraw {
             self.bg[0] = BgInstance {
                 pos: [0, 0],
                 size: [clamp_px(rect.w.into()), clamp_px(rect.h.into())],
-                color: rgba(palette_bg, 255),
+                color: rgba(style.palette_bg, 255),
             };
         }
         self.upload(gpu, full, cols);
         gpu.upload_glyphs();
         self.rows_rebuilt = self.dirty.iter().filter(|&&d| d).count();
         self.dirty.fill(false);
+        self.cursor_changed = false;
         // A frame that never settled keeps an older generation, so the next prepare tries again.
         self.built = Some(Built {
             generation,
@@ -182,7 +272,7 @@ impl ViewDraw {
     fn resize(&mut self, gpu: &Gpu, cols: usize, rows: usize) {
         let slots = cols * rows;
         self.bg = vec![BgInstance::zeroed(); 1 + slots];
-        self.glyphs = vec![GlyphInstance::zeroed(); slots.max(1)];
+        self.glyphs = vec![GlyphInstance::zeroed(); slots * SLOTS_PER_CELL + CURSOR_SLOTS];
         self.bg_buffer = instance_buffer::<BgInstance>(gpu, "backgrounds", self.bg.len());
         self.glyph_buffer = instance_buffer::<GlyphInstance>(gpu, "glyphs", self.glyphs.len());
         self.dirty = vec![false; rows];
@@ -194,20 +284,59 @@ impl ViewDraw {
         view: &TerminalView,
         row: usize,
         cols: usize,
-        cell: CellSize,
-        palette_bg: Rgb,
+        style: &Style,
     ) {
-        view.screen().cells(row as u16, &mut self.cells);
+        let screen = view.screen();
+        screen.cells(row as u16, &mut self.cells);
         let cells = &self.cells[..self.cells.len().min(cols)];
+        let cell = style.cell;
         let top = i64::from(cell.h) * row as i64;
         let x_of = |col: usize| i64::from(cell.w) * col as i64;
+        // The right half of a wide character takes its colours and decorations from the left.
+        let spacer_of_wide = |col: usize| {
+            col > 0
+                && cells[col].width == CellWidth::Spacer
+                && cells[col - 1].width == CellWidth::Wide
+        };
+        let cursor_here = style
+            .cursor_look
+            .filter(|c| usize::from(c.at.row) == row && usize::from(c.at.col) < cells.len());
+
+        let block = cursor_here
+            .filter(|c| c.focused && c.shape == CursorShape::Block)
+            .map(|c| usize::from(c.at.col));
+        let selected = |col: usize| {
+            screen.is_selected(CellPoint {
+                col: col as u16,
+                row: row as u16,
+            })
+        };
+        self.colors.clear();
+        for (col, c) in cells.iter().enumerate() {
+            // The cursor wins over the selection. A cursor on the right half of a wide character
+            // should not happen; if it does, it covers that half only.
+            let colors = if block == Some(col) {
+                (style.cursor, style.cursor_text)
+            } else if spacer_of_wide(col) {
+                self.colors[col - 1]
+            } else if selected(col) || (c.width == CellWidth::Wide && selected(col + 1)) {
+                (style.selection_bg, style.selection_fg)
+            } else {
+                (c.bg, c.fg)
+            };
+            self.colors.push(colors);
+        }
 
         // Runs of one colour make one quad; the palette background is already under them.
         let bg_row = &mut self.bg[1 + row * cols..1 + (row + 1) * cols];
         let mut used = 0;
         let mut run: Option<(usize, Rgb)> = None;
         for col in 0..=cells.len() {
-            let color = cells.get(col).map(|c| c.bg).filter(|&c| c != palette_bg);
+            let color = self
+                .colors
+                .get(col)
+                .map(|c| c.0)
+                .filter(|&c| c != style.palette_bg);
             if color == run.map(|(_, c)| c) {
                 continue;
             }
@@ -223,18 +352,19 @@ impl ViewDraw {
         }
         bg_row[used..].fill(BgInstance::zeroed());
 
-        let glyph_row = &mut self.glyphs[row * cols..(row + 1) * cols];
+        let row_slots = SLOTS_PER_CELL * cols;
+        let glyph_row = &mut self.glyphs[row * row_slots..(row + 1) * row_slots];
         let mut used = 0;
         for (col, c) in cells.iter().enumerate() {
             // A spacer is the right half of a wide character, drawn by its left half.
             if c.width == CellWidth::Spacer || (c.ch == ' ' && c.zerowidth.is_empty()) {
                 continue;
             }
-            let style = FontStyle {
+            let face = FontStyle {
                 bold: c.attrs.contains(Attrs::BOLD),
                 italic: c.attrs.contains(Attrs::ITALIC),
             };
-            let slot = gpu.glyph(c.ch, &c.zerowidth, style, c.width == CellWidth::Wide);
+            let slot = gpu.glyph(c.ch, &c.zerowidth, face, c.width == CellWidth::Wide);
             if slot.w == 0 || slot.h == 0 {
                 continue;
             }
@@ -245,11 +375,71 @@ impl ViewDraw {
                 ],
                 size: [clamp_px(slot.w.into()), clamp_px(slot.h.into())],
                 slot: [clamp_px(slot.x.into()), clamp_px(slot.y.into())],
-                color: rgba(c.fg, if slot.color { 0 } else { 255 }),
+                color: rgba(self.colors[col].1, if slot.color { 0 } else { 255 }),
             };
             used += 1;
         }
+
+        // After the glyphs, so a descender's transparent edge cannot hide part of a line.
+        for strike in [false, true] {
+            let mut run: Option<(usize, Line, Rgb)> = None;
+            for col in 0..=cells.len() {
+                let key = cells.get(col).and_then(|c| {
+                    let attrs = if spacer_of_wide(col) {
+                        cells[col - 1].attrs
+                    } else {
+                        c.attrs
+                    };
+                    let line = if strike {
+                        attrs.contains(Attrs::STRIKEOUT).then_some(Line::Strike)
+                    } else {
+                        underline_of(attrs)
+                    };
+                    line.map(|line| (line, self.colors[col].1))
+                });
+                if let (Some((_, line, color)), Some(next)) = (run, key)
+                    && line.joins()
+                    && (line, color) == next
+                {
+                    continue;
+                }
+                if let Some((start, line, color)) = run {
+                    glyph_row[used] =
+                        line_quad(line, color, x_of(start), x_of(col - start), top, style);
+                    used += 1;
+                }
+                run = key.map(|(line, color)| (col, line, color));
+            }
+        }
         glyph_row[used..].fill(GlyphInstance::zeroed());
+
+        if let Some(look) = cursor_here {
+            let col = usize::from(look.at.col);
+            let wide = cells[col].width == CellWidth::Wide;
+            let (x, w, h) = (x_of(col), x_of(if wide { 2 } else { 1 }), i64::from(cell.h));
+            let t = style.line.min(w).min(h);
+            let paint = |x, y, w, h| solid(x, y, w, h, style.cursor, [0, 0]);
+            let mut quads = [GlyphInstance::zeroed(); CURSOR_SLOTS];
+            if !look.focused {
+                let side = (h - 2 * t).max(0);
+                quads = [
+                    paint(x, top, w, t),
+                    paint(x, top + h - t, w, t),
+                    paint(x, top + t, t, side),
+                    paint(x + w - t, top + t, t, side),
+                ];
+            } else {
+                match look.shape {
+                    CursorShape::Bar => quads[0] = paint(x, top, t, h),
+                    CursorShape::Underline => quads[0] = paint(x, top + h - t, w, t),
+                    // Drawn by the cell colours above.
+                    CursorShape::Block => {}
+                }
+            }
+            let tail = self.glyphs.len() - CURSOR_SLOTS;
+            self.glyphs[tail..].copy_from_slice(&quads);
+            self.cursor_changed = true;
+        }
     }
 
     /// Everything after a full rebuild, otherwise one write per run of adjacent dirty rows.
@@ -277,11 +467,20 @@ impl ViewDraw {
                 (bg_from * size_of::<BgInstance>()) as u64,
                 bytemuck::cast_slice(&self.bg[bg_from..bg_to]),
             );
-            let (glyph_from, glyph_to) = (first * cols, row * cols);
+            let row_slots = SLOTS_PER_CELL * cols;
+            let (glyph_from, glyph_to) = (first * row_slots, row * row_slots);
             queue.write_buffer(
                 &self.glyph_buffer,
                 (glyph_from * size_of::<GlyphInstance>()) as u64,
                 bytemuck::cast_slice(&self.glyphs[glyph_from..glyph_to]),
+            );
+        }
+        if self.cursor_changed {
+            let tail = self.glyphs.len() - CURSOR_SLOTS;
+            queue.write_buffer(
+                &self.glyph_buffer,
+                (tail * size_of::<GlyphInstance>()) as u64,
+                bytemuck::cast_slice(&self.glyphs[tail..]),
             );
         }
     }
@@ -397,6 +596,66 @@ fn instance_buffer<T>(gpu: &Gpu, label: &str, count: usize) -> wgpu::Buffer {
 /// pinning it there only moves a quad the scissor already removes.
 fn clamp_px(value: i64) -> u16 {
     value.clamp(0, i64::from(u16::MAX)) as u16
+}
+
+/// The one underline style a cell shows. Programs set one style at a time; should several flags
+/// meet, the plainer style wins.
+fn underline_of(attrs: Attrs) -> Option<Line> {
+    if attrs.contains(Attrs::UNDERLINE) {
+        Some(Line::Single)
+    } else if attrs.contains(Attrs::DOUBLE_UNDERLINE) {
+        Some(Line::Double)
+    } else if attrs.intersects(Attrs::DOTTED_UNDERLINE | Attrs::UNDERCURL) {
+        // A curl needs more than rectangles; dots keep it distinct from the other styles.
+        Some(Line::Dotted)
+    } else if attrs.contains(Attrs::DASHED_UNDERLINE) {
+        Some(Line::Dashed)
+    } else {
+        None
+    }
+}
+
+/// One decoration across `w` pixels from `x`, kept inside the cell's height.
+fn line_quad(line: Line, color: Rgb, x: i64, w: i64, top: i64, style: &Style) -> GlyphInstance {
+    let (t, cell_w, cell_h) = (style.line, i64::from(style.cell.w), i64::from(style.cell.h));
+    let h = if line == Line::Double { 3 * t } else { t }.min(cell_h);
+    let y = if line == Line::Strike {
+        (cell_h - h) / 2
+    } else {
+        (style.baseline + t).min(cell_h - h)
+    };
+    let across = match line {
+        Line::Dotted => pattern(t, 2 * t),
+        Line::Dashed => {
+            let on = (cell_w as f64 / 3.0).round().max(1.0) as i64;
+            pattern(on, on + (cell_w as f64 / 6.0).round().max(1.0) as i64)
+        }
+        _ => 0,
+    };
+    let down = if line == Line::Double {
+        pattern(t, 2 * t)
+    } else {
+        0
+    };
+    solid(x, top + y, w, h, color, [across, down])
+}
+
+/// A dash pattern for the shader; unbroken when it does not fit its 8-bit fields.
+fn pattern(on: i64, period: i64) -> u16 {
+    if on >= period || period > 255 {
+        0
+    } else {
+        (on | period << 8) as u16
+    }
+}
+
+fn solid(x: i64, y: i64, w: i64, h: i64, color: Rgb, pattern: [u16; 2]) -> GlyphInstance {
+    GlyphInstance {
+        pos: [clamp_px(x), clamp_px(y)],
+        size: [clamp_px(w), clamp_px(h)],
+        slot: pattern,
+        color: rgba(color, SOLID),
+    }
 }
 
 fn rgba(Rgb(r, g, b): Rgb, a: u8) -> [u8; 4] {

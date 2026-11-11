@@ -53,12 +53,17 @@ fn bg_fs(in: BgOut) -> @location(0) vec4<f32> {
 
 struct GlyphOut {
     @builtin(position) position: vec4<f32>,
+    // A texel position for a glyph, a pixel position inside the quad for a solid rectangle.
     @location(0) texel: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) pattern: vec2<u32>,
 }
 
 // `color.a` is 1 for a mask glyph, tinted with `color.rgb`, and 0 for a colour glyph, drawn
-// with its own texels.
+// with its own texels. A value near one half marks a solid rectangle in `color.rgb`, such as a
+// cursor or a text decoration, which reads no texels: its `slot` is a dash pattern instead,
+// across then down, each `on | period << 8` in pixels, period 0 meaning unbroken. Carrying
+// rectangles in this pass keeps a view at two draws and puts them over the text.
 @vertex
 fn glyph_vs(
     @builtin(vertex_index) index: u32,
@@ -70,13 +75,29 @@ fn glyph_vs(
     let offset = corner(index) * vec2<f32>(size);
     var out: GlyphOut;
     out.position = to_clip(vec2<f32>(pos) + offset);
-    out.texel = vec2<f32>(slot) + offset;
+    out.texel = select(vec2<f32>(slot) + offset, offset, is_solid(color.a));
     out.color = vec4<f32>(srgb_to_linear(color.rgb), color.a);
+    out.pattern = slot;
     return out;
+}
+
+fn is_solid(a: f32) -> bool {
+    return a > 0.25 && a < 0.75;
+}
+
+fn dash_on(at: f32, pattern: u32) -> bool {
+    let on = pattern & 0xffu;
+    let period = pattern >> 8u;
+    return period == 0u || u32(at) % period < on;
 }
 
 @fragment
 fn glyph_fs(in: GlyphOut) -> @location(0) vec4<f32> {
+    if is_solid(in.color.a) {
+        let at = floor(in.texel);
+        let on = dash_on(at.x, in.pattern.x) && dash_on(at.y, in.pattern.y);
+        return vec4<f32>(in.color.rgb, select(0.0, 1.0, on));
+    }
     // Read without filtering: a pixel centre sits half a texel into its texel.
     let texel = textureLoad(glyphs, vec2<i32>(floor(in.texel)), 0);
     if in.color.a > 0.5 {

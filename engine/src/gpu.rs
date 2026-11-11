@@ -23,7 +23,8 @@ pub(crate) struct BgInstance {
 }
 
 /// One glyph quad; `slot` is its top left corner in the glyph texture. `color[3]` is 255 for a
-/// mask glyph and 0 for a colour glyph (see the shader).
+/// mask glyph and 0 for a colour glyph. A solid rectangle (a cursor or a text decoration) has
+/// `color[3]` 128 and carries its dash pattern in `slot` instead (see the shader).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GlyphInstance {
@@ -55,6 +56,8 @@ pub struct Gpu {
     font_px: f32,
     scale: f64,
     cell: CellSize,
+    /// Pixels from the top of a cell to the text baseline, where underlines hang from.
+    baseline: u32,
     /// Slots of single characters, so the common cell skips building a `GlyphKey`, which
     /// allocates. Valid for `quick_generation` only.
     quick: HashMap<(char, FontStyle, bool), AtlasSlot>,
@@ -164,6 +167,7 @@ impl Gpu {
         let (texture, texture_bind_group) = glyph_texture(&device, &texture_layout, atlas.size());
         let mut fonts = Fonts::new();
         let cell = fonts.cell_size(FONT_PX_DEFAULT, 1.0);
+        let baseline = baseline(&mut fonts, FONT_PX_DEFAULT, 1.0);
         Ok(Gpu {
             device,
             queue,
@@ -178,6 +182,7 @@ impl Gpu {
             font_px: FONT_PX_DEFAULT,
             scale: 1.0,
             cell,
+            baseline,
             quick: HashMap::new(),
             quick_generation: 0,
             text: String::new(),
@@ -201,7 +206,16 @@ impl Gpu {
         self.font_px = font_px;
         self.scale = scale;
         self.cell = self.fonts.cell_size(font_px, scale);
+        self.baseline = baseline(&mut self.fonts, font_px, scale);
         self.atlas.clear();
+    }
+
+    pub(crate) fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    pub(crate) fn baseline(&self) -> u32 {
+        self.baseline
     }
 
     pub fn cell_size(&self) -> CellSize {
@@ -319,6 +333,17 @@ pub(crate) fn clear_color(Rgb(r, g, b): Rgb) -> wgpu::Color {
         b: linear(b),
         a: 1.0,
     }
+}
+
+/// The font keeps its metrics to itself, so the baseline is read off a capital H, whose ink ends
+/// exactly on it.
+fn baseline(fonts: &mut Fonts, font_px: f32, scale: f64) -> u32 {
+    let regular = FontStyle {
+        bold: false,
+        italic: false,
+    };
+    let h = fonts.rasterize("H", regular, font_px, scale, false);
+    (h.top + h.height as i32).max(0) as u32
 }
 
 fn pipeline(

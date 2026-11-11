@@ -14,4 +14,5 @@ bytemuck = { version = "1", features = ["derive"] }
 wgpu = "23"
 
 [dev-dependencies]
+png = "0.18"
 pollster = "0.4"
