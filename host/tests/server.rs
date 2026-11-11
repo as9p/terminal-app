@@ -52,12 +52,16 @@ impl Drop for Host {
 
 impl Host {
     fn spawn(port: u16, dir: DataDir, stderr: Stdio) -> Host {
+        // So a test can never start the real login shell, which is slow and varies.
+        Host::spawn_with_shell(port, dir, stderr, "/bin/sh")
+    }
+
+    fn spawn_with_shell(port: u16, dir: DataDir, stderr: Stdio, shell: &str) -> Host {
         term_host::prepare_for_fork();
         let child = Command::new(env!("CARGO_BIN_EXE_term-host"))
             .env("TERM_APP_DATA", &dir.0)
             .env("TERM_HOST_PORT", port.to_string())
-            // So a test can never start the real login shell, which is slow and varies.
-            .env("SHELL", "/bin/sh")
+            .env("SHELL", shell)
             // So a login shell never reads the real startup files.
             .env("HOME", &dir.0)
             .stdin(Stdio::null())
@@ -76,6 +80,14 @@ impl Host {
 
     fn start() -> Host {
         Host::start_in(DataDir::fresh())
+    }
+
+    /// A host whose programs start with `shell`, which may not exist.
+    #[cfg(unix)]
+    fn start_in_with_shell(dir: DataDir, shell: &str) -> Host {
+        let mut host = Host::spawn_with_shell(free_port(), dir, Stdio::inherit(), shell);
+        host.wait_ready();
+        host
     }
 
     /// Ready means the port answers and a whole token is on disk.
@@ -1478,8 +1490,11 @@ mod sessions {
     async fn created_session_gets_a_tab() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        // `create` asserts `created` is the first frame, so the session number is known
+        // before the pushed tree shows its pane.
         create(&mut ws).await;
-        let tree = tree(&mut ws).await;
+        let tree = pushed_tree(&mut ws, |_| true).await;
         assert_eq!(tree["ungrouped"][0]["split"], leaf(UUID), "{tree}");
     }
 
@@ -1505,7 +1520,9 @@ mod sessions {
     async fn create_with_split_place_adds_pane() {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
         create(&mut ws).await;
+        pushed_tree(&mut ws, |_| true).await;
         say(
             &mut ws,
             json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80,
@@ -1513,7 +1530,7 @@ mod sessions {
         )
         .await;
         assert_eq!(hear_text(&mut ws).await["type"], "created");
-        let tree = tree(&mut ws).await;
+        let tree = pushed_tree(&mut ws, |_| true).await;
         let tabs = tree["ungrouped"].as_array().expect("tabs");
         assert_eq!(tabs.len(), 1, "{tree}");
         assert_eq!(tabs[0]["split"]["type"], "row", "{tree}");
@@ -1592,8 +1609,146 @@ mod sessions {
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
         tree(&mut ws).await;
+        // Never attached, so its program never started.
         say(&mut ws, json!({"type": "kill", "session": session})).await;
         let tree = pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
         assert_eq!(tree["closed"], json!([]), "{tree}");
+        wait_for_list(&mut ws, |items| items.is_empty()).await;
+        say(&mut ws, json!({"type": "kill", "session": session})).await;
+        assert_eq!(hear_text(&mut ws).await["code"], "no_session");
+    }
+
+    #[tokio::test]
+    async fn new_shell_starts_at_its_first_attach() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        // Not started yet, so it has no size.
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cols"], 0, "{items:?}");
+        assert_eq!(items[0]["rows"], 0, "{items:?}");
+
+        attach(&mut ws, session).await;
+        type_line(&mut ws, session, "echo he''llo").await;
+        read_until(&mut ws, session, "hello").await;
+        assert_eq!(list(&mut ws).await[0]["cols"], 80);
+    }
+
+    #[tokio::test]
+    async fn keys_sent_right_after_the_attach_arrive_in_order() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let session = create(&mut ws).await;
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        for n in 1..=3 {
+            type_line(&mut ws, session, &format!("echo ke''y{n}")).await;
+        }
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "attached", "{reply}");
+        let seen = read_until(&mut ws, session, "key3").await;
+        let at = |needle: &str| seen.find(needle).unwrap_or_else(|| panic!("{seen:?}"));
+        assert!(
+            at("key1") < at("key2") && at("key2") < at("key3"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_attach_does_not_start_a_second_shell() {
+        let host = Host::start();
+        let mut first = signed_in(&host).await;
+        let mut second = signed_in(&host).await;
+        let session = create(&mut first).await;
+        // Both ask before either start has finished.
+        let attach_frame = json!({"type": "attach", "session": session, "cols": 80, "rows": 24});
+        say(&mut first, attach_frame.clone()).await;
+        say(&mut second, attach_frame).await;
+        assert_eq!(hear_text(&mut first).await["type"], "attached");
+        assert_eq!(hear_text(&mut second).await["type"], "attached");
+
+        type_line(&mut first, session, "echo pid=$$ fir''st").await;
+        let one = read_until(&mut first, session, "first").await;
+        type_line(&mut second, session, "echo pid=$$ sec''ond").await;
+        let other = read_until(&mut second, session, "second").await;
+        assert_eq!(pid_in(&one), pid_in(&other));
+        let children = Command::new("pgrep")
+            .args(["-P", &host.child.id().to_string()])
+            .output()
+            .expect("run pgrep");
+        let children = String::from_utf8_lossy(&children.stdout);
+        assert_eq!(children.lines().count(), 1, "{children:?}");
+    }
+
+    /// A folder passes the check that sends a missing `SHELL` to the account's shell, then
+    /// cannot be started, so starting a program always fails.
+    const NO_SHELL: &str = "/";
+
+    #[tokio::test]
+    async fn new_session_that_cannot_start_leaves_its_tab() {
+        let host = Host::start_in_with_shell(DataDir::fresh(), NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        let session = create(&mut ws).await;
+        pushed_tree(&mut ws, |tree| tree["ungrouped"][0]["split"] == leaf(UUID)).await;
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        let emptied = pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+        assert_eq!(emptied["closed"], json!([]), "{emptied}");
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await, Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn restored_session_that_cannot_start_stays() {
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        let saved = json!({"sessions": [
+            {"uuid": UUID, "kind": "shell", "cwd": "/", "title": null, "chat": null}
+        ]});
+        std::fs::write(dir.0.join("state.json"), saved.to_string()).expect("seed the state");
+        let host = Host::start_in_with_shell(dir, NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        let session = items[0]["session"].as_u64().expect("a session number");
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn new_session_is_saved_before_it_starts() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        create(&mut ws).await;
+        let file = host.dir.0.join("state.json");
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let state: Value = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(Value::Null);
+            if state["sessions"][0]["uuid"] == UUID {
+                // So it comes back as a plain shell in its folder.
+                assert_eq!(state["sessions"][0]["kind"], "shell", "{state}");
+                assert_eq!(state["sessions"][0]["cwd"], "/", "{state}");
+                break;
+            }
+            assert!(Instant::now() < deadline, "never saved: {state}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

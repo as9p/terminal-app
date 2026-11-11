@@ -381,7 +381,8 @@ impl Connection {
         rows: u16,
         place: Place,
     ) -> Answer {
-        let size = checked_size(cols, rows)?;
+        // Still refused here, though the program takes its size from the first attach.
+        checked_size(cols, rows)?;
         let parsed = Uuid::parse_str(&uuid)
             .map_err(|_| HostFrame::error(code::BAD_REQUEST, "uuid does not parse"))?;
         let (kind, kind_name) = match kind.as_str() {
@@ -400,36 +401,37 @@ impl Connection {
             Kind::Claude { chat, .. } => Some(chat),
             Kind::Shell => None,
         };
-        let spec = SpawnSpec {
-            kind,
-            cwd: PathBuf::from(cwd),
-            uuid: parsed,
-            data_dir: self.registry.data_dir.clone(),
-            known_cwd: false,
-        };
-        let cwd = spec.cwd.clone();
+        let cwd = PathBuf::from(cwd);
 
-        // Forking is slow, and looking at a folder can stall on a network mount.
-        let tokens = self.registry.tokens.clone();
-        let spawned = spawn_blocking(move || {
-            let Some(folder) = resolve_dir(&spec.cwd) else {
+        // Looking at a folder can stall on a network mount. The program starts at the first
+        // attach, so the tab shows without waiting for a fork.
+        let looked_at = cwd.clone();
+        let looked = spawn_blocking(move || {
+            let Some(folder) = resolve_dir(&looked_at) else {
                 return Err(HostFrame::error(code::BAD_CWD, "no such folder"));
             };
-            let project = project::resolve(&folder);
-            Ok((start_program(spec, size, &tokens)?, project))
+            Ok(project::resolve(&folder))
         })
         .await;
-        let (running, project) = spawned.unwrap_or_else(|_| Err(start_failed()))?;
+        let project = looked.unwrap_or_else(|_| Err(start_failed()))?;
 
-        // The pane goes in before the session is listed. Its folders and exits reach the tree
-        // only through the registry, so none can arrive before there is a pane for them.
         let shell = kind_name == "shell";
-        lock(&self.registry.tree).add_session_in(&uuid, place, &project, shell);
-        let served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
-        let _ = served.running.set(running);
-        let session = self.registry.add(served);
+        let mut served = Served::new(uuid.clone(), parsed, kind_name, chat, cwd, None);
+        served.fresh = true;
+        {
+            // Held so a tree pushed from elsewhere, which may already show the pane, cannot
+            // reach this client before `created`.
+            let _watchers = lock(&self.registry.watchers);
+            // The pane goes in before the session is listed. Its folders and exits reach the
+            // tree only through the registry, so none can arrive before there is a pane for
+            // them.
+            lock(&self.registry.tree).add_session_in(&uuid, place, &project, shell);
+            let session = self.registry.add(served);
+            hand_text(&self.out, &HostFrame::Created { session, uuid });
+        }
+        // After `created`, so the client holds the session number when the tree arrives.
         self.registry.push_tree();
-        Ok(Some(HostFrame::Created { session, uuid }))
+        Ok(None)
     }
 
     async fn attach(&mut self, session: u32, cols: u16, rows: u16) -> Answer {
@@ -437,13 +439,20 @@ impl Connection {
         let served = self.registry.get(session).ok_or_else(no_session)?;
         self.drop_attachment(session);
         if served.running.get().is_none() {
-            // A restored Claude session starts here, so a reboot does not start every chat at
-            // once.
+            // A new session starts here, so its tab shows without waiting for a fork. So does
+            // a restored Claude session, so a reboot does not start every chat at once.
             let starting = Arc::clone(&served);
             let data_dir = self.registry.data_dir.clone();
             let tokens = self.registry.tokens.clone();
             let started = spawn_blocking(move || starting.start(size, &data_dir, &tokens)).await;
-            started.unwrap_or_else(|_| Err(start_failed()))?;
+            if let Err(error) = started.unwrap_or_else(|_| Err(start_failed())) {
+                // Nothing saved calls for a new session, so one that cannot start leaves its
+                // tab. A restored one stays, and its next attach tries again.
+                if served.fresh {
+                    let _ = self.registry.kill(session);
+                }
+                return Err(error);
+            }
         }
         let running = served.running()?;
 
@@ -748,7 +757,7 @@ impl Registry {
         drop(removed);
     }
 
-    /// A restored Claude session that has not started yet reports a size of 0 by 0.
+    /// A session that has not started yet reports a size of 0 by 0.
     fn items(&self) -> Vec<SessionItem> {
         let sessions = lock(&self.sessions);
         let mut items: Vec<SessionItem> = sessions
@@ -1264,9 +1273,11 @@ struct Served {
     cwd: Mutex<PathBuf>,
     /// Saved before a restart, and shown until the program sets a title of its own.
     saved_title: Option<String>,
-    /// Empty only for a restored session that has not started yet.
+    /// Empty until the session starts: a new one or a restored Claude one at its first attach.
     running: OnceLock<Running>,
     starting: Mutex<()>,
+    /// Made by `create`. If its start fails it goes, since nothing saved calls for it.
+    fresh: bool,
     kill_asked: AtomicBool,
     /// The last folder passed to the tree.
     seen_cwd: Mutex<Option<PathBuf>>,
@@ -1301,6 +1312,7 @@ impl Served {
             saved_title,
             running: OnceLock::new(),
             starting: Mutex::new(()),
+            fresh: false,
             kill_asked: AtomicBool::new(false),
             seen_cwd: Mutex::new(None),
             seen_exit: AtomicBool::new(false),
@@ -1340,13 +1352,18 @@ impl Served {
             .or_else(|| self.saved_title.clone())
     }
 
-    /// Starts a restored session, in its saved folder or the home folder if that is gone. A
-    /// Claude chat resumes only if it has a transcript, since one that never got a first
-    /// message cannot be resumed and starts fresh with the same id. Blocks.
+    /// Starts a new or restored session, in its folder or the home folder if that is gone. A
+    /// restored Claude chat resumes only if it has a transcript, since one that never got a
+    /// first message cannot be resumed and starts fresh with the same id. Blocks.
     fn start(&self, size: Size, data_dir: &Path, tokens: &Tokens) -> Result<(), HostFrame> {
         let _gate = lock(&self.starting);
         if self.running.get().is_some() {
             return Ok(());
+        }
+        // A new session whose start failed is on its way out, so an attach that waited on the
+        // gate must not start it after all.
+        if self.kill_asked.load(Ordering::Relaxed) {
+            return Err(no_session());
         }
         let wanted = lock(&self.cwd).clone();
         let cwd = if wanted.is_dir() {
@@ -1357,20 +1374,33 @@ impl Served {
         let kind = match self.chat {
             Some(chat) => Kind::Claude {
                 chat,
-                resume: state::transcript_exists(chat),
+                // A new chat never resumes.
+                resume: !self.fresh && state::transcript_exists(chat),
             },
             None => Kind::Shell,
         };
         *lock(&self.cwd) = cwd.clone();
         let spec = SpawnSpec {
-            known_cwd: kind == Kind::Shell,
+            // A new shell's folder comes from its hook at the first prompt, as the client
+            // already knows where it asked for it.
+            known_cwd: kind == Kind::Shell && !self.fresh,
             kind,
             cwd,
             uuid: self.id,
             data_dir: data_dir.to_path_buf(),
         };
-        let _ = self.running.set(start_program(spec, size, tokens)?);
-        Ok(())
+        match start_program(spec, size, tokens) {
+            Ok(running) => {
+                let _ = self.running.set(running);
+                Ok(())
+            }
+            Err(error) => {
+                if self.fresh {
+                    self.kill_asked.store(true, Ordering::Relaxed);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// What to save, or None if the session should not come back: it was closed with `kill`,
