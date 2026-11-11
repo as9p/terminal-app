@@ -157,6 +157,23 @@ fn keys_file_is_typed() {
 }
 
 #[test]
+fn times_too_far_to_count_do_not_crash() {
+    let keys = TempFile::new("far-keys");
+    std::fs::write(&keys.0, "18446744073709551615 x\n").unwrap();
+    let run = paw(&[
+        "--timeout",
+        "1.8e19",
+        "--keys",
+        keys.path(),
+        "--",
+        "/bin/sh",
+        "-c",
+        "exit 7",
+    ]);
+    assert_eq!(run.code, Some(7), "stderr: {}", run.stderr);
+}
+
+#[test]
 fn timeout_ends_a_stuck_command() {
     let run = paw(&["--timeout", "1", "--", "/bin/cat"]);
     assert_eq!(run.code, Some(124), "stderr: {}", run.stderr);

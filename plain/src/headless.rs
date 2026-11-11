@@ -15,6 +15,9 @@ use crate::shell::{Shell, ShellEvent};
 
 /// There is no font without a window, but programs ask for the pixel size, so give them one.
 const CELL: CellSize = CellSize { w: 8, h: 20 };
+/// The longest wait a time on the command line or in the keys file can mean. Adding a larger
+/// one to the start time can overflow, which panics; a year away is as good as never.
+const FAR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// The exit code `timeout(1)` uses, so scripts can tell a stuck command from a failed one.
 pub const TIMED_OUT: i32 = 124;
 
@@ -63,11 +66,11 @@ pub fn run(options: Options) -> i32 {
     let backlog = CloseOnDrop(backlog);
 
     let start = Instant::now();
-    let deadline = options.timeout.map(|timeout| start + timeout);
+    let deadline = options.timeout.map(|timeout| start + timeout.min(FAR));
     let mut keys = options.keys.into_iter().peekable();
     loop {
         let now = Instant::now();
-        while let Some(key) = keys.next_if(|key| start + key.at <= now) {
+        while let Some(key) = keys.next_if(|key| start + key.at.min(FAR) <= now) {
             session.write(key.bytes);
         }
         if deadline.is_some_and(|deadline| now >= deadline) {
@@ -77,7 +80,7 @@ pub fn run(options: Options) -> i32 {
         }
         let wake = keys
             .peek()
-            .map(|key| start + key.at)
+            .map(|key| start + key.at.min(FAR))
             .into_iter()
             .chain(deadline)
             .min();
