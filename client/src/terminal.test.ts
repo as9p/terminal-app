@@ -255,6 +255,21 @@ describe("terminal view", () => {
       expect(conn.resize).not.toHaveBeenCalled();
     });
 
+    it("a_drag_step_before_a_zoom_frame_sends_one_resize", () => {
+      const { conn, term, view } = setup();
+      view.setFontSize(20);
+      nextSize.cols = 90;
+      nextSize.rows = 30;
+      observed?.([{ contentRect: { width: 600, height: 400 } }]);
+      vi.advanceTimersByTime(16);
+      expect(term.cols).toBe(90);
+      // The drag step and the zoom frame share one wait, so one resize goes out.
+      vi.advanceTimersByTime(1000);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      expect(conn.resize).toHaveBeenCalledWith(7, 90, 30);
+      view.dispose();
+    });
+
     it("a_zoom_during_a_drag_takes_the_wait_with_it", () => {
       const { conn, term, resizeTo, view } = setup();
       resizeTo(90, 30);
