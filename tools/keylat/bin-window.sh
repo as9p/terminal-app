@@ -6,7 +6,7 @@
 REPO=${${(%):-%x}:A:h:h:h}
 CONFIGS=$REPO/tools/speed/configs
 # The plain terminal. Its path is written only here, so renaming the binary changes one line.
-PLAIN_BIN=$REPO/target/release/snowflake
+PLAIN_BIN=$REPO/target/release/paw
 # Every target, in the order a sitting measures them.
 BIN_LABELS=(plain-fifo plain-immediate kitty ghostty alacritty warp)
 

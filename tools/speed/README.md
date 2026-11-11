@@ -30,7 +30,7 @@ Set these before `run-sitting.sh`. They travel to the runner in its job line, an
 
 What gets installed and where the scripts look:
 
-- **Plain terminal:** `target/release/snowflake`, run twice: `plain-fifo` waits for the display before each frame, `plain-immediate` does not (`TERM_PLAIN_PRESENT`). Its path is written only in `tools/keylat/bin-window.sh`.
+- **Plain terminal:** `target/release/paw`, run twice: `plain-fifo` waits for the display before each frame, `plain-immediate` does not (`TERM_PLAIN_PRESENT`). Its path is written only in `tools/keylat/bin-window.sh`.
 - **kitty:** on the PATH or in `/Applications/kitty.app`, started with `--config NONE` and `-o` overrides.
 - **Ghostty:** `/Applications/Ghostty.app`, started with `--config-default-files=false` and `configs/ghostty.conf`.
 - **Alacritty:** `/Applications/Alacritty.app`, then the PATH, then `~/.cargo/bin/alacritty`, started with `--config-file configs/alacritty.toml`.

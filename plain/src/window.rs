@@ -24,7 +24,7 @@ use crate::input::{self, Clicks, Settle, WheelLines, WindowKey};
 use crate::session::{self, Session};
 use crate::shell::{Shell, ShellEvent};
 
-const TITLE: &str = "Snowflake";
+const TITLE: &str = "Paw";
 /// The most output fed between two frames, so a flood never starves the screen or the keyboard.
 const FEED_SLICE: Duration = Duration::from_millis(8);
 /// Lines per wheel notch.
@@ -60,7 +60,7 @@ pub fn run(options: Options) -> i32 {
 }
 
 fn fail(what: &str, e: impl Display) -> i32 {
-    eprintln!("snowflake: {what}: {e}");
+    eprintln!("paw: {what}: {e}");
     1
 }
 
@@ -242,7 +242,7 @@ impl Term {
             proxy.send_event(event).is_ok()
         });
         let shell = Shell::spawn(options.command, options.cwd, grid, on_event).map_err(|e| {
-            eprintln!("snowflake: cannot start the command: {e}");
+            eprintln!("paw: cannot start the command: {e}");
             CANNOT_START
         })?;
         let mut session = Session::new(shell, grid, options.record)
@@ -440,7 +440,7 @@ impl Term {
         if let Some(path) = &self.stats
             && let Err(e) = std::fs::write(path, format!("frames={}\n", self.frames))
         {
-            eprintln!("snowflake: stats stopped: {e}");
+            eprintln!("paw: stats stopped: {e}");
             self.stats = None;
         }
         None
@@ -570,7 +570,7 @@ impl Term {
                 ViewEvent::Copy(text) => self.set_clipboard(text),
                 ViewEvent::OpenLink(url) => match Command::new("/usr/bin/open").arg(&url).spawn() {
                     Ok(child) => self.openers.push(child),
-                    Err(e) => eprintln!("snowflake: cannot open {url}: {e}"),
+                    Err(e) => eprintln!("paw: cannot open {url}: {e}"),
                 },
                 ViewEvent::Bell => {}
             }
@@ -581,7 +581,7 @@ impl Term {
         if self.clipboard.is_none() {
             match arboard::Clipboard::new() {
                 Ok(clipboard) => self.clipboard = Some(clipboard),
-                Err(e) => eprintln!("snowflake: no clipboard: {e}"),
+                Err(e) => eprintln!("paw: no clipboard: {e}"),
             }
         }
         self.clipboard.as_mut()
@@ -591,7 +591,7 @@ impl Term {
         if let Some(clipboard) = self.clipboard()
             && let Err(e) = clipboard.set_text(text)
         {
-            eprintln!("snowflake: cannot copy: {e}");
+            eprintln!("paw: cannot copy: {e}");
         }
     }
 
@@ -601,7 +601,7 @@ impl Term {
             Ok(text) => Some(text),
             Err(arboard::Error::ContentNotAvailable) => None,
             Err(e) => {
-                eprintln!("snowflake: cannot paste: {e}");
+                eprintln!("paw: cannot paste: {e}");
                 None
             }
         }
@@ -619,9 +619,7 @@ fn present_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
         Ok("immediate") => wgpu::PresentMode::Immediate,
         Ok("fifo") | Err(_) => wgpu::PresentMode::Fifo,
         Ok(other) => {
-            eprintln!(
-                "snowflake: TERM_PLAIN_PRESENT is fifo or immediate, not {other:?}; using fifo"
-            );
+            eprintln!("paw: TERM_PLAIN_PRESENT is fifo or immediate, not {other:?}; using fifo");
             wgpu::PresentMode::Fifo
         }
     };
@@ -629,7 +627,7 @@ fn present_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
         wanted
     } else {
         // Every surface supports fifo.
-        eprintln!("snowflake: this display cannot present {wanted:?}; using fifo");
+        eprintln!("paw: this display cannot present {wanted:?}; using fifo");
         wgpu::PresentMode::Fifo
     }
 }

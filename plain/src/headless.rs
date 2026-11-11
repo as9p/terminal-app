@@ -47,14 +47,14 @@ pub fn run(options: Options) -> i32 {
     let shell = match Shell::spawn(options.command, options.cwd, options.grid, on_event) {
         Ok(shell) => shell,
         Err(e) => {
-            eprintln!("snowflake: cannot start the command: {e}");
+            eprintln!("paw: cannot start the command: {e}");
             return 127;
         }
     };
     let mut session = match Session::new(shell, options.grid, options.record) {
         Ok(session) => session,
         Err(e) => {
-            eprintln!("snowflake: cannot write the recording: {e}");
+            eprintln!("paw: cannot write the recording: {e}");
             return 1;
         }
     };
@@ -72,7 +72,7 @@ pub fn run(options: Options) -> i32 {
         }
         if deadline.is_some_and(|deadline| now >= deadline) {
             session.kill();
-            eprintln!("snowflake: the command did not exit in time and was killed");
+            eprintln!("paw: the command did not exit in time and was killed");
             return TIMED_OUT;
         }
         let wake = keys
@@ -106,7 +106,7 @@ pub fn run(options: Options) -> i32 {
             }
         }
     }
-    eprintln!("snowflake: lost the command without an exit code");
+    eprintln!("paw: lost the command without an exit code");
     1
 }
 

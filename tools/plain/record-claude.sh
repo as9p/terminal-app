@@ -34,7 +34,7 @@ rm -f -- "$recording"
 
 code=0
 # The final screen goes nowhere: it is the session's own text.
-"$root/target/release/snowflake" --headless --cols 120 --rows 40 --timeout 30 \
+"$root/target/release/paw" --headless --cols 120 --rows 40 --timeout 30 \
   --cwd "$folder" --keys "$keys" --record "$recording" -- claude >/dev/null || code=$?
 
 size=0

@@ -20,7 +20,7 @@ struct Run {
     took: Duration,
 }
 
-/// Kills the binary if the test fails before it exits, so no snowflake or command is left behind.
+/// Kills the binary if the test fails before it exits, so no paw or command is left behind.
 struct Guard(Child);
 
 impl Drop for Guard {
@@ -32,7 +32,7 @@ impl Drop for Guard {
     }
 }
 
-fn snowflake(args: &[&str]) -> Run {
+fn paw(args: &[&str]) -> Run {
     let mut all = vec!["--headless", "--cols", "80", "--rows", "24"];
     all.extend_from_slice(args);
     run(&all)
@@ -40,24 +40,24 @@ fn snowflake(args: &[&str]) -> Run {
 
 fn run(args: &[&str]) -> Run {
     let started = Instant::now();
-    let child = Command::new(env!("CARGO_BIN_EXE_snowflake"))
+    let child = Command::new(env!("CARGO_BIN_EXE_paw"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start snowflake");
+        .expect("start paw");
     let mut guard = Guard(child);
     let stdout = drain(guard.0.stdout.take().unwrap());
     let stderr = drain(guard.0.stderr.take().unwrap());
     // std has no wait with a timeout, so this polls; the limit is generous.
     let status = loop {
-        if let Some(status) = guard.0.try_wait().expect("wait for snowflake") {
+        if let Some(status) = guard.0.try_wait().expect("wait for paw") {
             break status;
         }
         assert!(
             started.elapsed() < LIMIT,
-            "snowflake {args:?} did not exit in {LIMIT:?}"
+            "paw {args:?} did not exit in {LIMIT:?}"
         );
         thread::sleep(Duration::from_millis(10));
     };
@@ -85,7 +85,7 @@ impl TempFile {
     fn new(tag: &str) -> TempFile {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let name = format!("snowflake-test-{}-{tag}-{n}", std::process::id());
+        let name = format!("paw-test-{}-{tag}-{n}", std::process::id());
         TempFile(std::env::temp_dir().join(name))
     }
 
@@ -102,7 +102,7 @@ impl Drop for TempFile {
 
 #[test]
 fn prints_the_final_screen() {
-    let run = snowflake(&["--", "/bin/sh", "-c", r#"printf "hello\r\nworld""#]);
+    let run = paw(&["--", "/bin/sh", "-c", r#"printf "hello\r\nworld""#]);
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(lines, ["hello", "world"], "stderr: {}", run.stderr);
     assert_eq!(run.code, Some(0));
@@ -110,14 +110,14 @@ fn prints_the_final_screen() {
 
 #[test]
 fn exit_code_is_the_commands() {
-    let run = snowflake(&["--", "/bin/sh", "-c", "exit 7"]);
+    let run = paw(&["--", "/bin/sh", "-c", "exit 7"]);
     assert_eq!(run.code, Some(7), "stderr: {}", run.stderr);
 }
 
 #[test]
 fn queries_are_answered_through_the_pty() {
     let script = r#"printf "\e[6n"; read -rs -d R reply; print -r -- "got ${reply#*\[}""#;
-    let run = snowflake(&["--", "/bin/zsh", "-c", script]);
+    let run = paw(&["--", "/bin/zsh", "-c", script]);
     assert!(
         run.stdout.contains("got 1;1"),
         "stdout: {:?} stderr: {}",
@@ -130,9 +130,9 @@ fn queries_are_answered_through_the_pty() {
 fn xtversion_names_the_terminal() {
     let script =
         r#"stty -echo; printf "\e[>0q"; read -rs -t 2 -d '\' reply; print -r -- "got ${(V)reply}""#;
-    let run = snowflake(&["--", "/bin/zsh", "-c", script]);
+    let run = paw(&["--", "/bin/zsh", "-c", script]);
     assert!(
-        run.stdout.contains(">|snowflake "),
+        run.stdout.contains(">|paw "),
         "stdout: {:?} stderr: {}",
         run.stdout,
         run.stderr
@@ -143,7 +143,7 @@ fn xtversion_names_the_terminal() {
 fn keys_file_is_typed() {
     let keys = TempFile::new("keys");
     std::fs::write(&keys.0, "300 hi\\r\n600 \\x04\n").unwrap();
-    let run = snowflake(&["--keys", keys.path(), "--", "/bin/cat"]);
+    let run = paw(&["--keys", keys.path(), "--", "/bin/cat"]);
     let lines: Vec<&str> = run.stdout.lines().collect();
     // A third line is the pty's own echo of the end-of-file key, "^D" on macOS.
     assert_eq!(
@@ -158,7 +158,7 @@ fn keys_file_is_typed() {
 
 #[test]
 fn timeout_ends_a_stuck_command() {
-    let run = snowflake(&["--timeout", "1", "--", "/bin/cat"]);
+    let run = paw(&["--timeout", "1", "--", "/bin/cat"]);
     assert_eq!(run.code, Some(124), "stderr: {}", run.stderr);
     assert!(run.took < Duration::from_secs(3), "took {:?}", run.took);
 }
@@ -166,7 +166,7 @@ fn timeout_ends_a_stuck_command() {
 #[test]
 fn recording_holds_the_output() {
     let file = TempFile::new("rec");
-    let run = snowflake(&[
+    let run = paw(&[
         "--record",
         file.path(),
         "--",
@@ -195,7 +195,7 @@ fn recording_holds_the_output() {
 
 #[test]
 fn environment_names_the_terminal() {
-    let run = snowflake(&[
+    let run = paw(&[
         "--",
         "/bin/sh",
         "-c",
@@ -203,7 +203,7 @@ fn environment_names_the_terminal() {
     ]);
     assert_eq!(
         run.stdout.lines().next(),
-        Some("xterm-256color snowflake"),
+        Some("xterm-256color paw"),
         "stderr: {}",
         run.stderr
     );
@@ -219,7 +219,7 @@ fn five_megabyte_write_arrives_whole() {
     }
     text.push_str("\n400 \\x04\n");
     std::fs::write(&keys.0, text).unwrap();
-    let run = snowflake(&[
+    let run = paw(&[
         "--keys",
         keys.path(),
         "--timeout",
@@ -241,18 +241,14 @@ fn five_megabyte_write_arrives_whole() {
 fn unknown_option_is_a_usage_error() {
     let run = run(&["--bogus"]);
     assert_eq!(run.code, Some(2));
-    assert!(
-        run.stderr.contains("usage: snowflake"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("usage: paw"), "stderr: {}", run.stderr);
     assert!(run.stdout.is_empty(), "stdout: {}", run.stdout);
 }
 
 #[test]
 fn output_before_exit_is_not_lost() {
     let script = "i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done";
-    let run = snowflake(&["--", "/bin/sh", "-c", script]);
+    let run = paw(&["--", "/bin/sh", "-c", script]);
     assert_eq!(
         run.stdout.lines().last(),
         Some("line1999"),
@@ -266,7 +262,7 @@ fn output_before_exit_is_not_lost() {
 fn bad_record_path_starts_nothing() {
     let marker = TempFile::new("marker");
     let script = format!("touch '{}'", marker.path());
-    let run = snowflake(&[
+    let run = paw(&[
         "--record",
         "/nonexistent-dir/x.rec",
         "--",

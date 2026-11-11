@@ -15,7 +15,7 @@ use crate::shell::Shell;
 pub fn can_record(path: Option<&Path>) -> bool {
     match path.map(File::create) {
         Some(Err(e)) => {
-            eprintln!("snowflake: cannot write the recording: {e}");
+            eprintln!("paw: cannot write the recording: {e}");
             false
         }
         _ => true,
@@ -99,7 +99,7 @@ impl Session {
         if let Some(recorder) = &mut self.recorder
             && let Err(e) = write(recorder)
         {
-            eprintln!("snowflake: recording stopped: {e}");
+            eprintln!("paw: recording stopped: {e}");
             self.recorder = None;
         }
     }
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn resize_is_recorded() {
-        let path = std::env::temp_dir().join(format!("snowflake-resize-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("paw-resize-{}", std::process::id()));
         let grid = GridSize { cols: 80, rows: 24 };
         let shell = Shell::spawn(
             Some(vec!["/bin/cat".to_string()]),

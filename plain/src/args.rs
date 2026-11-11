@@ -7,8 +7,8 @@ use std::time::Duration;
 use term_engine::GridSize;
 
 pub const USAGE: &str =
-    "usage: snowflake [--headless --cols N --rows N [--keys FILE] [--timeout SECONDS]]
-                 [--record FILE] [--cwd DIR] [-- COMMAND ARGS...]
+    "usage: paw [--headless --cols N --rows N [--keys FILE] [--timeout SECONDS]]
+           [--record FILE] [--cwd DIR] [-- COMMAND ARGS...]
 
   --headless         no window: run the command, then print its final screen
   --cols N, --rows N the grid size in windowless mode

@@ -1,4 +1,4 @@
-//! Snowflake, the plain terminal: arguments, then the windowless mode or the window.
+//! Paw, the plain terminal: arguments, then the windowless mode or the window.
 
 mod args;
 mod backlog;
@@ -17,7 +17,7 @@ const USAGE_ERROR: u8 = 2;
 
 /// The name programs see, in `TERM_PROGRAM` and in the answer to XTVERSION. Kept in one place
 /// because the program is about to be renamed.
-const NAME: &str = "snowflake";
+const NAME: &str = "paw";
 
 fn main() -> ExitCode {
     let args = match args::parse(std::env::args_os().skip(1)) {
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Ok(Parsed::Version) => {
-            println!("snowflake {}", env!("CARGO_PKG_VERSION"));
+            println!("paw {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
         Err(message) => return usage_error(&message),
@@ -65,6 +65,6 @@ fn main() -> ExitCode {
 }
 
 fn usage_error(message: &str) -> ExitCode {
-    eprintln!("snowflake: {message}\n\n{USAGE}");
+    eprintln!("paw: {message}\n\n{USAGE}");
     ExitCode::from(USAGE_ERROR)
 }

@@ -3,10 +3,10 @@ name = "term-plain"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Snowflake, the plain terminal: one shell on a pty drawn by the engine"
+description = "Paw, the plain terminal: one shell on a pty drawn by the engine"
 
 [[bin]]
-name = "snowflake"
+name = "paw"
 path = "src/main.rs"
 
 [dependencies]

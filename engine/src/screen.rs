@@ -268,7 +268,7 @@ impl Screen {
         self.collect();
     }
 
-    /// Who the terminal says it is when a program asks (XTVERSION), such as `snowflake 1.0`.
+    /// Who the terminal says it is when a program asks (XTVERSION), such as `paw 1.0`.
     /// Anything outside printable ASCII is dropped, and an empty name falls back to the engine's.
     pub fn set_identity(&mut self, identity: &str) {
         self.version_reply = xtversion::reply(identity);

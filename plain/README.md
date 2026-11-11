@@ -1,6 +1,6 @@
-# Plain terminal
+# Paw
 
-A deliberately plain terminal built on the engine in `engine/`: one window, one shell, nothing else. Its program is called `snowflake`. That is a working name; it will be renamed to Paw later.
+A deliberately plain terminal built on the engine in `engine/`: one window, one shell, nothing else. Its program is called `paw`.
 
 It exists to be measured and to prove the engine, so it stays small. A sidebar app is planned on top of the same engine; that app is not part of this program.
 
@@ -8,15 +8,15 @@ It exists to be measured and to prove the engine, so it stays small. A sidebar a
 
 It opens one window of 1280 by 800 points and runs your shell in it. The shell is `$SHELL -l`, or `/bin/zsh -l` when `SHELL` is empty or unset. It draws with the GPU through the engine, keeps 20,000 lines of scrollback, and uses a built-in colour theme and a built-in font (JetBrainsMono Nerd Font Mono, 14 px to start).
 
-It has none of these: tabs, splits, a sidebar, a settings file or settings screen, a menu, search in the scrollback, more than one window, images in the terminal, or a composing pop-up for input methods. The theme and font are fixed. The bell does nothing. When the shell exits, the window closes and `snowflake` exits with the shell's exit code.
+It has none of these: tabs, splits, a sidebar, a settings file or settings screen, a menu, search in the scrollback, more than one window, images in the terminal, or a composing pop-up for input methods. The theme and font are fixed. The bell does nothing. When the shell exits, the window closes and `paw` exits with the shell's exit code.
 
-Programs inside it see `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=snowflake` and `TERM_PROGRAM_VERSION` set to the crate version.
+Programs inside it see `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=paw` and `TERM_PROGRAM_VERSION` set to the crate version.
 
 ## Build and run
 
 ```
 cargo build --release -p term-plain
-target/release/snowflake
+target/release/paw
 ```
 
 Command-line flags (`plain/src/args.rs`):
@@ -62,7 +62,7 @@ On Mac. Cmd means the Command key.
 | Scroll wheel or trackpad | Scrolls the scrollback, 3 lines per wheel notch. In a full-screen program that asks for it, it sends arrow keys instead. |
 | Mouse in a program that asked for the mouse | The program gets clicks, drags and wheel. Hold Shift to select text yourself instead. |
 
-A program can also set the clipboard with the terminal's clipboard escape code, and set the window title. An empty title brings back "Snowflake".
+A program can also set the clipboard with the terminal's clipboard escape code, and set the window title. An empty title brings back "Paw".
 
 ## Known limits
 

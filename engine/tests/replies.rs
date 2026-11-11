@@ -180,9 +180,9 @@ fn a_query_after_a_multibyte_character_gets_one_reply() {
 #[test]
 fn identity_is_set_by_the_program() {
     let mut view = view();
-    view.set_identity("snowflake 9.9.9");
+    view.set_identity("paw 9.9.9");
     view.feed(QUERY);
-    assert_eq!(view.take_output(), reply("snowflake 9.9.9"));
+    assert_eq!(view.take_output(), reply("paw 9.9.9"));
 }
 
 #[test]
