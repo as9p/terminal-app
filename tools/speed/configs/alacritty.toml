@@ -1,0 +1,15 @@
+# Alacritty settings for the speed tests. tools/keylat/bin-window.sh passes this file with
+# --config-file, which replaces Alacritty's own config, so its config folder is never read.
+
+[font]
+size = 14.0
+
+[window]
+# Alacritty sizes its first window in grid cells only, never in points. With its default font on
+# macOS (Menlo) at size 14 a cell is about 8.4 by 16.4 points, so this is about 1280 by 800 points
+# with the title bar. Each typing result's "target ... window WxH" line from keylat shows the size
+# it really got.
+dimensions = { columns = 152, lines = 47 }
+
+[scrolling]
+history = 20000
