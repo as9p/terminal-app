@@ -1,0 +1,10 @@
+[package]
+name = "term-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Terminal screen state, input and drawing shared by every view"
+
+[dependencies]
+alacritty_terminal = "0.26"
+bitflags = "2"
