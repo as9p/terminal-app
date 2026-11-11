@@ -36,7 +36,10 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new = unsafe { System.realloc(ptr, layout, new_size) };
         if !new.is_null() {
-            LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
+            LIVE.fetch_add(
+                new_size as isize - layout.size() as isize,
+                Ordering::Relaxed,
+            );
         }
         new
     }
@@ -56,8 +59,16 @@ const LINES_FED: usize = 20_100;
 /// A screen at 120 by 40 with its scrollback full: every line 120 visible characters, each in a
 /// different colour from the line before.
 fn full_screen() -> Screen {
-    let mut screen = Screen::new(GridSize { cols: COLS, rows: ROWS }, &Theme::builtin().palette);
-    let text: String = (0..usize::from(COLS)).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let mut screen = Screen::new(
+        GridSize {
+            cols: COLS,
+            rows: ROWS,
+        },
+        &Theme::builtin().palette,
+    );
+    let text: String = (0..usize::from(COLS))
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
     for n in 0..LINES_FED {
         screen.feed(format!("\x1b[{}m{text}\r\n", 31 + n % 7).as_bytes());
     }

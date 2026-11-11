@@ -35,8 +35,18 @@ fn rewraps_on_resize() {
     s.feed("a".repeat(100).as_bytes());
     s.resize(GridSize { cols: 40, rows: 24 });
     s.scroll_to_top(); // the library may push the first row into the scrollback; either way the text starts at the top
-    assert_eq!([s.row_text(0).len(), s.row_text(1).len(), s.row_text(2).len()], [40, 40, 20]);
-    s.resize(GridSize { cols: 120, rows: 24 });
+    assert_eq!(
+        [
+            s.row_text(0).len(),
+            s.row_text(1).len(),
+            s.row_text(2).len()
+        ],
+        [40, 40, 20]
+    );
+    s.resize(GridSize {
+        cols: 120,
+        rows: 24,
+    });
     s.scroll_to_top();
     assert_eq!((s.row_text(0).len(), s.row_text(1).as_str()), (100, ""));
 }
@@ -59,8 +69,33 @@ fn split_reads_give_the_same_screen() {
 #[test]
 fn fit_never_returns_zero() {
     let cell = CellSize { w: 17, h: 31 };
-    assert_eq!(fit(Rect { x: 0, y: 0, w: 0, h: 0 }, cell), GridSize { cols: 1, rows: 1 });
-    assert_eq!(fit(Rect { x: 0, y: 0, w: 1700, h: 310 }, cell), GridSize { cols: 100, rows: 10 });
+    assert_eq!(
+        fit(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0
+            },
+            cell
+        ),
+        GridSize { cols: 1, rows: 1 }
+    );
+    assert_eq!(
+        fit(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1700,
+                h: 310
+            },
+            cell
+        ),
+        GridSize {
+            cols: 100,
+            rows: 10
+        }
+    );
 }
 
 #[test]
@@ -157,7 +192,10 @@ fn wide_and_combined_characters_land_in_cells() {
     assert_eq!((cells[1].ch, cells[1].width), ('\u{6F22}', CellWidth::Wide));
     assert_eq!(cells[2].width, CellWidth::Spacer);
     assert_eq!(cells[3].ch, 'b');
-    assert_eq!((cells[5].ch, cells[5].zerowidth.as_slice()), ('e', &['\u{301}'][..]));
+    assert_eq!(
+        (cells[5].ch, cells[5].zerowidth.as_slice()),
+        ('e', &['\u{301}'][..])
+    );
 }
 
 #[test]
@@ -224,7 +262,12 @@ fn selected_text(s: &Screen) -> Option<String> {
     let text: String = (0..24u16)
         .flat_map(|row| (0..80u16).map(move |col| at(col, row)))
         .filter(|p| s.is_selected(*p))
-        .map(|p| s.row_text(p.row).chars().nth(usize::from(p.col)).unwrap_or(' '))
+        .map(|p| {
+            s.row_text(p.row)
+                .chars()
+                .nth(usize::from(p.col))
+                .unwrap_or(' ')
+        })
         .collect();
     (!text.is_empty()).then_some(text)
 }
@@ -266,7 +309,11 @@ fn damage_from(s: &mut Screen, bytes: &[u8]) -> Damage {
     if let Damage::Rows(rows) = &damage {
         for &row in rows {
             assert!(row < 24, "{damage:?}");
-            assert_ne!(s.row_text(row), before[usize::from(row)], "row {row} in {damage:?}");
+            assert_ne!(
+                s.row_text(row),
+                before[usize::from(row)],
+                "row {row} in {damage:?}"
+            );
         }
     }
     damage
@@ -285,7 +332,10 @@ fn damage_while_scrolled_up_is_in_view_rows() {
 
     // A change on a line still in view names its row counted from the top of the view.
     let offset = s.scroll_offset() as u16;
-    assert_eq!(damage_from(&mut s, b"\x1b[5;1Hchanged"), Damage::Rows(vec![4 + offset]));
+    assert_eq!(
+        damage_from(&mut s, b"\x1b[5;1Hchanged"),
+        Damage::Rows(vec![4 + offset])
+    );
 }
 
 #[test]
@@ -293,6 +343,9 @@ fn title_and_bell_are_events() {
     let mut s = screen(80, 24);
     s.feed(b"\x1b]0;hi\x07\x07");
     let events = s.take_events();
-    assert!(events.contains(&ScreenEvent::Title("hi".to_owned())), "{events:?}");
+    assert!(
+        events.contains(&ScreenEvent::Title("hi".to_owned())),
+        "{events:?}"
+    );
     assert!(events.contains(&ScreenEvent::Bell), "{events:?}");
 }

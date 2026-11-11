@@ -162,7 +162,10 @@ impl EventListener for Listener {
             // or a child process the library does not own here.
             _ => return,
         };
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(message);
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(message);
     }
 }
 
@@ -220,7 +223,10 @@ impl Screen {
         let config = Config {
             scrolling_history: SCROLLBACK_LINES,
             kitty_keyboard: true,
-            default_cursor_style: CursorStyle { shape: LibCursorShape::Beam, blinking: false },
+            default_cursor_style: CursorStyle {
+                shape: LibCursorShape::Beam,
+                blinking: false,
+            },
             ..Config::default()
         };
         let inbox = Listener::default();
@@ -252,7 +258,8 @@ impl Screen {
         let mut rest = bytes;
         while let Some(end) = self.version_scan.find(rest) {
             self.parser.advance(&mut self.term, &rest[..end]);
-            self.inbox.send_event(Event::PtyWrite(self.version_reply.clone()));
+            self.inbox
+                .send_event(Event::PtyWrite(self.version_reply.clone()));
             rest = &rest[end..];
         }
         self.parser.advance(&mut self.term, rest);
@@ -277,7 +284,10 @@ impl Screen {
 
     pub fn size(&self) -> GridSize {
         let grid = self.term.grid();
-        GridSize { cols: grid.columns() as u16, rows: grid.screen_lines() as u16 }
+        GridSize {
+            cols: grid.columns() as u16,
+            rows: grid.screen_lines() as u16,
+        }
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -332,7 +342,7 @@ impl Screen {
                 self.forget_selection_range();
                 self.collect();
                 true
-            },
+            }
             _ => false,
         }
     }
@@ -388,7 +398,11 @@ impl Screen {
     pub fn text_around(&self, at: CellPoint) -> (String, usize) {
         let grid = self.term.grid();
         let target = self.point(at);
-        let wraps = |line: Line| grid[line][grid.last_column()].flags.contains(Flags::WRAPLINE);
+        let wraps = |line: Line| {
+            grid[line][grid.last_column()]
+                .flags
+                .contains(Flags::WRAPLINE)
+        };
 
         let mut first = target.line;
         while first > grid.topmost_line() && wraps(Line(first.0 - 1)) {
@@ -438,7 +452,13 @@ impl Screen {
         if row >= grid.screen_lines() as i32 {
             return None;
         }
-        Some(Cursor { at: CellPoint { col: point.column.0 as u16, row: row as u16 }, shape })
+        Some(Cursor {
+            at: CellPoint {
+                col: point.column.0 as u16,
+                row: row as u16,
+            },
+            shape,
+        })
     }
 
     pub fn take_damage(&mut self) -> Damage {
@@ -456,8 +476,12 @@ impl Screen {
             // arrive as `Full`.
             TermDamage::Partial(lines) => {
                 let rows: Vec<u16> = lines.map(|bounds| bounds.line as u16).collect();
-                if rows.is_empty() { Damage::None } else { Damage::Rows(rows) }
-            },
+                if rows.is_empty() {
+                    Damage::None
+                } else {
+                    Damage::Rows(rows)
+                }
+            }
         };
         self.term.reset_damage();
         damage
@@ -508,14 +532,21 @@ impl Screen {
     pub fn is_selected(&self, at: CellPoint) -> bool {
         let point = self.point(at);
         self.selection_range
-            .get_or_init(|| self.term.selection.as_ref().and_then(|s| s.to_range(&self.term)))
+            .get_or_init(|| {
+                self.term
+                    .selection
+                    .as_ref()
+                    .and_then(|s| s.to_range(&self.term))
+            })
             .as_ref()
             .is_some_and(|range| range.contains(point))
     }
 
     pub fn link_at(&self, at: CellPoint) -> Option<String> {
         let point = self.point(at);
-        self.term.grid()[point].hyperlink().map(|link| link.uri().to_owned())
+        self.term.grid()[point]
+            .hyperlink()
+            .map(|link| link.uri().to_owned())
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -543,17 +574,22 @@ impl Screen {
                     // An index the table does not hold has no answer a program could use.
                     if index < COLOR_COUNT {
                         let Rgb(r, g, b) = self.indexed(index);
-                        self.replies.extend_from_slice(format(LibRgb { r, g, b }).as_bytes());
+                        self.replies
+                            .extend_from_slice(format(LibRgb { r, g, b }).as_bytes());
                     }
-                },
+                }
                 Message::Size(format) => {
                     // The screen does not know its cell size in pixels, so it says zero rather
                     // than leave a program waiting for an answer.
                     let GridSize { cols, rows } = self.size();
-                    let size =
-                        WindowSize { num_lines: rows, num_cols: cols, cell_width: 0, cell_height: 0 };
+                    let size = WindowSize {
+                        num_lines: rows,
+                        num_cols: cols,
+                        cell_width: 0,
+                        cell_height: 0,
+                    };
                     self.replies.extend_from_slice(format(size).as_bytes());
-                },
+                }
                 Message::Event(event) => self.events.push(event),
             }
         }
@@ -571,7 +607,10 @@ impl Screen {
         let grid = self.term.grid();
         let row = usize::from(at.row).min(grid.screen_lines() - 1);
         let column = usize::from(at.col).min(grid.columns() - 1);
-        Point::new(Line(row as i32 - grid.display_offset() as i32), Column(column))
+        Point::new(
+            Line(row as i32 - grid.display_offset() as i32),
+            Column(column),
+        )
     }
 
     fn cell(&self, cell: &LibCell) -> Cell {
@@ -641,7 +680,10 @@ fn visible_char(c: char) -> char {
 /// The text one cell adds to a row. Spacers stand in for the right half of a wide character, or
 /// for a wide character pushed to the next row, so they add nothing.
 fn push_cell_text(cell: &LibCell, text: &mut String) {
-    if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+    if cell
+        .flags
+        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+    {
         return;
     }
     text.push(visible_char(cell.c));

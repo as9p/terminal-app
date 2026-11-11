@@ -40,7 +40,10 @@ pub fn fit(rect: Rect, cell: CellSize) -> GridSize {
     // A zero cell size would divide by zero; one pixel is the smallest real cell.
     let cols = rect.w / cell.w.max(1);
     let rows = rect.h / cell.h.max(1);
-    GridSize { cols: at_least_one(cols), rows: at_least_one(rows) }
+    GridSize {
+        cols: at_least_one(cols),
+        rows: at_least_one(rows),
+    }
 }
 
 fn at_least_one(n: u32) -> u16 {
@@ -86,15 +89,34 @@ mod tests {
 
     #[test]
     fn halves_of_a_cell_give_their_side() {
-        let rect = Rect { x: 0, y: 0, w: 800, h: 480 };
-        assert_eq!(cell_at(rect, CELL, GRID, 32.0, 45.0), (CellPoint { col: 3, row: 2 }, Side::Left));
-        assert_eq!(cell_at(rect, CELL, GRID, 37.0, 45.0), (CellPoint { col: 3, row: 2 }, Side::Right));
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 480,
+        };
+        assert_eq!(
+            cell_at(rect, CELL, GRID, 32.0, 45.0),
+            (CellPoint { col: 3, row: 2 }, Side::Left)
+        );
+        assert_eq!(
+            cell_at(rect, CELL, GRID, 37.0, 45.0),
+            (CellPoint { col: 3, row: 2 }, Side::Right)
+        );
     }
 
     #[test]
     fn points_outside_the_rect_clamp_into_the_grid() {
-        let rect = Rect { x: 0, y: 0, w: 800, h: 480 };
-        assert_eq!(cell_at(rect, CELL, GRID, -5.0, -5.0), (CellPoint { col: 0, row: 0 }, Side::Left));
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 480,
+        };
+        assert_eq!(
+            cell_at(rect, CELL, GRID, -5.0, -5.0),
+            (CellPoint { col: 0, row: 0 }, Side::Left)
+        );
         assert_eq!(
             cell_at(rect, CELL, GRID, 5000.0, 5000.0),
             (CellPoint { col: 79, row: 23 }, Side::Right)
@@ -103,8 +125,19 @@ mod tests {
 
     #[test]
     fn the_rect_offset_is_subtracted() {
-        let rect = Rect { x: 100, y: 200, w: 800, h: 480 };
-        assert_eq!(cell_at(rect, CELL, GRID, 101.0, 201.0), (CellPoint { col: 0, row: 0 }, Side::Left));
-        assert_eq!(cell_at(rect, CELL, GRID, 128.0, 241.0), (CellPoint { col: 2, row: 2 }, Side::Right));
+        let rect = Rect {
+            x: 100,
+            y: 200,
+            w: 800,
+            h: 480,
+        };
+        assert_eq!(
+            cell_at(rect, CELL, GRID, 101.0, 201.0),
+            (CellPoint { col: 0, row: 0 }, Side::Left)
+        );
+        assert_eq!(
+            cell_at(rect, CELL, GRID, 128.0, 241.0),
+            (CellPoint { col: 2, row: 2 }, Side::Right)
+        );
     }
 }
