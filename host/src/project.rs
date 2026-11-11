@@ -268,7 +268,7 @@ mod tests {
         // No config file at all is the same.
         root.write("bare/.git/HEAD", "ref: refs/heads/main\n");
         let bare = root.0.join("bare");
-        assert_eq!(resolve(&bare).key, format!("folder:{}", bare.display()));
+        assert_eq!(resolve(&bare).key, folder_key(&bare));
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         let project = resolve(&deep);
         assert_eq!(project.root, deep);
         assert!(!project.is_git);
-        assert_eq!(project.key, format!("folder:{}", deep.display()));
+        assert_eq!(project.key, folder_key(&deep));
         assert_eq!(project.branch, None);
     }
 
