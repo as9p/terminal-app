@@ -870,8 +870,9 @@ mod sessions {
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
+        // Not started yet, so the folder it was asked for.
         let items = list(&mut ws).await;
-        assert_eq!(items[0]["cwd"], Value::Null, "{items:?}");
+        assert_eq!(items[0]["cwd"], "/", "{items:?}");
         attach(&mut ws, session).await;
         type_line(&mut ws, session, REPORT_TMP).await;
         wait_for_list(&mut ws, |items| items[0]["cwd"] == real_tmp().as_str()).await;
@@ -1706,6 +1707,9 @@ mod sessions {
         assert_eq!(list(&mut ws).await, Vec::<Value>::new());
     }
 
+    /// Also passes on the code from before new sessions waited for their first attach, since
+    /// a restored session never left on a failed start. Kept as a guard: it fails if a failed
+    /// start removes every session rather than only a new one.
     #[tokio::test]
     async fn restored_session_that_cannot_start_stays() {
         let dir = DataDir::fresh();
@@ -1750,5 +1754,265 @@ mod sessions {
             assert!(Instant::now() < deadline, "never saved: {state}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Waits until the host has no program running, since a killed one takes a moment to go.
+    async fn wait_for_no_programs(host: &Host) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let children = Command::new("pgrep")
+                .args(["-P", &host.child.id().to_string()])
+                .output()
+                .expect("run pgrep");
+            let children = String::from_utf8_lossy(&children.stdout).into_owned();
+            if children.trim().is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a program is still running: {children:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The write end of a fifo, if a reader has it open. Never waits.
+    fn fifo_writer(fifo: &std::path::Path) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(fifo)
+    }
+
+    /// Holds every reader of a fifo put in place of a file the host reads. Letting go, also
+    /// when the test fails, puts a plain file in its place first, so a reader that comes later
+    /// never waits, then ends the fifo for each reader still on it, through a second name. The
+    /// host's state saver reads the same file, so it must never be left waiting either.
+    struct Held {
+        path: std::path::PathBuf,
+        fifo: std::path::PathBuf,
+        writer: Option<std::fs::File>,
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let plain = self.path.with_extension("plain");
+            let _ = std::fs::write(&plain, "");
+            let _ = std::fs::rename(&plain, &self.path);
+            self.writer = None;
+            // A reader that opened as the writer closed waits for the next one. No panic in
+            // here, as this also runs while a failed test unwinds.
+            let deadline = Instant::now() + PATIENCE;
+            while Instant::now() < deadline && fifo_writer(&self.fifo).is_ok() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_during_the_first_start_ends_the_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        // Stays running whatever it is asked to run, so a program left behind shows, and the
+        // real `claude` never starts.
+        let shell = dir.0.join("slow-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexec sleep 60\n").expect("write the shell");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755))
+            .expect("make the shell runnable");
+        let host = Host::start_in_with_shell(dir, shell.to_str().expect("a text path"));
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+
+        // A Claude tab reads its flags file while it starts, before the fork. As a fifo, the
+        // file holds the start there until the test lets it go. Renamed into place, so the
+        // host's own rewrite of the file never finds it missing. The fifo keeps its first
+        // name too, which only the test knows.
+        let flags = host.dir.0.join("claude-args");
+        let fifo = host.dir.0.join("claude-args-fifo");
+        let placed = host.dir.0.join("claude-args-placed");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed");
+        std::fs::hard_link(&fifo, &placed).expect("name the fifo twice");
+        std::fs::rename(&placed, &flags).expect("put the fifo in place");
+
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": UUID, "kind": "claude", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let session = reply["session"].as_u64().expect("a session number");
+        pushed_tree(&mut ws, |tree| tree["ungrouped"][0]["split"] == leaf(UUID)).await;
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+
+        // The writing end opens only once a reader has the fifo open, so from here the start
+        // is held. The state saver, which rewrites the file every 2 seconds, can be that
+        // reader instead. Then the kill may land before the start reaches the file, which
+        // the start must refuse just the same, so the checks below hold either way.
+        let deadline = Instant::now() + PATIENCE;
+        let held = loop {
+            match fifo_writer(&fifo) {
+                Ok(writer) => {
+                    break Held {
+                        path: flags.clone(),
+                        fifo: fifo.clone(),
+                        writer: Some(writer),
+                    };
+                }
+                Err(error) => assert!(
+                    Instant::now() < deadline,
+                    "the start never read its flags: {error}"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
+        // From another connection, since this one handles nothing else until its attach ends.
+        let mut other = signed_in(&host).await;
+        say(&mut other, json!({"type": "kill", "session": session})).await;
+        pushed_tree(&mut ws, |tree| tree["ungrouped"] == json!([])).await;
+        wait_for_list(&mut other, |items| items.is_empty()).await;
+        // The start reads the end of the fifo, or the plain file, and goes on to fork.
+        drop(held);
+
+        let answer = loop {
+            let frame = hear_text(&mut ws).await;
+            if frame["type"] != "tree" && frame["type"] != "states" {
+                break frame;
+            }
+        };
+        assert_eq!(answer["code"], "no_session", "{answer}");
+        assert_eq!(list(&mut ws).await, Vec::<Value>::new());
+        assert_eq!(tree(&mut ws).await["ungrouped"], json!([]));
+        wait_for_no_programs(&host).await;
+    }
+
+    #[tokio::test]
+    async fn list_shows_the_folder_of_a_session_that_has_not_started() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        let folder = scratch_folder("waiting");
+        let cwd = folder.to_str().expect("a text path");
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": cwd, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["type"], "created");
+        let items = list(&mut ws).await;
+        assert_eq!(items[0]["cols"], 0, "{items:?}");
+        assert_eq!(items[0]["cwd"], cwd, "{items:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn pane_that_has_not_started_moves_and_then_starts() {
+        let host = Host::start();
+        let mut ws = signed_in(&host).await;
+        tree(&mut ws).await;
+        let first = create(&mut ws).await;
+        pushed_tree(&mut ws, |_| true).await;
+        say(
+            &mut ws,
+            json!({"type": "create", "uuid": OTHER_UUID, "kind": "shell", "cwd": "/", "cols": 80, "rows": 24}),
+        )
+        .await;
+        let reply = hear_text(&mut ws).await;
+        assert_eq!(reply["type"], "created", "{reply}");
+        let second = reply["session"].as_u64().expect("a session number") as u32;
+        let tabs = |count: usize| {
+            move |tree: &Value| tree["ungrouped"].as_array().map(Vec::len) == Some(count)
+        };
+        let both = pushed_tree(&mut ws, tabs(2)).await;
+
+        tree_op(
+            &mut ws,
+            json!({"type": "join_tabs", "tab": both["ungrouped"][1]["id"], "into": both["ungrouped"][0]["id"], "dir": "right"}),
+        )
+        .await;
+        let joined = pushed_tree(&mut ws, tabs(1)).await;
+        let shown = joined["ungrouped"][0].to_string();
+        assert!(
+            shown.contains(UUID) && shown.contains(OTHER_UUID),
+            "{joined}"
+        );
+        // Moving a pane does not start it.
+        let items = list(&mut ws).await;
+        assert!(items.iter().all(|item| item["cols"] == 0), "{items:?}");
+
+        attach(&mut ws, second).await;
+        type_line(&mut ws, second, "echo mo''ved").await;
+        read_until(&mut ws, second, "moved").await;
+        attach(&mut ws, first).await;
+        type_line(&mut ws, first, "echo st''ayed").await;
+        read_until(&mut ws, first, "stayed").await;
+    }
+
+    #[tokio::test]
+    async fn saved_session_that_never_started_comes_back_and_stays() {
+        let folder = scratch_folder("never-started");
+        let cwd = folder.to_str().expect("a text path").to_string();
+        let saved = {
+            let host = Host::start();
+            let mut ws = signed_in(&host).await;
+            say(
+                &mut ws,
+                json!({"type": "create", "uuid": UUID, "kind": "shell", "cwd": cwd, "cols": 80, "rows": 24}),
+            )
+            .await;
+            assert_eq!(hear_text(&mut ws).await["type"], "created");
+            let file = host.dir.0.join("state.json");
+            let deadline = Instant::now() + PATIENCE;
+            loop {
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                let state: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                if state["sessions"][0]["uuid"] == UUID {
+                    break text;
+                }
+                assert!(Instant::now() < deadline, "never saved: {state}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+
+        // The first host has gone with its folder. What it saved comes back in a new one,
+        // where no program can start.
+        let dir = DataDir::fresh();
+        std::fs::create_dir_all(&dir.0).expect("make the data folder");
+        std::fs::write(dir.0.join("state.json"), saved).expect("seed the state");
+        let host = Host::start_in_with_shell(dir, NO_SHELL);
+        let mut ws = signed_in(&host).await;
+        let items = list(&mut ws).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["kind"], "shell", "{items:?}");
+        assert_eq!(items[0]["cwd"], cwd.as_str(), "{items:?}");
+        let session = items[0]["session"].as_u64().expect("a session number");
+        let shown = tree(&mut ws).await;
+        assert_eq!(
+            shown["ungrouped"].as_array().map(Vec::len),
+            Some(1),
+            "{shown}"
+        );
+        assert_eq!(shown["ungrouped"][0]["split"], leaf(UUID), "{shown}");
+
+        say(
+            &mut ws,
+            json!({"type": "attach", "session": session, "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(hear_text(&mut ws).await["code"], "spawn_failed");
+        assert_eq!(list(&mut ws).await.len(), 1);
+        assert_eq!(tree(&mut ws).await["ungrouped"][0]["split"], leaf(UUID));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

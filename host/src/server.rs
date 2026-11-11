@@ -442,12 +442,12 @@ impl Connection {
             // A new session starts here, so its tab shows without waiting for a fork. So does
             // a restored Claude session, so a reboot does not start every chat at once.
             let starting = Arc::clone(&served);
-            let data_dir = self.registry.data_dir.clone();
-            let tokens = self.registry.tokens.clone();
-            let started = spawn_blocking(move || starting.start(size, &data_dir, &tokens)).await;
+            let registry = Arc::clone(&self.registry);
+            let started = spawn_blocking(move || starting.start(size, &registry)).await;
             if let Err(error) = started.unwrap_or_else(|_| Err(start_failed())) {
                 // Nothing saved calls for a new session, so one that cannot start leaves its
-                // tab. A restored one stays, and its next attach tries again.
+                // tab. A restored one stays, and its next attach tries again. One killed while
+                // it started is gone already, and this attach leaves nothing behind.
                 if served.fresh {
                     let _ = self.registry.kill(session);
                 }
@@ -706,7 +706,9 @@ fn merge_outgoing(
 ///
 /// Lock order: `watchers` before `tree`, and only to copy the tree. `tree` is otherwise held
 /// alone, and only for work in memory: folders are resolved before it is taken, and it is
-/// never held while calling into a session, sending to a client or saving.
+/// never held while calling into a session, sending to a client or saving. `sessions` comes
+/// after `watchers` and after a session's `starting` gate, and under it only a session's `cwd`,
+/// which is always held alone, is taken.
 struct Registry {
     last_session: AtomicU32,
     sessions: Mutex<HashMap<u32, Arc<Served>>>,
@@ -757,7 +759,8 @@ impl Registry {
         drop(removed);
     }
 
-    /// A session that has not started yet reports a size of 0 by 0.
+    /// A session that has not started yet reports a size of 0 by 0, and the folder it is to
+    /// start in, so a tab or split opened from it starts there too.
     fn items(&self) -> Vec<SessionItem> {
         let sessions = lock(&self.sessions);
         let mut items: Vec<SessionItem> = sessions
@@ -772,9 +775,13 @@ impl Registry {
                     uuid: served.uuid.clone(),
                     kind: served.kind.to_string(),
                     title: served.title(status.as_ref()),
-                    cwd: status
-                        .as_ref()
-                        .and_then(|status| status.cwd.as_ref()?.to_str().map(String::from)),
+                    cwd: match &status {
+                        Some(status) => status
+                            .cwd
+                            .as_ref()
+                            .and_then(|cwd| cwd.to_str().map(String::from)),
+                        None => lock(&served.cwd).to_str().map(String::from),
+                    },
                     exited: status.and_then(|status| status.exited),
                     cols: size.cols,
                     rows: size.rows,
@@ -794,9 +801,21 @@ impl Registry {
             self.push_tree();
         }
         self.forget(&served);
-        let Some(running) = served.running.get() else {
-            self.remove(session);
-            return Ok(());
+        // Under the lock `start` checks `kill_asked` and stores `running` under, so a start in
+        // progress either sees this kill and ends its program itself, or has stored `running`
+        // already and the program is ended below.
+        let running = {
+            let mut sessions = lock(&self.sessions);
+            match served.running.get() {
+                Some(running) => running,
+                None => {
+                    served.kill_asked.store(true, Ordering::SeqCst);
+                    let removed = sessions.remove(&session);
+                    drop(sessions);
+                    drop(removed);
+                    return Ok(());
+                }
+            }
         };
         if running.handle.status().exited.is_some() {
             self.remove(session);
@@ -856,8 +875,7 @@ impl Registry {
         let session = self.add(served);
         if shell
             && let Some(served) = self.get(session)
-            && let Err(HostFrame::Error { message, .. }) =
-                served.start(RESTORE_SIZE, &self.data_dir, &self.tokens)
+            && let Err(HostFrame::Error { message, .. }) = served.start(RESTORE_SIZE, self)
         {
             // Stays listed, and its first attach tries again.
             eprintln!("term-host: could not restore a shell: {message}");
@@ -1354,14 +1372,15 @@ impl Served {
 
     /// Starts a new or restored session, in its folder or the home folder if that is gone. A
     /// restored Claude chat resumes only if it has a transcript, since one that never got a
-    /// first message cannot be resumed and starts fresh with the same id. Blocks.
-    fn start(&self, size: Size, data_dir: &Path, tokens: &Tokens) -> Result<(), HostFrame> {
+    /// first message cannot be resumed and starts fresh with the same id. One killed while it
+    /// starts ends its program here and answers that the session is gone. Blocks.
+    fn start(&self, size: Size, registry: &Registry) -> Result<(), HostFrame> {
         let _gate = lock(&self.starting);
         if self.running.get().is_some() {
             return Ok(());
         }
-        // A new session whose start failed is on its way out, so an attach that waited on the
-        // gate must not start it after all.
+        // A session killed before it started, or a new one whose start failed, is on its way
+        // out, so an attach that waited on the gate must not start it after all.
         if self.kill_asked.load(Ordering::Relaxed) {
             return Err(no_session());
         }
@@ -1387,20 +1406,40 @@ impl Served {
             kind,
             cwd,
             uuid: self.id,
-            data_dir: data_dir.to_path_buf(),
+            data_dir: registry.data_dir.clone(),
         };
-        match start_program(spec, size, tokens) {
-            Ok(running) => {
-                let _ = self.running.set(running);
-                Ok(())
-            }
+        let running = match start_program(spec, size, &registry.tokens) {
+            Ok(running) => running,
             Err(error) => {
                 if self.fresh {
                     self.kill_asked.store(true, Ordering::Relaxed);
                 }
-                Err(error)
+                return Err(error);
             }
+        };
+        // `kill` looks at `running` and sets `kill_asked` under this same lock, so a kill lands
+        // either before the check, and is seen here, or after the store, and finds the program
+        // to end. Held for the check and the store only, never the fork. Taken under the
+        // `starting` gate, the order the registry documents.
+        let refused = {
+            let _sessions = lock(&registry.sessions);
+            if self.kill_asked.load(Ordering::SeqCst) {
+                Some(running)
+            } else {
+                let _ = self.running.set(running);
+                None
+            }
+        };
+        let Some(running) = refused else {
+            return Ok(());
+        };
+        // Nothing else will end it: the session left the registry before it had a program.
+        running.handle.kill();
+        let uuid = self.id.to_string();
+        if registry.tokens.matches(&uuid, &running.token) {
+            registry.tokens.remove(&uuid);
         }
+        Err(no_session())
     }
 
     /// What to save, or None if the session should not come back: it was closed with `kill`,
