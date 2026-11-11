@@ -675,6 +675,11 @@ mod sessions {
     const UUID: &str = "7f1d9b3e-2a4c-4e8f-9a6b-0c1d2e3f4a5b";
     const PATIENCE: Duration = Duration::from_secs(10);
 
+    /// Held for the whole of each test that floods a terminal, so no two run at once: a
+    /// flood starves the other shells of CPU, which shrinks their reads and frames. A tokio
+    /// mutex, because it is held across awaits and a failed test does not poison it.
+    static FLOODING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     enum Heard {
         Text(Value),
         Bytes(u32, Vec<u8>),
@@ -965,6 +970,7 @@ mod sessions {
 
     #[tokio::test]
     async fn ack_lets_a_flood_continue() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
 
         let mut acking = signed_in(&host).await;
@@ -1002,6 +1008,7 @@ mod sessions {
 
     #[tokio::test]
     async fn merged_output_arrives_whole_and_acks_still_count() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
@@ -1092,6 +1099,7 @@ mod sessions {
 
     #[tokio::test]
     async fn slow_client_gets_output_whole_in_large_frames() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
@@ -1111,7 +1119,8 @@ mod sessions {
             "the lines arrived out of order or with gaps"
         );
         client.assert_frames_within_the_cap();
-        // One frame per terminal read averages about 1000 bytes here. The socket's own buffers
+        // One frame per terminal read averages about 1000 bytes here, but only while the shell
+        // is not starved of CPU, which is why the flood tests take turns. The socket's own buffers
         // take most of a backlog before the writer has to wait, so merging only fires once
         // they are full: about 1600 bytes a frame on macOS.
         let frames = client.frames.len();
@@ -1124,6 +1133,7 @@ mod sessions {
 
     #[tokio::test]
     async fn flood_arrives_whole_in_large_frames() {
+        let _flooding = FLOODING.lock().await;
         let scratch = DataDir::fresh();
         std::fs::create_dir_all(&scratch.0).expect("make a scratch folder");
         let file = scratch.0.join("flood.txt");
@@ -1175,6 +1185,7 @@ mod sessions {
 
     #[tokio::test]
     async fn two_sessions_on_one_connection_never_share_a_frame() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let first = create(&mut ws).await;
@@ -1226,6 +1237,7 @@ mod sessions {
 
     #[tokio::test]
     async fn stale_client_hears_detached() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut ws = signed_in(&host).await;
         let session = create(&mut ws).await;
@@ -1314,6 +1326,7 @@ mod sessions {
 
     #[tokio::test]
     async fn closing_the_socket_detaches() {
+        let _flooding = FLOODING.lock().await;
         let host = Host::start();
         let mut watching = signed_in(&host).await;
         let session = create(&mut watching).await;
