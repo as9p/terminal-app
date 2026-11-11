@@ -150,6 +150,7 @@ For stage B, drawing with several views on one glyph image:
 - Moving a view's origin rebuilds every row, and a text size change uploads the whole glyph image again.
 - Next speed knob: showing frames without waiting for the display, with a cap on draws during heavy output. Plain `immediate` printed 17 to 30% slower in stage A, so it is not the answer by itself.
 - Memory is a place to improve: about 115 MB idle and 201 MB at peak at the test size, and 387 MB at peak in a 3456 by 2110 window.
+- Opening is slow next to a new window in a terminal that is already running. From launch to the first frame the plain terminal took about 320 ms (563 ms on the first launch after a build), while the shell itself starts in about 90 ms and the program with no window in about 35 ms. The window, the GPU adapter and device, the fonts and the glyph image are all set up before the shell starts and before anything is shown. Two fixes to weigh: one running program that opens each new window itself, and showing the window and starting the shell before the GPU setup finishes.
 
 For stage B, behaviour:
 
