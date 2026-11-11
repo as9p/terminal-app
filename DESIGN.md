@@ -85,7 +85,7 @@ Alex's PC crashes now and then, and Orca once closed on it while Alex was out, w
 - Each computer runs a small host process written in Rust. It owns the terminals, keeps them alive when the window closes, and keeps a copy of each screen so a client can reconnect. A Rust renderer is built only if xterm.js misses the speed targets below, and the host stays the same either way.
 - A terminal has one size, set by the device Alex last typed in. Other devices showing the same terminal scale or letterbox it and never resize it. Alex hit random resizes on a remote host in Orca. **(my call on the rule)**
 - Clients attach to any host over Tailscale. Only devices on Alex's tailnet can connect. **(Alex)**
-- Mac and Windows clients are Tauri apps with xterm.js using WebGL. The phone is a web page using the same terminal code.
+- Mac and Windows clients are Tauri apps with xterm.js using WebGL. The phone is a web page using the same terminal code. Changed on 2026-11-11: the desktop clients move to a native Rust engine, see "What changed on 2026-11-11".
 - The host runs on Mac and Windows from the first build, because the PC is the main host. Any terminal-process layer must handle both Unix terminals and Windows ConPTY. The Mac client comes first and the Windows client follows once the host and tabs work.
 - Hosts accept connections only over Tailscale, and each new device pairs once to get its own token, so being on the tailnet isn't enough by itself.
 - The host serves the phone page over HTTPS using a Tailscale certificate. The phone's Face ID lock is a passkey, which requires that HTTPS. Both are built together with the phone web app, last in the build order, so the first host has no HTTPS listener. **(my call, 2026-11-09)**
@@ -660,3 +660,13 @@ For Alex's approval. The settled values are in `docs/ui-review.md`.
 - The working marker is a snowflake that ticks; markers reshape on a state change. Handoff requested and failed are recorded looks ("Session states").
 - Each state can be set to sound, banner, dock badge or nothing ("Alerts").
 - The keys table is final and Cmd+Option+arrows is the one Option exception ("Keys").
+
+## What changed on 2026-11-11
+
+Approved by Alex on 2026-11-11. The full design is in `docs/superpowers/specs/2026-11-11-native-renderer-design.md`.
+
+- The native path is triggered: in same-sitting runs the app typed about 9 ms behind kitty and printed at 22 to 30 MB/s, and a native prototype matched kitty with and without a web sidebar ("Architecture", "Speed evidence").
+- Terminals are drawn by a Rust GPU engine. A plain terminal is the base and the benchmark; the app with the sidebar is built around the same engine. The sidebar stays a web page ("Architecture").
+- The Mac and Windows clients stop being Tauri apps with xterm.js once the app runs on the engine ("Architecture").
+- The phone web app, last in the build order, would keep a web terminal of its own, because the engine does not run in a browser ("Phone", "Build order").
+- The host and its protocol do not change.
