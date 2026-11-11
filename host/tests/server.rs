@@ -1183,6 +1183,25 @@ mod sessions {
         );
     }
 
+    /// The first whole line that is `letter` and then only digits, such as `b17`.
+    fn counted_line(seen: &[u8], letter: char) -> Option<String> {
+        let text = String::from_utf8_lossy(seen);
+        let found = text.lines().map(str::trim_end).find(|line| {
+            line.strip_prefix(letter)
+                .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+        });
+        found.map(str::to_owned)
+    }
+
+    #[test]
+    fn counted_line_finds_the_other_count_and_not_a_prompt() {
+        assert_eq!(
+            counted_line(b"a1\r\nb17\r\na2\r\n", 'b'),
+            Some("b17".to_string())
+        );
+        assert_eq!(counted_line(b"a1\r\nbob@b0x-3b9d / % \r\nb\r\n", 'b'), None);
+    }
+
     #[tokio::test]
     async fn two_sessions_on_one_connection_never_share_a_frame() {
         let _flooding = FLOODING.lock().await;
@@ -1203,7 +1222,6 @@ mod sessions {
         let snapshot = attach(&mut ws, second).await;
         client.attached(second, &snapshot);
 
-        // Neither typed line has the other session's letter in it, nor does the prompt.
         type_line(&mut ws, first, "seq -f 'a%g' 1 300000; echo AEND$((1+1))").await;
         type_line(&mut ws, second, "seq -f 'b%g' 1 300000; echo BEND$((1+1))").await;
         client
@@ -1212,14 +1230,20 @@ mod sessions {
             })
             .await;
 
-        assert!(
-            !client.seen[&first].contains(&b'b'),
-            "a frame mixed sessions"
+        // A whole line of the other session's count, not its bare letter: the prompt printed
+        // after the count holds the machine's name, which can have either letter in it. A piece
+        // shorter than a line would break the unbroken count checked below.
+        assert_eq!(
+            counted_line(&client.seen[&first], 'b'),
+            None,
+            "the first session got the second's output"
         );
-        assert!(
-            !client.seen[&second].contains(&b'a'),
-            "a frame mixed sessions"
+        assert_eq!(
+            counted_line(&client.seen[&second], 'a'),
+            None,
+            "the second session got the first's output"
         );
+        assert!(!client.printed(first, "BEND2") && !client.printed(second, "AEND2"));
         assert!(without_returns(&client.seen[&first]).contains(&seq_lines("a", 1, 300000)));
         assert!(without_returns(&client.seen[&second]).contains(&seq_lines("b", 1, 300000)));
         client.assert_frames_within_the_cap();
