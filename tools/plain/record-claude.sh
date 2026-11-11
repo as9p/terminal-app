@@ -19,11 +19,12 @@ folder="$work/session"
 keys="$work/keys.txt"
 mkdir -- "$folder"
 # The folder trust question starts on "No, exit", so the keys move down one and confirm, then
-# ask one short thing and leave.
+# ask one short thing.
 print -r -- '4000 \x1b[B' >"$keys"
 print -r -- '4600 \r' >>"$keys"
 print -r -- '10000 say hi in five words\r' >>"$keys"
-print -r -- '30000 /exit\r' >>"$keys"
+# No exit key: leaving would switch back to the empty main screen, and the replay test compares
+# the last screen. The time limit ends the session with the answer still showing.
 
 cargo build --release -p term-plain --manifest-path "$root/Cargo.toml"
 # The program refuses a recording path whose folder is missing.
@@ -33,21 +34,19 @@ rm -f -- "$recording"
 
 code=0
 # The final screen goes nowhere: it is the session's own text.
-"$root/target/release/snowflake" --headless --cols 120 --rows 40 --timeout 45 \
+"$root/target/release/snowflake" --headless --cols 120 --rows 40 --timeout 30 \
   --cwd "$folder" --keys "$keys" --record "$recording" -- claude >/dev/null || code=$?
 
 size=0
 if [[ -f "$recording" ]]; then
   size="$(wc -c <"$recording" | tr -d ' ')"
 fi
-if (( code == 124 )); then
-  if (( size == 0 )); then
-    print -u2 "record-claude: claude did not exit in time and nothing was recorded"
-    exit 124
-  fi
-  print -u2 "record-claude: warning: claude did not exit in time; keeping the recording"
-elif (( code != 0 )); then
-  print -u2 "record-claude: the session exited with code $code"
-  exit "$code"
+if (( code != 124 )); then
+  print -u2 "record-claude: the session ended by itself with code $code, before the time limit"
+  exit 1
+fi
+if (( size == 0 )); then
+  print -u2 "record-claude: nothing was recorded"
+  exit 1
 fi
 print -r -- "record-claude: $recording is $size bytes"
