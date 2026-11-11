@@ -29,6 +29,10 @@ export function startRename(row: HTMLElement, current: string, done: (name: stri
   field.value = current;
   field.spellcheck = false;
   field.autocomplete = "off";
+  // No macOS corrections or writing suggestions over a name.
+  field.setAttribute("autocorrect", "off");
+  field.setAttribute("autocapitalize", "off");
+  field.setAttribute("writingsuggestions", "false");
   field.setAttribute("aria-label", "Name");
   let finished = false;
 

@@ -18,6 +18,19 @@ afterEach(() => {
 });
 
 describe("rename", () => {
+  it("the_field_asks_for_no_system_suggestions", () => {
+    const row = rowWithName("old");
+    startRename(row, "old", vi.fn());
+    const field = row.querySelector<HTMLInputElement>("input.rename");
+    if (!field) throw new Error("no field");
+    expect(field.getAttribute("autocorrect")).toBe("off");
+    expect(field.getAttribute("autocapitalize")).toBe("off");
+    expect(field.getAttribute("writingsuggestions")).toBe("false");
+    expect(field.spellcheck).toBe(false);
+    expect(field.autocomplete).toBe("off");
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+
   it("switching_apps_keeps_the_rename_open", () => {
     const row = rowWithName("old");
     const done = vi.fn();

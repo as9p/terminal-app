@@ -557,9 +557,14 @@ export class Sidebar {
       return;
     }
     const target = event.target instanceof Element ? event.target : null;
-    const fold = target?.closest<HTMLElement>(".ghead .slot");
-    if (fold) {
-      this.toggle(fold);
+    // Anywhere on a group line opens or closes it, except another button in it or the rename
+    // field. A double click on the name toggles twice, so it ends as it began, and renames.
+    const head = target?.closest<HTMLElement>(".ghead");
+    if (head) {
+      const control = target?.closest("button, input");
+      if (control && !control.matches(".ghead > .slot")) return;
+      const fold = head.querySelector<HTMLElement>(":scope > .slot");
+      if (fold) this.toggle(fold);
       return;
     }
     const pane = target?.closest<HTMLElement>(".pane-row");

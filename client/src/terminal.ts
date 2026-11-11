@@ -13,7 +13,21 @@ import { ZOOM_DEFAULT, spacingFor } from "./zoom";
 const ACK_BYTES = 128 * 1024;
 const ACK_QUIET_MS = 100;
 const REATTACH_PAUSE_MS = 1000;
+// Each host resize makes the shell redraw, so a drag sends only the size it ends on.
+const RESIZE_SETTLE_MS = 100;
 const SHIFT_ENTER = "\x1b\r";
+// What Cmd or Option with a line-editing key sends, as kitty and iTerm do on a Mac.
+const CMD_BACKSPACE = "\x15";
+const CMD_LEFT = "\x01";
+const CMD_RIGHT = "\x05";
+const CMD_DELETE = "\x0b";
+const CMD_Z = "\x1f";
+const OPTION_LEFT = "\x1bb";
+const OPTION_RIGHT = "\x1bf";
+const OPTION_BACKSPACE = "\x1b\x7f";
+const OPTION_DELETE = "\x1bd";
+// Ctrl+L, so the shell draws its prompt again on the cleared screen.
+const REDRAW = "\x0c";
 // Full reset through the write queue, so it lands after output still waiting to be parsed.
 const FULL_RESET = "\x1bc";
 const STOPPED_LINE = "\r\n\x1b[2mThe program stopped unexpectedly.\x1b[0m\r\n";
@@ -79,6 +93,13 @@ export class TerminalView {
   private connection: Connection | undefined;
   private session = 0;
   private fitFrame = 0;
+  // The size the host has, and a resize waiting for a drag to stop.
+  private sentCols = 0;
+  private sentRows = 0;
+  private resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  // Parked (no box) at the last observed size; the next fit goes to the host at once.
+  private parked = false;
+  private resizeNow = false;
 
   // Bumped per attachment, so a write finishing late cannot count toward a newer total.
   private generation = 0;
@@ -121,6 +142,15 @@ export class TerminalView {
     this.term.unicode.activeVersion = "11";
     this.term.attachCustomKeyEventHandler(this.onKey);
     this.term.open(parent);
+    // Without these, macOS offers corrections and writing suggestions over the terminal.
+    const textarea = this.term.textarea;
+    if (textarea) {
+      textarea.setAttribute("autocorrect", "off");
+      textarea.setAttribute("autocapitalize", "off");
+      textarea.setAttribute("autocomplete", "off");
+      textarea.setAttribute("writingsuggestions", "false");
+      textarea.spellcheck = false;
+    }
     if (renderer === "webgl") this.loadWebgl();
 
     this.subscriptions.push(
@@ -137,7 +167,7 @@ export class TerminalView {
     });
 
     this.fitAddon.fit();
-    this.observer = new ResizeObserver(this.fitSoon);
+    this.observer = new ResizeObserver(this.onResize);
     this.observer.observe(parent);
   }
 
@@ -157,6 +187,11 @@ export class TerminalView {
     this.session = session;
     this.startCounting();
     this.attachedAt = performance.now();
+    // The attach carries the size, so nothing waiting needs to follow it.
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = undefined;
+    this.sentCols = this.term.cols;
+    this.sentRows = this.term.rows;
     return connection.attach(session, this.term.cols, this.term.rows, this.listener);
   }
 
@@ -216,6 +251,7 @@ export class TerminalView {
     this.connection = undefined;
     this.startCounting();
     cancelAnimationFrame(this.fitFrame);
+    clearTimeout(this.resizeTimer);
     clearTimeout(this.reattachTimer);
     this.observer.disconnect();
     this.stopOption();
@@ -296,16 +332,42 @@ export class TerminalView {
     }
   }
 
+  private readonly onResize = (entries: ResizeObserverEntry[]): void => {
+    const box = entries[entries.length - 1]?.contentRect;
+    const parked = !box || box.width === 0 || box.height === 0;
+    if (this.parked && !parked) this.resizeNow = true;
+    this.parked = parked;
+    this.fitSoon();
+  };
+
+  // The view follows every frame; the host hears once the size stops changing.
   private readonly fitSoon = (): void => {
     if (this.fitFrame) return;
     this.fitFrame = requestAnimationFrame(() => {
       this.fitFrame = 0;
       const { cols, rows } = this.term;
       this.fitAddon.fit();
-      if (this.term.cols !== cols || this.term.rows !== rows) {
-        this.connection?.resize(this.session, this.term.cols, this.term.rows);
+      if (this.resizeNow) {
+        this.resizeNow = false;
+        clearTimeout(this.resizeTimer);
+        this.sendResize();
+      } else if (this.term.cols !== cols || this.term.rows !== rows) {
+        clearTimeout(this.resizeTimer);
+        this.resizeTimer =
+          this.term.cols === this.sentCols && this.term.rows === this.sentRows
+            ? undefined
+            : setTimeout(this.sendResize, RESIZE_SETTLE_MS);
       }
     });
+  };
+
+  private readonly sendResize = (): void => {
+    this.resizeTimer = undefined;
+    const { cols, rows } = this.term;
+    if (!this.connection || (cols === this.sentCols && rows === this.sentRows)) return;
+    this.sentCols = cols;
+    this.sentRows = rows;
+    this.connection.resize(this.session, cols, rows);
   };
 
   private loadWebgl(): void {
@@ -341,8 +403,82 @@ export class TerminalView {
       }
       return false;
     }
+    // Plain typing leaves here, before any of the Mac line keys below.
+    if (!event.metaKey && !event.altKey) return true;
     // Left to the browser, so the Edit menu copies and pastes and the shell never sees them.
     if (event.metaKey && (event.code === "KeyC" || event.code === "KeyV")) return false;
-    return true;
+    // Exactly one of Cmd or Option. Cmd+Option+arrows move between panes (keys.ts).
+    if (event.ctrlKey || event.shiftKey || event.metaKey === event.altKey) return true;
+    const run = event.metaKey ? this.cmdKey(event) : this.optionKey(event.key);
+    if (run === undefined) return true;
+    if (event.type === "keydown") {
+      // Also stops the browser's own select all, and a character landing in the textarea.
+      event.preventDefault();
+      run();
+    }
+    return false;
   };
+
+  // Either Option key, unlike Option with a letter, which follows option-key.ts.
+  private optionKey(key: string): (() => void) | undefined {
+    switch (key) {
+      case "ArrowLeft":
+        return () => this.term.input(OPTION_LEFT, true);
+      case "ArrowRight":
+        return () => this.term.input(OPTION_RIGHT, true);
+      case "Backspace":
+        return () => this.term.input(OPTION_BACKSPACE, true);
+      case "Delete":
+        return () => this.term.input(OPTION_DELETE, true);
+    }
+    return undefined;
+  }
+
+  private cmdKey(event: KeyboardEvent): (() => void) | undefined {
+    // A full-screen program owns the screen, so there is no scrollback to move or clear.
+    const alternate = () => this.term.buffer.active.type === "alternate";
+    switch (event.key) {
+      case "Backspace":
+        return () => this.term.input(CMD_BACKSPACE, true);
+      case "ArrowLeft":
+        return () => this.term.input(CMD_LEFT, true);
+      case "ArrowRight":
+        return () => this.term.input(CMD_RIGHT, true);
+      case "Delete":
+        return () => this.term.input(CMD_DELETE, true);
+      case "ArrowUp":
+        return () => {
+          if (!alternate()) this.term.scrollPages(-1);
+        };
+      case "ArrowDown":
+        return () => {
+          if (!alternate()) this.term.scrollPages(1);
+        };
+      case "Home":
+        return () => {
+          if (!alternate()) this.term.scrollToTop();
+        };
+      case "End":
+        return () => {
+          if (!alternate()) this.term.scrollToBottom();
+        };
+    }
+    // Letters by what they type, as the menu bar matches them, by position on a non-Latin layout.
+    const { key, code } = event;
+    let letter = "";
+    if (key.length === 1 && key.charCodeAt(0) < 0x80) letter = key.toLowerCase();
+    else if (code.startsWith("Key")) letter = code.slice(3).toLowerCase();
+    switch (letter) {
+      case "z":
+        return () => this.term.input(CMD_Z, true);
+      case "a":
+        return () => this.term.selectAll();
+      case "k":
+        return () => {
+          if (!alternate()) this.term.clear();
+          this.term.input(REDRAW, true);
+        };
+    }
+    return undefined;
+  }
 }

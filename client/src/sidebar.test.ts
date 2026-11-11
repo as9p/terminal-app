@@ -144,6 +144,42 @@ describe("sidebar", () => {
     expect(collapse).toHaveBeenCalledWith("a", true);
   });
 
+  it("a_click_anywhere_on_the_group_line_toggles_it", () => {
+    const { element, collapse } = mount(tree([group("a", [tab("a1")]), group("b", [tab("b1")], true)]));
+    element.querySelector<HTMLElement>('[data-group="a"] .gname')?.click();
+    expect(collapse).toHaveBeenLastCalledWith("a", true);
+    element.querySelector<HTMLElement>('[data-group="b"] .gcount')?.click();
+    expect(collapse).toHaveBeenLastCalledWith("b", false);
+    element.querySelector<HTMLElement>('[data-group="a"]')?.click();
+    expect(collapse).toHaveBeenCalledTimes(3);
+  });
+
+  it("a_group_line_click_skips_other_buttons_the_rename_field_and_a_drag_end", () => {
+    const { element, collapse } = mount(tree([group("a", [tab("a1")])]));
+    const head = element.querySelector<HTMLElement>(".ghead");
+    if (!head) throw new Error("no header");
+    const extra = document.createElement("button");
+    head.append(extra);
+    extra.click();
+    expect(collapse).not.toHaveBeenCalled();
+    extra.remove();
+
+    head.querySelector(".gname")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const field = head.querySelector<HTMLInputElement>("input.rename");
+    expect(field).not.toBeNull();
+    field?.click();
+    expect(collapse).not.toHaveBeenCalled();
+    field?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    const at = (type: string, clientY: number, target: EventTarget = window) =>
+      target.dispatchEvent(new MouseEvent(type, { button: 0, clientX: 20, clientY, bubbles: true, cancelable: true }));
+    at("pointerdown", 5, head);
+    at("pointermove", 80);
+    at("pointerup", 80);
+    head.click();
+    expect(collapse).not.toHaveBeenCalled();
+  });
+
   it("selected_row_is_marked_and_every_row_keeps_its_marker_slot", () => {
     const { element } = mount(tree([group("a", [tab("a1"), tab("a2")])]));
     expect(element.querySelector(".row.selected")?.getAttribute("data-tab")).toBe("a1");
