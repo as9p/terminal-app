@@ -13,7 +13,7 @@ path = "src/main.rs"
 term-engine = { path = "../engine" }
 portable-pty = "0.9"
 
-# Ending the command's whole process group, not only the command, needs killpg; nix wraps it
-# without unsafe and is already in the tree through portable-pty.
+# Ending the command's whole process group needs killpg, and learning of its exit without reaping
+# it needs waitid or kqueue; nix wraps all three without unsafe and is already in the tree.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", default-features = false, features = ["signal"] }
+nix = { version = "0.28", default-features = false, features = ["signal", "process", "event"] }

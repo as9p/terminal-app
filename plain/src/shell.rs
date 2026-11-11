@@ -2,13 +2,14 @@
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(not(unix))]
+use portable_pty::ChildKiller;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use term_engine::{CellSize, GridSize};
 
 const READ_CHUNK: usize = 64 * 1024;
@@ -43,10 +44,12 @@ struct Progress {
 pub struct Shell {
     master: Box<dyn MasterPty + Send>,
     writes: Sender<Vec<u8>>,
+    #[cfg(not(unix))]
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pid: Option<u32>,
-    exited: Arc<AtomicBool>,
-    progress: Arc<(Mutex<Progress>, Condvar)>,
+    /// Set by the waiter before it reaps the command, under the lock every signal holds, so a
+    /// signal can only reach the command's own group, never a process that reused its number.
+    exited: Arc<Mutex<bool>>,
 }
 
 impl Shell {
@@ -95,8 +98,9 @@ impl Shell {
         };
 
         let pid = child.process_id();
+        #[cfg(not(unix))]
         let killer = child.clone_killer();
-        let exited = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(Mutex::new(false));
         let delivery = Arc::new(Mutex::new(Delivery {
             on_event,
             exited: false,
@@ -117,17 +121,17 @@ impl Shell {
             thread::Builder::new()
                 .name("shell waiter".into())
                 .spawn(move || {
-                    wait_loop(child, &delivery, &progress_w, &exited_w);
+                    wait_loop(child, pid, &delivery, &progress_w, &exited_w);
                 })?;
             io::Result::Ok(())
         })();
         let shell = Shell {
             master,
             writes,
+            #[cfg(not(unix))]
             killer: Mutex::new(killer),
             pid,
             exited,
-            progress,
         };
         // Dropping the half-built shell ends the command if a thread could not start.
         spawned.map(|()| shell)
@@ -152,28 +156,33 @@ impl Shell {
         self.signal(Kill::Now);
     }
 
-    fn signal(&self, how: Kill) {
-        // Once the command has exited and nothing holds the pty, its group is empty and the
-        // number may belong to someone else.
-        let held = !lock(&self.progress.0).done;
-        if self.exited.load(Ordering::Acquire) && !held {
-            return;
+    /// Returns whether a signal was sent. After the command has exited nothing is sent: dropping
+    /// the pty is what tells leftover jobs the terminal is gone.
+    fn signal(&self, how: Kill) -> bool {
+        let exited = lock(&self.exited);
+        if *exited {
+            return false;
         }
         #[cfg(unix)]
-        if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()) {
+        {
+            let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()) else {
+                return false;
+            };
             use nix::sys::signal::{Signal, killpg};
             use nix::unistd::Pid;
             let signal = match how {
                 Kill::Now => Signal::SIGKILL,
                 Kill::HangUp => Signal::SIGHUP,
             };
-            // The library starts the command in its own session, so its pid is its group.
-            let _ = killpg(Pid::from_raw(pid), signal);
-            return;
+            // The library starts the command in its own session, so its pid is its group. The
+            // command is not reaped while `exited` is held false, so the number is still ours.
+            killpg(Pid::from_raw(pid), signal).is_ok()
         }
-        let _ = how;
-        if !self.exited.load(Ordering::Acquire) {
-            let _ = lock(&self.killer).kill();
+        #[cfg(not(unix))]
+        {
+            // The killer holds a process handle, which cannot point at another process.
+            let _ = how;
+            lock(&self.killer).kill().is_ok()
         }
     }
 }
@@ -276,16 +285,29 @@ fn write_loop(mut writer: Box<dyn Write + Send>, queue: mpsc::Receiver<Vec<u8>>)
 
 fn wait_loop(
     mut child: Box<dyn Child + Send + Sync>,
+    pid: Option<u32>,
     delivery: &Mutex<Delivery>,
     progress: &(Mutex<Progress>, Condvar),
-    exited: &AtomicBool,
+    exited: &Mutex<bool>,
 ) {
+    // Reaping frees the pid for reuse, so the exit is marked first, under the signal lock.
+    #[cfg(unix)]
+    {
+        if let Some(pid) = pid {
+            await_exit(pid);
+        }
+        *lock(exited) = true;
+    }
     // The library gives a killed command code 1 and the signal only by name.
     let code = match child.wait() {
         Ok(status) => status.exit_code(),
         Err(_) => 1,
     };
-    exited.store(true, Ordering::Release);
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        *lock(exited) = true;
+    }
     // What the command wrote is already in the pty; wait until the reader has delivered it.
     let (state, changed) = progress;
     let mut state = lock(state);
@@ -316,6 +338,59 @@ fn wait_loop(
     delivery.exited = true;
     (delivery.on_event)(ShellEvent::Exited(code));
 }
+
+/// Blocks until the command has exited, leaving it unreaped. If the exit cannot be watched this
+/// returns at once, and the command then gets no signals at all rather than risk a stranger.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn await_exit(pid: u32) {
+    use nix::errno::Errno;
+    use nix::sys::wait::{Id, WaitPidFlag, waitid};
+    use nix::unistd::Pid;
+    let Ok(pid) = i32::try_from(pid) else { return };
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT;
+    while let Err(Errno::EINTR) = waitid(Id::Pid(Pid::from_raw(pid)), flags) {}
+}
+
+/// As above; these systems have no `waitid` in nix, but kqueue reports an exit without reaping.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn await_exit(pid: u32) {
+    use nix::errno::Errno;
+    use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
+    let Ok(queue) = Kqueue::new() else { return };
+    let watch = KEvent::new(
+        pid as usize,
+        EventFilter::EVFILT_PROC,
+        EventFlag::EV_ADD | EventFlag::EV_ONESHOT,
+        FilterFlag::NOTE_EXIT,
+        0,
+        0,
+    );
+    let mut fired = [watch];
+    // An already exited command fails to register with ESRCH, which also ends the wait.
+    while let Ok(0) | Err(Errno::EINTR) = queue.kevent(&[watch], &mut fired, None) {}
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))
+))]
+fn await_exit(_pid: u32) {}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -357,5 +432,88 @@ mod tests {
         );
         // The writer thread meets the closed pty only now; give it the chance to fail loudly.
         shell.write(vec![b'y'; 1024]);
+    }
+
+    fn spawn_sh(script: &str) -> (Shell, mpsc::Receiver<ShellEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let command = ["/bin/sh", "-c", script].map(String::from).to_vec();
+        let on_event = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let shell = Shell::spawn(
+            Some(command),
+            None,
+            GridSize { cols: 80, rows: 24 },
+            on_event,
+        );
+        (shell.unwrap(), rx)
+    }
+
+    /// Ends the background `sleep 30` a test started, by its own pid and only while that pid is
+    /// still a sleep, also when an assertion fails.
+    struct Sleeper(i32);
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            let name = std::process::Command::new("/bin/ps")
+                .args(["-p", &self.0.to_string(), "-o", "comm="])
+                .output();
+            if name.is_ok_and(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .ends_with("sleep")
+            }) {
+                let _ = kill(Pid::from_raw(self.0), Signal::SIGKILL);
+            }
+        }
+    }
+
+    #[test]
+    fn no_signal_after_the_command_has_exited() {
+        let (shell, rx) = spawn_sh("sleep 30 & echo \"pid $!\"; exit 0");
+        let mut text = String::new();
+        let mut sleeper = None;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("an event") {
+                ShellEvent::Output(bytes) => {
+                    text.push_str(&String::from_utf8_lossy(&bytes));
+                    if sleeper.is_none()
+                        && let Some(line) = text
+                            .split("pid ")
+                            .nth(1)
+                            .and_then(|rest| rest.split_once('\n'))
+                        && let Ok(pid) = line.0.trim().parse()
+                    {
+                        sleeper = Some(Sleeper(pid));
+                    }
+                }
+                ShellEvent::Exited(code) => {
+                    assert_eq!(code, 0);
+                    break;
+                }
+            }
+        }
+        assert!(sleeper.is_some(), "no pid in {text:?}");
+        assert!(!shell.signal(Kill::Now));
+        assert!(!shell.signal(Kill::HangUp));
+        shell.kill();
+        drop(shell);
+    }
+
+    #[test]
+    fn a_live_command_is_signalled() {
+        let (shell, rx) = spawn_sh("exec /bin/cat");
+        assert!(shell.signal(Kill::Now));
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("an event") {
+                ShellEvent::Exited(code) => {
+                    assert_ne!(code, 0);
+                    break;
+                }
+                ShellEvent::Output(_) => {}
+            }
+        }
     }
 }

@@ -38,6 +38,13 @@ pub fn run(options: Options) -> i32 {
         // The receiver is gone only when this function has returned, and then nobody listens.
         let _ = tx.send(event);
     });
+    // A bad path must fail before the command runs, not after it has done its work.
+    if let Some(path) = &options.record
+        && let Err(e) = std::fs::File::create(path)
+    {
+        eprintln!("snowflake: cannot write the recording: {e}");
+        return 1;
+    }
     let shell = match Shell::spawn(options.command, options.cwd, options.grid, on_event) {
         Ok(shell) => shell,
         Err(e) => {

@@ -248,3 +248,19 @@ fn output_before_exit_is_not_lost() {
     );
     assert_eq!(run.code, Some(0));
 }
+
+#[test]
+fn bad_record_path_starts_nothing() {
+    let marker = TempFile::new("marker");
+    let script = format!("touch '{}'", marker.path());
+    let run = snowflake(&[
+        "--record",
+        "/nonexistent-dir/x.rec",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
+    assert!(!marker.0.exists(), "the command ran");
+}
