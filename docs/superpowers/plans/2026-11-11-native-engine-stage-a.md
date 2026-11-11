@@ -26,10 +26,10 @@
 - A resize refits the grid once, 100 ms after the size stops changing. Until then the old grid stays where it is.
 - Licence: no code copied from kitty, cmux, Zed or any GPL or AGPL project, and none from Alacritty's application crate (key handling is written from the public protocol documents). New dependencies must be MIT, Apache-2.0, BSD, Zlib or ISC. A patched copy of a library keeps its licence notice.
 - `host/` and `client/` are not edited. Never run the `term-host` binary, never touch port 47211 or `/Users/x/Library/Application Support/terminal-app`.
-- Automated tests never open a window. Windows are opened only by the scripts in `tools/` (through the speed runner, in a sitting) and by the one four-second check in Task 8 Step 4, which the controller announces to Alex first.
+- Automated tests never open a window. Windows are opened only by the scripts in `tools/` (through the speed runner, in a sitting) by the four-second check in Task 8 Step 4 (repeated only as often as a fix needs), which the controller announces to Alex first, and by the comparison terminals the controller starts in Task 11.
 - From Task 1 on, CI runs the engine's windowless tests on Windows as well as Mac, and from Task 7 on it checks that `term-plain` compiles on Windows. Nothing is tuned for Windows in this stage.
 - Writing rules for code comments, docs and commit messages: no em-dashes, no emoji characters (write them as `\u{...}` escapes in tests), sentence case, plain words.
-- Git: run git as plain commands from the repo root, stage files by name, never `git add -A`, never `git stash`. Each commit message ends with the `Co-Authored-By` line for the model that wrote it.
+- Git: run git as plain commands from the repo root, stage files by name, never `git add -A`, never `git stash`. Each commit message ends with the `Co-Authored-By` line for the model that wrote it. The commit commands in the tasks show the subject only; add the trailer when committing.
 
 ## Review Focus
 
@@ -162,7 +162,7 @@ pub struct Modes { pub bracketed_paste: bool, pub app_cursor: bool, pub app_keyp
 /// fg and bg are final: inverse, dim, hidden and colours the program redefined are already applied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell { pub ch: char, pub zerowidth: Vec<char>, pub fg: Rgb, pub bg: Rgb, pub attrs: Attrs, pub width: CellWidth }
-bitflags! { pub struct Attrs: u8 { const BOLD; const ITALIC; const UNDERLINE; const DOUBLE_UNDERLINE; const UNDERCURL;
+bitflags! { #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct Attrs: u8 { const BOLD; const ITALIC; const UNDERLINE; const DOUBLE_UNDERLINE; const UNDERCURL;
     const DOTTED_UNDERLINE; const DASHED_UNDERLINE; const STRIKEOUT; } }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum CellWidth { Narrow, Wide, Spacer }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct Cursor { pub at: CellPoint, pub shape: CursorShape }
@@ -259,7 +259,7 @@ Expected: all pass. A test that cannot be made to pass through the wrapper is th
 
 - [ ] **Step 6: Write and run the memory figure in `engine/tests/memory.rs`**
 
-A counting `#[global_allocator]` (live bytes). Test `full_scrollback_memory_is_bounded`: one `Screen` at 120 by 40, fed 20,100 lines of 120 visible characters with a colour change on each line. With `cells = 120 * 20_040`: print `MEMORY one_terminal_bytes=<n> bytes_per_cell=<n / cells>`, assert `bytes_per_cell <= 32.0`. Then four such screens: assert the total is within 10% of four times the first figure.
+A counting `#[global_allocator]` (live bytes). Test `full_scrollback_memory_is_bounded`: one `Screen` at 120 by 40, fed 20,100 lines of 120 visible characters with a colour change on each line. With `cells = 120 * 20_040`: print `MEMORY one_terminal_bytes=<n> bytes_per_cell=<n / cells>`, assert `bytes_per_cell <= 32.0` (the library's cell is 24 bytes by reading, which is where the 58 MB and 2.3 GB figures come from; 32 leaves room for row overhead, and at that cap one terminal is about 77 MB and forty are about 3.1 GB). Then four such screens: assert the total is within 10% of four times the first figure.
 
 Run: `cargo test -p term-engine --test memory -- --nocapture`
 Expected: PASS, and a `MEMORY` line. Put that line in the report: forty times `one_terminal_bytes` is the figure stage B plans around (about 2.3 GB by arithmetic if every one of 40 terminals has filled its scrollback at 120 columns).
@@ -291,7 +291,7 @@ Dispatch: opus, effort high.
 // engine/src/keys.rs
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode { Char(char), Enter, Tab, Backspace, Escape, Delete, Insert, Left, Right, Up, Down, Home, End, PageUp, PageDown, F(u8) }
-bitflags! { pub struct Mods: u8 { const SHIFT = 1; const ALT = 2; const CTRL = 4; const SUPER = 8; } }
+bitflags! { #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct Mods: u8 { const SHIFT = 1; const ALT = 2; const CTRL = 4; const SUPER = 8; } }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum KeyEventKind { Press, Repeat, Release }
 /// `code` is the key without Shift applied (Char('a') for Shift+A). `text` is what the keyboard layout produced, if anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -425,7 +425,7 @@ Dispatch: opus, effort high.
 - Modify: `engine/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `Screen` and its types (Task 1), `encode_key`, `encode_mouse`, `KeyInput`, `Mods`, `MouseAction`, `Button` (Task 2).
+- Consumes: `Screen` and its types (Task 1), `encode_key`, `encode_mouse`, `KeyInput`, `Mods`, `MouseAction`, `Button`, `Platform` (Task 2).
 - Produces:
 
 ```rust
@@ -467,7 +467,7 @@ Rules the view owns:
 
 - [ ] **Step 1: Write the failing tests in `engine/tests/view.rs`**
 
-All on `TerminalView::new(GridSize { cols: 80, rows: 24 }, &Theme::builtin(), Platform::Mac)` unless noted.
+All on `TerminalView::new(GridSize { cols: 80, rows: 24 }, &Theme::builtin(), Platform::Mac)` unless noted. A new view starts focused. `row_text` and `scroll_offset` in the table mean `view.screen().row_text(..)` and `view.screen().scroll_offset()`.
 
 | Test | Do | Assert |
 |---|---|---|
@@ -475,7 +475,7 @@ All on `TerminalView::new(GridSize { cols: 80, rows: 24 }, &Theme::builtin(), Pl
 | `keys_go_out` | `key` of `Char('a')` with text `a` | `take_output() == b"a"` |
 | `output_while_scrolled_up_keeps_place` | feed 100 numbered lines; `pointer(Wheel(10), ..)`; remember `row_text(0)`; feed 5 more lines | `row_text(0)` unchanged and `scroll_offset() == 15`; after a key press `scroll_offset() == 0` |
 | `drag_selects_and_copies` | feed `hello brave world`; press left at col 0 side Left, move to col 4 side Right, release | `take_events() == [Copy("hello")]` and `copy() == Some("hello")` |
-| `double_click_selects_a_word` | press and release left at col 7 with `clicks: 2` | `take_events() == [Copy("brave")]` |
+| `double_click_selects_a_word` | feed `hello brave world`; press and release left at col 7 with `clicks: 2` | `take_events() == [Copy("brave")]` |
 | `mouse_goes_to_the_program_when_it_asks` | feed `\x1b[?1000h\x1b[?1006h`; press left at col 0 | `take_output() == b"\x1b[<0;1;1M"`, no selection |
 | `shift_keeps_the_mouse_for_selecting` | same modes; press with SHIFT, move, release | `take_output()` is empty and `copy()` is `Some` |
 | `cmd_click_opens_a_plain_link` | feed `see https://example.com/a?b=1, ok`; press left with SUPER at col 10 | `take_events() == [OpenLink("https://example.com/a?b=1")]` |
@@ -710,7 +710,7 @@ git commit -m "feat(engine): draw the cell grid with wgpu from one glyph texture
 Dispatch: opus, effort high.
 
 **Files:**
-- Modify: `engine/src/draw.rs`, `engine/src/shader.wgsl`, `engine/tests/draw.rs`
+- Modify: `engine/src/draw.rs`, `engine/src/shader.wgsl`, `engine/tests/draw.rs`, `engine/Cargo.toml` (the `png` dev-dependency, if Task 5 did not add it)
 - Create: `engine/tests/images.rs`, `engine/tests/images/*.png` (six files)
 
 **Interfaces:**
@@ -755,7 +755,7 @@ Six screens, each a view of 40 by 8 drawn at scale 2 into an image of 680 by 248
 | `cursor.png` | three lines of text with a block cursor (`\x1b[2 q`) on a letter in the middle of line 2; the bar cursor is already in the other images |
 | `selection.png` | three lines with a selection spanning line ends |
 
-Each test renders, then compares with `engine/tests/images/<name>.png`: it fails if more than 0.2% of pixels differ by more than 16 in any channel, and on failure writes `target/image-diff/<name>.actual.png`. With `TERM_ENGINE_BLESS=1` it writes the stored file instead. `emoji` and Han content make `wide.png` Mac-only; mark that test `#[cfg(target_os = "macos")]`.
+The image tests use the same shared setup as `draw.rs`, so `TERM_ENGINE_NO_GPU=1` skips them too. Each test renders, then compares with `engine/tests/images/<name>.png`: it fails if more than 0.2% of pixels differ by more than 16 in any channel, and on failure writes `target/image-diff/<name>.actual.png`. With `TERM_ENGINE_BLESS=1` it writes the stored file instead. `emoji` and Han content make `wide.png` Mac-only; mark that test `#[cfg(target_os = "macos")]`.
 
 - [ ] **Step 4: Bless, look, run**
 
@@ -765,7 +765,7 @@ Expected: PASS. Before committing, open each of the six PNG files with the Read 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add engine/src/draw.rs engine/src/shader.wgsl engine/tests/draw.rs engine/tests/images.rs engine/tests/images
+git add engine/src/draw.rs engine/src/shader.wgsl engine/tests/draw.rs engine/tests/images.rs engine/tests/images engine/Cargo.toml Cargo.lock
 git commit -m "feat(engine): cursor, selection and text decorations, with stored image checks"
 ```
 
@@ -815,6 +815,8 @@ impl Session {
     pub fn set_grid(&mut self, grid: GridSize, cell: CellSize);   // view, shell and recording together
 }
 ```
+
+`Session::new` builds its view with `Theme::builtin()` and `Platform::Mac` on macOS, `Platform::Other` elsewhere.
 
 The shell's environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=snowflake`, `TERM_PROGRAM_VERSION` the crate version. The reader thread reads up to 64 KiB at a time.
 
@@ -911,7 +913,7 @@ What the window does. Each line is a decision, not a suggestion:
 - A redraw calls `prepare` and `draw` once and presents. Nothing else presents. Every configure and every present is guarded by `may_present`, so while the window is fully hidden or minimised nothing is drawn, and a surface is never configured with a zero width or height.
 - Keys: `window_key` first; everything else goes to `view.key` and then `session.flush()`. Copy does nothing without a selection. Paste reads the clipboard and calls `view.paste`.
 - `ViewEvent::Copy` writes the clipboard, `OpenLink` runs `/usr/bin/open <url>`, `Title` sets the window title, `Bell` is ignored.
-- Mouse: positions go through `cell_at`; `Clicks` supplies the count; trackpad pixels go through `WheelLines`, wheel notches count as 3 lines.
+- Mouse: positions go through `cell_at`; `Clicks` supplies the count; trackpad pixels go through `WheelLines`, wheel notches count as 3 lines. `Clicks`, `WheelLines` and `zoomed` take no winit types, so stage B can lift them into the engine unchanged.
 - Resize: the surface follows at once and the old grid stays (the engine pads or clips). `Settle` then triggers one `fit` and `session.set_grid`. The first frame and a zoom fit at once.
 - Zoom: `gpu.set_text_size(new_px, scale)`, then fit. A display scale change does the same with the new scale.
 - `view.tick` is called before each frame and its answer becomes the event loop's wake time, together with `Settle::deadline`. With neither, the loop waits for events and uses no CPU.
@@ -971,7 +973,7 @@ Dispatch: opus, effort high.
 
 **Files:**
 - Create: `engine/tests/replay.rs`, `tools/plain/record-claude.sh`
-- Modify: `.gitignore` (add `engine/tests/recordings/*.local.rec`)
+- Modify: `.gitignore` (add `engine/tests/recordings/*.local.rec`), `.github/workflows/engine.yml`
 
 **Interfaces:**
 - Consumes: `read_recording`, `Record` (Task 7), `TerminalView` (Task 3), `snowflake --headless --record --keys` (Task 7).
@@ -987,13 +989,13 @@ A helper `replay(records: &[Record], merged: bool) -> Report`: a view at the fir
 - [ ] **Step 2: Run the synthetic test**
 
 Run: `cargo test -p term-engine --test replay`
-Expected: PASS (the engine already holds drawing during a synchronized update; a failure here is an engine bug to fix in `view.rs`).
+Expected: PASS (the engine already holds drawing during a synchronized update; a failure here is an engine bug to fix in `engine/src/view.rs`, staged with this task's commit).
 
 Then add `--test replay` to the Windows line in `.github/workflows/engine.yml` (the synthetic test needs no GPU), and stage that file in Step 5.
 
 - [ ] **Step 3: Write `tools/plain/record-claude.sh`**
 
-It makes a temporary empty folder, writes a keys file (`4000 \r`, `9000 say hi in five words\r`, `30000 /exit\r`), and runs `target/release/snowflake --headless --cols 120 --rows 40 --timeout 45 --cwd <folder> --keys <file> --record engine/tests/recordings/claude.local.rec -- claude`, then removes the folder. It prints the size of the recording.
+It makes a temporary empty folder, writes a keys file (`4000 \r`, `9000 say hi in five words\r`, `30000 /exit\r`), builds the program with `cargo build --release -p term-plain`, and runs `target/release/snowflake --headless --cols 120 --rows 40 --timeout 45 --cwd <folder> --keys <file> --record engine/tests/recordings/claude.local.rec -- claude`, then removes the folder. It prints the size of the recording.
 
 - [ ] **Step 4: Make the recording and run the real replay**
 
@@ -1099,6 +1101,7 @@ Expected: every line `PASS`. On a `FAIL`: dispatch a debugger (opus) with the su
 - [ ] **Step 7: Commit**
 
 ```bash
+# every sitting folder made in this task (stage-a-1, stage-a-2, ...), and plain/src/window.rs if Step 4 changed the default
 git add plain/README.md DESIGN.md docs/superpowers/specs/2026-11-11-native-renderer-design.md tools/keylat/results/stage-a-1
 git commit -m "docs: stage A speed sitting and how to run the plain terminal"
 ```
@@ -1121,3 +1124,4 @@ Alex runs `target/release/snowflake` and checks, in Claude Code: Shift+Enter mak
 - The comparison installs Ghostty and Alacritty on this Mac.
 - Memory: by arithmetic, 40 terminals that have each filled 20,000 lines at 120 columns hold about 2.3 GB of screen state. Task 1 measures the real figure. It does not affect stage A (one terminal, about 58 MB at most); what to do about it is a stage B decision.
 - CI also runs the engine's windowless tests on Windows from the start, as a cheap guard for stage C.
+- Two small departures from the design, on purpose. The idle check allows one stray frame in five seconds, because the system itself can ask for a redraw; a steady trickle still fails. The replay of a real Claude Code session runs only on this Mac, because the recording holds account output and is never committed; a made-up recording checks the same rule in CI.
