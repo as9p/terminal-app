@@ -9,6 +9,7 @@ mod gpu;
 mod keys;
 mod links;
 mod mouse;
+mod recording;
 mod screen;
 mod theme;
 mod view;
@@ -22,6 +23,7 @@ pub use gpu::{Gpu, GpuError};
 pub use keys::{KeyCode, KeyEventKind, KeyInput, Mods, Platform, encode_key};
 pub use links::url_at;
 pub use mouse::{Button, MouseAction, encode_mouse};
+pub use recording::{Record, Recorder, read_recording};
 pub use screen::{
     Attrs, Cell, CellWidth, Cursor, CursorShape, Damage, Modes, MouseTracking, SCROLLBACK_LINES,
     Screen, ScreenEvent, SelectKind,

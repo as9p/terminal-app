@@ -1,0 +1,19 @@
+[package]
+name = "term-plain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Snowflake, the plain terminal: one shell on a pty drawn by the engine"
+
+[[bin]]
+name = "snowflake"
+path = "src/main.rs"
+
+[dependencies]
+term-engine = { path = "../engine" }
+portable-pty = "0.9"
+
+# Ending the command's whole process group, not only the command, needs killpg; nix wraps it
+# without unsafe and is already in the tree through portable-pty.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", default-features = false, features = ["signal"] }
