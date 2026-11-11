@@ -641,9 +641,10 @@ impl Gpu {
     pub async fn new(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, target: wgpu::TextureFormat) -> Result<Gpu, GpuError>;
     pub fn device(&self) -> &wgpu::Device;
     pub fn queue(&self) -> &wgpu::Queue;
-    pub fn set_text_size(&mut self, font_px: f32, scale: f64);     // zoom or a new display scale; clears the glyph texture
+    pub fn set_text_size(&mut self, font_px: f32, scale: f64);     // zoom or a new display scale; clears the glyph texture when the size changes, does nothing when it is the same
     pub fn cell_size(&self) -> CellSize;
     pub fn glyph_count(&self) -> usize;
+    pub fn glyph_generation(&self) -> u64;                          // changes whenever the glyph texture was cleared; a view prepared before the change has no valid glyphs
 }
 // engine/src/draw.rs
 pub struct ViewDraw { /* private: instance buffers and the rows they were built from */ }
@@ -748,7 +749,7 @@ Expected before: the new tests FAIL. After: PASS.
 
 - [ ] **Step 3: Write `engine/tests/images.rs` (stored images)**
 
-Six screens, each a view of 40 by 8 drawn at scale 2 into an image of 680 by 248:
+Six screens, each a view of 40 by 8 drawn at scale 2 into an image of 680 by 320:
 
 | File | Feed |
 |---|---|
@@ -920,6 +921,7 @@ What the window does. Each line is a decision, not a suggestion:
 - Mouse: positions go through `cell_at`; `Clicks` supplies the count; trackpad pixels go through `WheelLines`, wheel notches count as 3 lines. `Clicks`, `WheelLines` and `zoomed` take no winit types, so stage B can lift them into the engine unchanged.
 - Resize: the surface follows at once and the old grid stays (the engine pads or clips). `Settle` then triggers one `fit` and `session.set_grid`. The first frame and a zoom fit at once.
 - Zoom: `gpu.set_text_size(new_px, scale)`, then fit. A display scale change does the same with the new scale.
+- A frame with more than one view prepares every view, and if `gpu.glyph_generation()` changed while doing so, prepares the earlier views again before drawing. Stage A has one view, so this is a note for stage B; the one view needs nothing extra.
 - `view.tick` is called before each frame and its answer becomes the event loop's wake time, together with `Settle::deadline`. With neither, the loop waits for events and uses no CPU.
 - The shell exiting closes the window and ends the process with the shell's exit code.
 - With `TERM_PLAIN_STATS=<file>` set, the file is rewritten after every presented frame with `frames=<count>`.
