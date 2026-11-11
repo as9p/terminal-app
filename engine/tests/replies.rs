@@ -1,8 +1,22 @@
 //! What the view answers when a program asks the terminal about itself.
 
+use alacritty_terminal::vte::{Params, Parser, Perform};
 use term_engine::{GridSize, Platform, TerminalView, Theme};
 
 const QUERY: &[u8] = b"\x1b[>0q";
+
+/// Counts the XTVERSION queries the parser itself reads, `CSI > q` or `CSI > 0 q`, so the scan
+/// is checked against the parser rather than against a reading of it.
+struct Queries(usize);
+
+impl Perform for Queries {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        let zero = params.len() <= 1 && params.iter().all(|param| param == [0]);
+        if action == 'q' && intermediates == b">" && !ignore && zero {
+            self.0 += 1;
+        }
+    }
+}
 
 fn view() -> TerminalView {
     TerminalView::new(
@@ -25,6 +39,37 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .windows(needle.len())
         .filter(|window| *window == needle)
         .count()
+}
+
+/// `stream` fed whole, cut once at every byte, and one byte at a time.
+fn ways_to_feed(stream: &[u8]) -> Vec<Vec<&[u8]>> {
+    let mut ways = vec![vec![stream]];
+    ways.extend((1..stream.len()).map(|cut| vec![&stream[..cut], &stream[cut..]]));
+    ways.push(stream.chunks(1).collect());
+    ways
+}
+
+/// Feeds `pieces` to a view and to a bare parser: what the view sent back, and how many
+/// XTVERSION queries the parser read.
+fn replies_and_queries(pieces: &[&[u8]]) -> (Vec<u8>, usize) {
+    let mut view = view();
+    let mut parser: Parser = Parser::new();
+    let mut queries = Queries(0);
+    for piece in pieces {
+        view.feed(piece);
+        parser.advance(&mut queries, piece);
+    }
+    (view.take_output(), queries.0)
+}
+
+/// Every way of feeding `stream` gets `expected` replies, as many as the parser reads queries.
+fn assert_replies(stream: &[u8], expected: usize) {
+    for pieces in ways_to_feed(stream) {
+        let (output, queries) = replies_and_queries(&pieces);
+        assert_eq!(queries, expected, "the parser reads {pieces:?} otherwise");
+        assert_eq!(count(&output, b"\x1bP>|"), expected, "{pieces:?}");
+        assert_eq!(count(&output, &default_reply()), expected, "{pieces:?}");
+    }
 }
 
 #[test]
@@ -86,6 +131,49 @@ fn split_query_between_other_output_is_answered_once() {
         let output = view.take_output();
         assert_eq!(count(&output, &default_reply()), 2, "split at {split}");
         assert_eq!(output.len(), 2 * default_reply().len(), "split at {split}");
+    }
+}
+
+#[test]
+fn near_misses_split_anywhere_get_no_reply() {
+    for stream in [&b"\x1b[>1q"[..], b"\x1b[>0c", b"\x1b[>0;1q"] {
+        assert_replies(stream, 0);
+    }
+}
+
+#[test]
+fn a_near_miss_then_a_query_in_a_later_read_gets_one_reply() {
+    let cases: [&[&[u8]]; 3] = [
+        &[b"\x1b[>", b"1q", b"\x1b[>0q"],
+        &[b"\x1b[>0", b";1q", b"\x1b[>q"],
+        &[b"\x1b[>0", b"c", b"\x1b[>0q"],
+    ];
+    for feeds in cases {
+        let (output, queries) = replies_and_queries(feeds);
+        assert_eq!(queries, 1, "the parser reads {feeds:?} otherwise");
+        assert_eq!(count(&output, b"\x1bP>|"), 1, "{feeds:?}");
+        assert_eq!(count(&output, &default_reply()), 1, "{feeds:?}");
+        assert_replies(&feeds.concat(), 1);
+    }
+}
+
+#[test]
+fn a_query_after_a_cut_short_sequence_gets_one_reply() {
+    // An escape inside an unfinished sequence starts a new one, so the parser reads the query.
+    for stream in [&b"\x1b\x1b[>q"[..], b"\x1b[\x1b[>q", b"\x1b[>0\x1b[>0q"] {
+        assert_replies(stream, 1);
+    }
+}
+
+#[test]
+fn a_query_after_a_multibyte_character_gets_one_reply() {
+    // Cuts fall inside the characters too.
+    for stream in [
+        "\u{e9}\x1b[>0q",
+        "\u{20ac}\x1b[>q",
+        "a \u{e9}\u{20ac} b\x1b[>0q c",
+    ] {
+        assert_replies(stream.as_bytes(), 1);
     }
 }
 

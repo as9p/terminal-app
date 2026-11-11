@@ -244,9 +244,11 @@ impl Screen {
         if bytes.is_empty() {
             return;
         }
-        // The reply goes in the inbox between the reads before and after the query, so it keeps
-        // its place among the library's own. Inside a synchronized update the library holds its
-        // replies until the update ends, while this one goes at once.
+        // The parser reads up to the end of each query before the reply goes in the inbox, so the
+        // reply keeps its place among the library's own. Inside a synchronized update the reply
+        // is sent at once all the same, while the library holds back the update's bytes, and so
+        // its replies to earlier queries in it, until the update ends. That is fine: the asking
+        // program is waiting on this reply, and the reply draws nothing.
         let mut rest = bytes;
         while let Some(end) = self.version_scan.find(rest) {
             self.parser.advance(&mut self.term, &rest[..end]);
