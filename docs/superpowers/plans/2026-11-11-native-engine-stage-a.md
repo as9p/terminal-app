@@ -567,7 +567,7 @@ impl Atlas {
 ```
 
 Rules:
-- Cell size: `h = round(font_px * scale * 1.1)`, `w = round(advance of one character at font_px * scale)`.
+- Cell size: `w = round(advance of one character at font_px * scale)`. `h` follows today's app (xterm.js with line height 1.1, which multiplies the font's own line height, not the font size): `natural = ceil((ascent + descent + line gap of the regular face, in em) * font_px * scale)`, then `h = natural * 11 / 10` in whole numbers, rounded down. For the built-in font (1.32 em) that is 40 at 14 px and scale 2, and 20 at scale 1. The baseline is placed so ascent plus descent are centred in the cell.
 - When a glyph does not fit, the atlas doubles its side, up to 4096. Full at 4096, it clears itself. Either way `generation` changes and callers ask again for every glyph they still need.
 - The fonts are copied from `/Users/x/Library/Fonts/` (same four file names). `LICENSE.md` names the source (JetBrains Mono, SIL Open Font License 1.1; patched by the Nerd Fonts project) and carries the OFL text. If the licence text cannot be confirmed from the font's own name table or a copy on disk, report it instead of writing one from memory.
 
@@ -577,8 +577,9 @@ Rules:
 
 | Test | Assert |
 |---|---|
-| `cell_size_follows_the_rule` | `cell_size(14.0, 2.0) == CellSize { w: 17, h: 31 }`; `cell_size(14.0, 1.0) == CellSize { w: 8, h: 15 }`; `cell_size(15.0, 2.0).h == 33` |
-| `plain_letter_fits_its_cell` | `A` regular at 14 px, scale 2: `Mask`, `ink > 0`, `left >= 0`, `left + width <= 17`, `top >= 0`, `top + height <= 31` |
+| `cell_size_follows_the_rule` | `cell_size(14.0, 2.0) == CellSize { w: 17, h: 40 }`; `cell_size(14.0, 1.0) == CellSize { w: 8, h: 20 }`; `cell_size(15.0, 2.0).h == 44` |
+| `descenders_are_not_clipped` | `g` regular at 14 px, scale 2: `top + height <= 39` (at least one clear row under the tail); `\u{C1}` (A with acute): `top >= 1` |
+| `plain_letter_fits_its_cell` | `A` regular at 14 px, scale 2: `Mask`, `ink > 0`, `left >= 0`, `left + width <= 17`, `top >= 0`, `top + height <= 40` |
 | `bold_has_more_ink` | `ink` of bold `A` is greater than `ink` of regular `A` |
 | `italic_differs_from_regular` | pixels of italic `A` differ from regular `A` |
 | `emoji_is_in_colour` | `\u{1F600}` with `wide: true`: `Color`, and some pixel has `r != b` |
@@ -664,19 +665,19 @@ Rules:
 
 - [ ] **Step 1: Write the failing tests in `engine/tests/draw.rs`**
 
-Shared setup: `Gpu::new(&instance, None, Rgba8UnormSrgb)` with `pollster::block_on`, `set_text_size(14.0, 2.0)` (cell 17 by 31), a view of 20 by 4, clear colour magenta `Rgb(255, 0, 255)`. `px(img, x, y)` reads one pixel as `Rgb`.
+Shared setup: `Gpu::new(&instance, None, Rgba8UnormSrgb)` with `pollster::block_on`, `set_text_size(14.0, 2.0)` (cell 17 by 40), a view of 20 by 4, clear colour magenta `Rgb(255, 0, 255)`. `px(img, x, y)` reads one pixel as `Rgb`.
 
 | Test | Do | Assert |
 |---|---|---|
-| `default_background_is_exact` | empty view, rect `0,0,340,124`, image 340 by 124 | `px(5, 5) == Rgb(0x16, 0x14, 0x1F)` |
+| `default_background_is_exact` | empty view, rect `0,0,340,160`, image 340 by 160 | `px(5, 5) == Rgb(0x16, 0x14, 0x1F)` |
 | `coloured_background_is_exact` | feed `\x1b[41m  \x1b[0m` | `px(8, 15) == Rgb(0xF3, 0x8B, 0xA8)`; `px(8 + 2 * 17, 15) == Rgb(0x16, 0x14, 0x1F)` |
 | `text_is_drawn_in_its_colour` | feed `\x1b[38;2;255;255;255m\u{2588}` | `px(8, 15) == Rgb(255, 255, 255)` |
 | `letters_leave_ink` | feed `A` | some pixel in cell (0,0) differs from the background; every pixel in cell (5,0) equals it |
-| `box_lines_join_across_cells` | feed `\u{2500}\u{2500}\u{2500}` | some row y between 14 and 16 has every pixel from x 0 to x 50 equal to `Rgb(0xCD, 0xD6, 0xF4)` |
+| `box_lines_join_across_cells` | feed `\u{2500}\u{2500}\u{2500}` | some row y between 19 and 21 has every pixel from x 0 to x 50 equal to `Rgb(0xCD, 0xD6, 0xF4)` |
 | `grid_smaller_than_rect_is_padded` | rect `0,0,400,200`, image 400 by 200 | `px(390, 190) == Rgb(0x16, 0x14, 0x1F)` |
-| `grid_larger_than_rect_is_clipped` | feed `\x1b[41m` and 80 spaces; rect `10,10,100,50`, image 340 by 124 | `px(5, 5)`, `px(111, 30)` and `px(30, 61)` are magenta; `px(20, 20) == Rgb(0xF3, 0x8B, 0xA8)` |
+| `grid_larger_than_rect_is_clipped` | feed `\x1b[41m` and 80 spaces; rect `10,10,100,50`, image 340 by 160 | `px(5, 5)`, `px(111, 30)` and `px(30, 61)` are magenta; `px(20, 20) == Rgb(0xF3, 0x8B, 0xA8)` |
 | `zero_size_rect_draws_nothing` | rect `0,0,0,0` | no panic; every pixel is magenta |
-| `scale_change_redraws_glyphs` | feed `A\x1b[3;1H`; render; `set_text_size(14.0, 1.0)`; render with rect `0,0,160,60`, image 160 by 60 | `cell_size() == CellSize { w: 8, h: 15 }`; some pixel with `x < 8, y < 15` differs from the background; every pixel with `x >= 8, y < 15` is the background |
+| `scale_change_redraws_glyphs` | feed `A\x1b[3;1H`; render; `set_text_size(14.0, 1.0)`; render with rect `0,0,160,80`, image 160 by 80 | `cell_size() == CellSize { w: 8, h: 20 }`; some pixel with `x < 8, y < 20` differs from the background; every pixel with `x >= 8, y < 20` is the background |
 | `second_frame_rebuilds_only_changed_rows` | render; feed `x`; `prepare` | `rows_rebuilt() == 1` |
 | `unchanged_view_rebuilds_nothing` | render; `prepare` again | `rows_rebuilt() == 0` |
 | `two_views_share_the_glyph_texture` | two views with their own `ViewDraw`, both fed `hello`; render both | `glyph_count()` after the second equals the count after the first |
@@ -727,7 +728,7 @@ Rules:
 
 - [ ] **Step 1: Add the failing tests to `engine/tests/draw.rs`**
 
-Same setup as Task 5 (cell 17 by 31, scale 2).
+Same setup as Task 5 (cell 17 by 40, scale 2).
 
 | Test | Do | Assert |
 |---|---|---|
@@ -737,7 +738,7 @@ Same setup as Task 5 (cell 17 by 31, scale 2).
 | `hidden_cursor_is_not_drawn` | feed `\x1b[?25l` | `px(0, 15)` is the background |
 | `selection_uses_its_colours` | feed `\u{2588} \x1b[3;1H`; `screen_mut().select(Char, cell 0, Left)` then `select_to(cell 1, Right)` | `px(8, 15) == Rgb(0x1E, 0x1E, 0x2E)` (the block glyph in the selection text colour); `px(17 + 8, 15) == Rgb(0xF5, 0xE0, 0xDC)` (the empty cell in the selection background) |
 | `underline_is_drawn_below_the_text` | feed `\x1b[4m \x1b[0m\x1b[3;1H` | some row in the bottom quarter of cell (0,0) is all `Rgb(0xCD, 0xD6, 0xF4)`; the top half of the cell is all background |
-| `strikeout_crosses_the_middle` | feed `\x1b[9m \x1b[0m\x1b[3;1H` | some row within 4 pixels of y 15 is all foreground |
+| `strikeout_crosses_the_middle` | feed `\x1b[9m \x1b[0m\x1b[3;1H` | some row within 5 pixels of y 20 is all foreground |
 | `moving_the_cursor_rebuilds_two_rows` | render; feed `\x1b[3;1H`; `prepare` | `rows_rebuilt() <= 2` |
 
 - [ ] **Step 2: Run to see them fail, implement, run to see them pass**
@@ -938,7 +939,7 @@ What the window does. Each line is a decision, not a suggestion:
 | `settle_fires_once_after_100_ms` | `changed(t)`; `due(t + 99ms)` false; `changed(t + 50ms)`; `due(t + 149ms)` false; `due(t + 150ms)` true; `due(t + 300ms)` false |
 | `clicks_count_to_three` | presses on one cell at `t`, `t+100ms`, `t+200ms`, `t+300ms` give 1, 2, 3, 1; a press 401 ms after the last gives 1; a press on another cell gives 1 |
 | `trackpad_pixels_become_lines` | with `cell_h` 31: `pixels(20.0)` is 0, `pixels(20.0)` is 1, `pixels(-71.0)` is -2 |
-| `scale_change_refits` | the 1280 by 800 point window at scale 2: `grid_for((2560, 1600), CellSize { w: 17, h: 31 }) == GridSize { cols: 150, rows: 51 }`; the same window at scale 1: `grid_for((1280, 800), CellSize { w: 8, h: 15 }) == GridSize { cols: 160, rows: 53 }` |
+| `scale_change_refits` | the 1280 by 800 point window at scale 2: `grid_for((2560, 1600), CellSize { w: 17, h: 40 }) == GridSize { cols: 150, rows: 40 }`; the same window at scale 1: `grid_for((1280, 800), CellSize { w: 8, h: 20 }) == GridSize { cols: 160, rows: 40 }` |
 | `hidden_or_empty_window_never_presents` | `may_present(false, (800, 600))`, `may_present(true, (0, 600))` and `may_present(true, (800, 0))` are false; `may_present(true, (1, 1))` is true; `grid_for((0, 0), ..) == GridSize { cols: 1, rows: 1 }` |
 
 - [ ] **Step 2: Run to see them fail, implement `input.rs`, run to see them pass**
