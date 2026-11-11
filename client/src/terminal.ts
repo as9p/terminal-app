@@ -13,7 +13,8 @@ import { ZOOM_DEFAULT, spacingFor } from "./zoom";
 const ACK_BYTES = 128 * 1024;
 const ACK_QUIET_MS = 100;
 const REATTACH_PAUSE_MS = 1000;
-// Each host resize makes the shell redraw, so a drag sends only the size it ends on.
+// Each fit re-wraps the whole buffer and each host resize makes the program redraw, so a drag
+// does both once, for the size it ends on.
 const RESIZE_SETTLE_MS = 100;
 const SHIFT_ENTER = "\x1b\r";
 // What Cmd or Option with a line-editing key sends, as kitty and iTerm do on a Mac.
@@ -93,13 +94,12 @@ export class TerminalView {
   private connection: Connection | undefined;
   private session = 0;
   private fitFrame = 0;
-  // The size the host has, and a resize waiting for a drag to stop.
+  // The size the host has, and a fit waiting for a drag to stop.
   private sentCols = 0;
   private sentRows = 0;
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
-  // Parked (no box) at the last observed size; the next fit goes to the host at once.
-  private parked = false;
-  private resizeNow = false;
+  // No box seen yet, or parked (no box) at the last one; the next size fits at once.
+  private parked = true;
 
   // Bumped per attachment, so a write finishing late cannot count toward a newer total.
   private generation = 0;
@@ -332,37 +332,40 @@ export class TerminalView {
     }
   }
 
+  // Window, sidebar and divider drags all reach here. While the size keeps changing the grid stays
+  // as it is, top-left and clipped by the pane, as kitty does: a fit per frame wrapped the buffer
+  // for sizes the program never drew for.
   private readonly onResize = (entries: ResizeObserverEntry[]): void => {
     const box = entries[entries.length - 1]?.contentRect;
     const parked = !box || box.width === 0 || box.height === 0;
-    if (this.parked && !parked) this.resizeNow = true;
+    const shown = this.parked && !parked;
     this.parked = parked;
-    this.fitSoon();
+    if (shown) {
+      this.fitSoon();
+      return;
+    }
+    clearTimeout(this.resizeTimer);
+    // A parked pane fits when it is shown again.
+    this.resizeTimer = parked ? undefined : setTimeout(this.fitNow, RESIZE_SETTLE_MS);
   };
 
-  // The view follows every frame; the host hears once the size stops changing.
+  // The first size, a pane shown again and a zoom fit in the next frame, without waiting.
   private readonly fitSoon = (): void => {
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = undefined;
     if (this.fitFrame) return;
     this.fitFrame = requestAnimationFrame(() => {
       this.fitFrame = 0;
-      const { cols, rows } = this.term;
-      this.fitAddon.fit();
-      if (this.resizeNow) {
-        this.resizeNow = false;
-        clearTimeout(this.resizeTimer);
-        this.sendResize();
-      } else if (this.term.cols !== cols || this.term.rows !== rows) {
-        clearTimeout(this.resizeTimer);
-        this.resizeTimer =
-          this.term.cols === this.sentCols && this.term.rows === this.sentRows
-            ? undefined
-            : setTimeout(this.sendResize, RESIZE_SETTLE_MS);
-      }
+      this.fitNow();
     });
   };
 
-  private readonly sendResize = (): void => {
+  // xterm and the program change size in the same step. A fit in the frame also takes a wait
+  // started since, as it measures the latest size.
+  private readonly fitNow = (): void => {
+    clearTimeout(this.resizeTimer);
     this.resizeTimer = undefined;
+    this.fitAddon.fit();
     const { cols, rows } = this.term;
     if (!this.connection || (cols === this.sentCols && rows === this.sentRows)) return;
     this.sentCols = cols;

@@ -5,6 +5,7 @@
 
 import type { Connection, Dir, Place, Tab } from "./connection";
 import type { Panes, PaneDirection } from "./panes";
+import type { Sessions } from "./sessions";
 import { type Store, allTabs, findTab, withCollapsed } from "./store";
 
 type Digit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
@@ -228,6 +229,8 @@ export type ActionContext = {
   store: Store;
   panes: Pick<Panes, "focusedSession" | "focusSession" | "viewFor" | "focusNeighbor" | "toggleFill" | "leaveFill">;
   connection: Pick<Connection, "treeOp" | "list" | "create" | "kill">;
+  /** The connection's session numbers and folders, so a new shell needs no `list` first. */
+  sessions: Pick<Sessions, "cwd" | "creating" | "created" | "failed">;
   /** Where a new shell starts when the focused pane's folder is not known. */
   home: string;
   /** What lives outside the tree and the panes. */
@@ -291,17 +294,24 @@ async function openShell(ctx: ActionContext, dir?: Dir): Promise<void> {
     },
   );
   try {
-    // Asked now, not remembered, so a `cd` a moment ago counts.
-    const items = await ctx.connection.list();
-    const cwd = items.find((item) => item.uuid === focused)?.cwd || ctx.home;
+    // The folder the shell last reported, so a `cd` a moment ago counts. The host is asked only
+    // when this client has none for the pane.
+    let cwd = focused === undefined ? ctx.home : ctx.sessions.cwd(focused);
+    if (cwd === undefined) {
+      const items = await ctx.connection.list();
+      cwd = items.find((item) => item.uuid === focused)?.cwd || ctx.home;
+    }
     const size = (focused !== undefined ? ctx.panes.viewFor(focused)?.size : undefined) ?? {
       cols: START_COLS,
       rows: START_ROWS,
     };
     const place: Place =
       dir && focused !== undefined ? { type: "split_of", session: focused, dir } : { type: "new_tab" };
-    await ctx.connection.create(uuid, "shell", cwd, size.cols, size.rows, place);
+    // The new pane's view attaches with the number `created` brings, whichever arrives first.
+    ctx.sessions.creating(uuid, cwd);
+    ctx.sessions.created(uuid, await ctx.connection.create(uuid, "shell", cwd, size.cols, size.rows, place));
   } catch (error) {
+    ctx.sessions.failed(uuid);
     stop();
     ctx.ui.note(`Could not open a shell: ${error}`);
   }

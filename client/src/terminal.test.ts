@@ -91,7 +91,7 @@ function connection() {
   };
 }
 
-function setup(attach = true) {
+function setup(attach = true, firstSize = true) {
   const parent = document.createElement("div");
   document.body.append(parent);
   const view = new TerminalView(parent, { onSelection: vi.fn(), onExited: vi.fn(), onAttachLost: vi.fn() }, "dom");
@@ -105,6 +105,8 @@ function setup(attach = true) {
     observed?.([{ contentRect: { width, height: width ? 400 : 0 } }]);
     vi.advanceTimersByTime(16);
   };
+  // A real observer reports the first box as soon as it starts observing.
+  if (firstSize) resizeTo(nextSize.cols, nextSize.rows);
   return { view, term, conn, resizeTo };
 }
 
@@ -137,23 +139,92 @@ describe("terminal view", () => {
   });
 
   describe("resize", () => {
-    it("a_drag_sends_one_resize_once_the_size_settles", () => {
+    it("a_drag_fits_and_sends_once_when_the_size_settles", () => {
       const { conn, term, resizeTo, view } = setup();
       expect(conn.attach).toHaveBeenCalledWith(7, 80, 24, expect.anything());
       resizeTo(90, 24);
-      // The view follows at once; the host waits.
-      expect(term.cols).toBe(90);
+      // The grid stays as it is while the size keeps changing.
+      expect(term.cols).toBe(80);
       vi.advanceTimersByTime(50);
       resizeTo(100, 30);
       vi.advanceTimersByTime(50);
       resizeTo(110, 32);
       vi.advanceTimersByTime(50);
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 80, rows: 24 });
       expect(conn.resize).not.toHaveBeenCalled();
       vi.advanceTimersByTime(100);
+      // One fit to the last size, and the host hears it in the same step.
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 110, rows: 32 });
       expect(conn.resize).toHaveBeenCalledTimes(1);
       expect(conn.resize).toHaveBeenCalledWith(7, 110, 32);
       vi.advanceTimersByTime(1000);
       expect(conn.resize).toHaveBeenCalledTimes(1);
+      view.dispose();
+    });
+
+    it("the_first_size_a_new_view_sees_fits_and_sends_at_once", () => {
+      const { conn, term, resizeTo, view } = setup(true, false);
+      resizeTo(100, 30);
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 100, rows: 30 });
+      expect(conn.resize).toHaveBeenCalledWith(7, 100, 30);
+      vi.advanceTimersByTime(1000);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      view.dispose();
+    });
+
+    it("a_zoom_fits_and_sends_at_once", () => {
+      const { conn, term, view } = setup();
+      nextSize.cols = 70;
+      nextSize.rows = 20;
+      view.setFontSize(16);
+      vi.advanceTimersByTime(16);
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 70, rows: 20 });
+      expect(conn.resize).toHaveBeenCalledWith(7, 70, 20);
+      vi.advanceTimersByTime(1000);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      view.dispose();
+    });
+
+    it("a_zoom_during_a_drag_takes_the_wait_with_it", () => {
+      const { conn, term, resizeTo, view } = setup();
+      resizeTo(90, 30);
+      view.setFontSize(16);
+      vi.advanceTimersByTime(16);
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 90, rows: 30 });
+      vi.advanceTimersByTime(1000);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      expect(conn.resize).toHaveBeenCalledWith(7, 90, 30);
+      view.dispose();
+    });
+
+    it("a_wait_started_before_the_frame_fit_is_not_left_behind", () => {
+      const { conn, term, view } = setup();
+      view.setFontSize(16);
+      // A drag step lands before the zoom's frame.
+      nextSize.cols = 90;
+      nextSize.rows = 30;
+      observed?.([{ contentRect: { width: 600, height: 400 } }]);
+      vi.advanceTimersByTime(16);
+      expect(term.cols).toBe(90);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      view.dispose();
+      nextSize.cols = 50;
+      vi.advanceTimersByTime(1000);
+      expect(term.cols).toBe(90);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+    });
+
+    it("a_pane_parked_during_a_drag_fits_only_when_shown", () => {
+      const { conn, term, resizeTo, view } = setup();
+      resizeTo(90, 30);
+      resizeTo(90, 30, 0);
+      vi.advanceTimersByTime(1000);
+      expect(term.cols).toBe(80);
+      expect(conn.resize).not.toHaveBeenCalled();
+      resizeTo(100, 30);
+      expect(term.cols).toBe(100);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      expect(conn.resize).toHaveBeenCalledWith(7, 100, 30);
       view.dispose();
     });
 
@@ -166,37 +237,42 @@ describe("terminal view", () => {
       view.dispose();
     });
 
-    it("a_pane_shown_from_parked_sends_its_size_at_once", () => {
-      const { conn, resizeTo, view } = setup();
+    it("a_pane_shown_from_parked_fits_and_sends_its_size_at_once", () => {
+      const { conn, term, resizeTo, view } = setup();
       // Parked: no box, so the fit keeps the old size.
       resizeTo(80, 24, 0);
       resizeTo(120, 40);
+      expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 120, rows: 40 });
       expect(conn.resize).toHaveBeenCalledWith(7, 120, 40);
       vi.advanceTimersByTime(1000);
       expect(conn.resize).toHaveBeenCalledTimes(1);
-      // Later changes wait again.
+      // Later changes wait again, the fit with them.
       resizeTo(100, 40);
+      expect(term.cols).toBe(120);
       expect(conn.resize).toHaveBeenCalledTimes(1);
       vi.advanceTimersByTime(100);
+      expect(term.cols).toBe(100);
       expect(conn.resize).toHaveBeenLastCalledWith(7, 100, 40);
       view.dispose();
     });
 
-    it("attaching_again_sends_the_size_with_the_attach_and_drops_the_wait", () => {
-      const { conn, resizeTo, view } = setup();
+    it("attaching_again_fits_and_sends_the_size_with_the_attach_and_drops_the_wait", () => {
+      const { conn, term, resizeTo, view } = setup();
       resizeTo(90, 30);
       void view.attach(conn as unknown as Connection, 7);
+      expect(term.cols).toBe(90);
       expect(conn.attach).toHaveBeenLastCalledWith(7, 90, 30, expect.anything());
       vi.advanceTimersByTime(1000);
       expect(conn.resize).not.toHaveBeenCalled();
       view.dispose();
     });
 
-    it("dispose_drops_a_waiting_resize", () => {
-      const { conn, resizeTo, view } = setup();
+    it("dispose_drops_a_waiting_fit_and_resize", () => {
+      const { conn, term, resizeTo, view } = setup();
       resizeTo(90, 30);
       view.dispose();
       vi.advanceTimersByTime(1000);
+      expect(term.cols).toBe(80);
       expect(conn.resize).not.toHaveBeenCalled();
     });
   });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Group, Split, Tab, Tree } from "./connection";
 import { ACTIONS, type ActionContext, DEFAULT_KEYS, installKeys, keyIds, matchKey, runAction } from "./keys";
+import { Sessions } from "./sessions";
 import { Store } from "./store";
 
 function leaf(session: string): Split {
@@ -34,6 +35,7 @@ function context(store: Store): ActionContext & { treeOp: ReturnType<typeof vi.f
       leaveFill: vi.fn(),
     },
     connection: { treeOp, list: vi.fn(async () => []), create: vi.fn(async () => 1), kill: vi.fn() },
+    sessions: new Sessions(),
     home: "/home",
     ui: { toggleSidebar: vi.fn(), rename: vi.fn(), zoom: vi.fn(), note: vi.fn() },
   };

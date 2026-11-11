@@ -19,6 +19,7 @@ import { installFocusRule, refocus } from "./focus";
 import { DEFAULT_KEYS, type Action, installKeys, runAction } from "./keys";
 import { type MarkerChange, resyncTicks, setMarkerStates } from "./marker";
 import { Panes } from "./panes";
+import { Sessions } from "./sessions";
 import { loadSettings, saveSettings } from "./settings";
 import { Sidebar, clampWidth } from "./sidebar";
 import { Store, allTabs, leaves, withCollapsed } from "./store";
@@ -187,16 +188,17 @@ async function main(): Promise<void> {
   // True once this connection's first tree is in, so an empty tree after that means the last
   // tab closed rather than a fresh host.
   let settled = false;
-  // Session numbers start over in a new host, so a pane is known by its uuid and numbered here.
-  const numbers = new Map<string, number>();
+  // Session numbers start over in a new host, so a pane is known by its uuid and numbered here,
+  // in a new Sessions for each connection.
+  let sessions = new Sessions();
   const titles = new Map<string, string>();
   const folders = new Map<string, string>();
 
   const store = new Store();
 
-  async function refreshSessions(next: Connection): Promise<void> {
+  async function refreshSessions(next: Connection, known: Sessions): Promise<void> {
     for (const item of await next.list()) {
-      numbers.set(item.uuid, item.session);
+      known.learn(item);
       if (item.title && !titles.has(item.uuid)) titles.set(item.uuid, item.title);
       if (item.cwd) folders.set(item.uuid, folderName(item.cwd));
     }
@@ -205,9 +207,15 @@ async function main(): Promise<void> {
   async function attachView(view: TerminalView, uuid: string): Promise<void> {
     const next = connection;
     if (!next) return;
+    const known = sessions;
     try {
-      if (!numbers.has(uuid)) await refreshSessions(next);
-      const session = numbers.get(uuid);
+      let session = known.number(uuid);
+      if (session === undefined) {
+        // A pane this client created gets its number from `created`; only others need a `list`.
+        session = await known.numberOf(uuid, () => refreshSessions(next, known));
+        // Its pane may have closed while it waited.
+        if (panes.viewFor(uuid) !== view) return;
+      }
       // Gone already: the tree push that drops its pane is on its way.
       if (session === undefined || connection !== next) return;
       await view.attach(next, session);
@@ -355,7 +363,7 @@ async function main(): Promise<void> {
   };
 
   function act(action: Action): void {
-    if (connection) runAction(action, { store, panes, connection, home, ui });
+    if (connection) runAction(action, { store, panes, connection, sessions, home, ui });
   }
   installKeys(DEFAULT_KEYS, act);
   // The menu bar's Close tab item (Cmd+Shift+W): the menu takes the key before the page does.
@@ -391,6 +399,7 @@ async function main(): Promise<void> {
         const host = await findHost();
         port = host.port;
         home = host.home;
+        const known = new Sessions();
         const next = new Connection({
           onLost: () => {
             bar.show(LOST_TEXT);
@@ -403,6 +412,12 @@ async function main(): Promise<void> {
                 : `The host says: ${message}`,
             );
           },
+          onCwd: (session, cwd) => {
+            if (connection !== next) return;
+            const uuid = known.moved(session, cwd);
+            // The sidebar's name for an untitled pane, which the `list` per new tab used to update.
+            if (uuid) folders.set(uuid, folderName(cwd));
+          },
           onTree: (tree) => {
             if (connection === next) onTree(tree);
           },
@@ -411,21 +426,25 @@ async function main(): Promise<void> {
           },
         });
         connection = next;
-        numbers.clear();
+        sessions = known;
         // The old host may never have read a `seen`, so each done tab is told again.
         store.forgetSeen();
         await next.open(host);
-        await refreshSessions(next);
+        await refreshSessions(next, known);
         // A new window goes back to the tab it showed last time. Set before the first tree, so
         // no other tab is shown on the way; a tab that is gone gives way to the first one.
         if (store.current === null) store.current = lastTab() ?? null;
         const tree = await next.treeGet();
         if (allTabs(tree).length === 0) {
           const uuid = crypto.randomUUID();
-          const session = await next.create(uuid, "shell", host.home, START_COLS, START_ROWS, {
-            type: "new_tab",
-          });
-          numbers.set(uuid, session);
+          known.creating(uuid, host.home);
+          const session = await next
+            .create(uuid, "shell", host.home, START_COLS, START_ROWS, { type: "new_tab" })
+            .catch((error: unknown) => {
+              known.failed(uuid);
+              throw error;
+            });
+          known.created(uuid, session);
         }
         for (const uuid of existing) {
           const view = panes.viewFor(uuid);

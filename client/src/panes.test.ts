@@ -4,6 +4,7 @@ import type { Split, Tab, Tree } from "./connection";
 import { type ActionContext, runAction } from "./keys";
 import { Panes, WEBGL_CAP, webglEvictions } from "./panes";
 import { startRename } from "./rename";
+import { Sessions } from "./sessions";
 import { Store, allTabs, leaves } from "./store";
 import type { TerminalView } from "./terminal";
 
@@ -240,6 +241,7 @@ describe("split from a filled pane", () => {
         store,
         panes,
         connection: { treeOp: vi.fn(), list: vi.fn(async () => []), create: vi.fn(async () => 1), kill: vi.fn() },
+        sessions: new Sessions(),
         home: "/home",
         ui: { toggleSidebar: vi.fn(), rename: vi.fn(), zoom: vi.fn(), note: vi.fn() },
       };
