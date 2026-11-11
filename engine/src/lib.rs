@@ -1,5 +1,8 @@
 //! The terminal engine shared by every view: screen state now, input and drawing later.
 
+mod atlas;
+mod boxdraw;
+mod font;
 mod geometry;
 mod keys;
 mod links;
@@ -8,6 +11,9 @@ mod screen;
 mod theme;
 mod view;
 
+pub use atlas::{Atlas, AtlasSlot, GlyphKey};
+pub use boxdraw::box_glyph;
+pub use font::{FontStyle, Fonts, Glyph, GlyphKind};
 pub use geometry::{CellPoint, CellSize, GridSize, Rect, Side, cell_at, fit};
 pub use keys::{KeyCode, KeyEventKind, KeyInput, Mods, Platform, encode_key};
 pub use links::url_at;
