@@ -12,6 +12,14 @@ go=$here/.cache/throughput-go
 result=$here/.cache/throughput-result
 # The largest resident size seen, in KiB.
 peak=0
+# Set while this run's go file exists, so the exit trap removes only a file this run made.
+made_go=""
+
+# An interrupted run still ends its test terminal and removes its own go and result files.
+# After a normal finish BIN_PID and made_go are empty, so this does nothing.
+trap 'close_bin; [ -z "$made_go" ] || rm -f "$go" "$result"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 "$here/gen-output.sh" --prepare 30 > /dev/null || exit 1
 
@@ -42,6 +50,7 @@ one_run() {
   /bin/sleep 1
   on_focused_workspace "$window" || note=" (window was not showing, ignore this run)"
   seen=" (focused: start=$(focused_window "$window")"
+  made_go=yes
   touch "$go"
   for i in {1..3000}; do
     [ -f "$result" ] && break
@@ -65,6 +74,7 @@ for run in {1..$2}; do
   one_run "$1"
 done
 rm -f "$go" "$result"
+made_go=""
 [ -n "$PREV" ] && aerospace focus --window-id "$PREV"
 if ((peak > 0)); then
   # MB here is MiB, like the burst's 1 MiB blocks.

@@ -9,6 +9,8 @@ here=${0:A:h}
 source "$here/../keylat/bin-window.sh"
 tmp=$(mktemp -d -t plain-idle)
 trap 'close_bin > /dev/null; rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 BIN_STATS=$tmp/stats
 
 # The terminal rewrites the file in place after every frame, so a read can land between the

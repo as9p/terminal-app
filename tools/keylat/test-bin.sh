@@ -6,6 +6,11 @@
 
 K=/Users/x/projects/terminal-app/tools/keylat
 source "${0:A:h}/bin-window.sh"
+# An interrupted run still ends its test terminal. After a normal finish BIN_PID is empty, so
+# this does nothing.
+trap 'close_bin >> "$2" 2>&1' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 PREV=$(aerospace list-windows --focused --format '%{window-id}')
 if ! open_bin "$1" "${0:A:h}/cat-shell.sh" > "$2" 2>&1; then
