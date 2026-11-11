@@ -318,7 +318,7 @@ impl Gpu {
 
 /// A clear colour for an sRGB target, matching `srgb_to_linear` in the shader, so a window's
 /// clear and a cell's background give the same byte for the same `Rgb`.
-pub(crate) fn clear_color(Rgb(r, g, b): Rgb) -> wgpu::Color {
+pub fn clear_color(Rgb(r, g, b): Rgb) -> wgpu::Color {
     let linear = |c: u8| {
         let c = f64::from(c) / 255.0;
         if c <= 0.04045 {

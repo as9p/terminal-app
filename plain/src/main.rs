@@ -2,8 +2,10 @@
 
 mod args;
 mod headless;
+mod input;
 mod session;
 mod shell;
+mod window;
 
 use std::process::ExitCode;
 
@@ -26,8 +28,13 @@ fn main() -> ExitCode {
         Err(message) => return usage_error(&message),
     };
     let Some(grid) = args.headless else {
-        eprintln!("snowflake: window mode is not built yet");
-        return ExitCode::from(USAGE_ERROR);
+        let code = window::run(window::Options {
+            record: args.record,
+            cwd: args.cwd,
+            command: args.command,
+        });
+        // The window, the view and the shell are all dropped by now.
+        std::process::exit(code)
     };
     // A bad keys file is found before the command starts, so nothing is left to clean up.
     let keys = match &args.keys {

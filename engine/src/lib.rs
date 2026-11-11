@@ -19,7 +19,7 @@ pub use boxdraw::box_glyph;
 pub use draw::{ViewDraw, render_to_image};
 pub use font::{FontStyle, Fonts, Glyph, GlyphKind};
 pub use geometry::{CellPoint, CellSize, GridSize, Rect, Side, cell_at, fit};
-pub use gpu::{Gpu, GpuError};
+pub use gpu::{Gpu, GpuError, clear_color};
 pub use keys::{KeyCode, KeyEventKind, KeyInput, Mods, Platform, encode_key};
 pub use links::url_at;
 pub use mouse::{Button, MouseAction, encode_mouse};

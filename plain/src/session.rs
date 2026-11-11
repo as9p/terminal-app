@@ -3,12 +3,24 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use term_engine::{CellSize, GridSize, Platform, Recorder, TerminalView, Theme};
 
 use crate::shell::Shell;
+
+/// Creates the recording file, so a bad path fails before the command runs, not after it has
+/// done its work. Says why on stderr when it cannot.
+pub fn can_record(path: Option<&Path>) -> bool {
+    match path.map(File::create) {
+        Some(Err(e)) => {
+            eprintln!("snowflake: cannot write the recording: {e}");
+            false
+        }
+        _ => true,
+    }
+}
 
 pub struct Session {
     pub view: TerminalView,

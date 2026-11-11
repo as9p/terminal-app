@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use term_engine::{CellSize, GridSize, TerminalView};
 
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::shell::{Shell, ShellEvent};
 
 /// There is no font without a window, but programs ask for the pixel size, so give them one.
@@ -38,11 +38,7 @@ pub fn run(options: Options) -> i32 {
         // The receiver is gone only when this function has returned, and then nobody listens.
         let _ = tx.send(event);
     });
-    // A bad path must fail before the command runs, not after it has done its work.
-    if let Some(path) = &options.record
-        && let Err(e) = std::fs::File::create(path)
-    {
-        eprintln!("snowflake: cannot write the recording: {e}");
+    if !session::can_record(options.record.as_deref()) {
         return 1;
     }
     let shell = match Shell::spawn(options.command, options.cwd, options.grid, on_event) {

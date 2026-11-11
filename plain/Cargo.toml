@@ -12,6 +12,13 @@ path = "src/main.rs"
 [dependencies]
 term-engine = { path = "../engine" }
 portable-pty = "0.9"
+winit = "0.30"
+# The window's surface and render pass are wgpu's own types, so the engine's version is named here.
+wgpu = "23"
+# `Gpu::new` and the adapter request are async; this is the small executor the engine's tests use.
+pollster = "0.4"
+# Text only: the image support pulls in an image decoder the terminal never uses.
+arboard = { version = "3", default-features = false }
 
 # Ending the command's whole process group needs killpg, and learning of its exit without reaping
 # it needs waitid or kqueue; nix wraps all three without unsafe and is already in the tree.
