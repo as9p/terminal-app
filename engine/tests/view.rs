@@ -323,3 +323,92 @@ fn host_replay_then_resize() {
     assert!(view.needs_draw());
     assert_eq!(view.screen().row_text(0).chars().count(), 100);
 }
+
+#[test]
+fn paste_returns_to_the_bottom() {
+    let mut view = view();
+    feed_lines(&mut view, 0, 100);
+    wheel(&mut view, 10);
+    view.paste("x");
+    assert_eq!(view.screen().scroll_offset(), 0);
+}
+
+#[test]
+fn cmd_page_keys_move_one_page() {
+    let mut view = view();
+    feed_lines(&mut view, 0, 100);
+    view.key(&key(KeyCode::Up, Mods::SUPER));
+    assert_eq!(view.screen().scroll_offset(), 23);
+    assert!(view.take_output().is_empty());
+    view.key(&key(KeyCode::Down, Mods::SUPER));
+    assert_eq!(view.screen().scroll_offset(), 0);
+    assert!(view.take_output().is_empty());
+}
+
+#[test]
+fn a_forwarded_pointer_ends_a_drag() {
+    let mut view = view();
+    view.feed(b"hello brave world");
+    view.feed(b"\x1b[?1000h\x1b[?1006h");
+    left_press(&mut view, 0, Side::Left, Mods::SHIFT, 1);
+    view.pointer(
+        MouseAction::Move(Some(Button::Left)),
+        at(4),
+        Side::Right,
+        Mods::empty(),
+        1,
+    );
+    view.feed(b"\x1b[?1000l");
+    let before = view.copy();
+    view.pointer(
+        MouseAction::Move(Some(Button::Left)),
+        at(8),
+        Side::Right,
+        Mods::empty(),
+        1,
+    );
+    assert_eq!(view.copy(), before);
+}
+
+#[test]
+fn cmd_k_while_scrolled_up_returns_to_the_bottom() {
+    let mut view = view();
+    feed_lines(&mut view, 0, 100);
+    wheel(&mut view, 10);
+    view.key(&key(KeyCode::Char('k'), Mods::SUPER));
+    assert_eq!(view.screen().scroll_offset(), 0);
+    assert_eq!(view.screen().history_len(), 0);
+}
+
+#[test]
+fn a_click_clears_the_old_selection_and_copies_nothing() {
+    let mut view = view();
+    view.feed(b"hello brave world");
+    left_press(&mut view, 0, Side::Left, Mods::empty(), 1);
+    view.pointer(
+        MouseAction::Move(Some(Button::Left)),
+        at(4),
+        Side::Right,
+        Mods::empty(),
+        1,
+    );
+    left_release(&mut view, 4, Side::Right, Mods::empty(), 1);
+    view.take_events();
+    left_press(&mut view, 2, Side::Left, Mods::empty(), 1);
+    left_release(&mut view, 2, Side::Left, Mods::empty(), 1);
+    assert!(
+        !view
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, ViewEvent::Copy(_)))
+    );
+    assert_eq!(view.copy(), None);
+}
+
+#[test]
+fn a_nested_end_marker_cannot_survive() {
+    let mut view = view();
+    view.feed(b"\x1b[?2004h");
+    view.paste("a\x1b[20\x1b[201~1~b");
+    assert_eq!(view.take_output(), b"\x1b[200~ab\x1b[201~");
+}

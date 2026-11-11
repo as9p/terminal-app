@@ -99,6 +99,9 @@ impl TerminalView {
         let modes = self.screen.modes();
         // Shift is the way to select text while a program has the mouse.
         if modes.mouse != MouseTracking::Off && !mods.contains(Mods::SHIFT) {
+            // The program has the pointer now, so a drag of ours that lost Shift is over and a
+            // later move must not extend it.
+            self.selecting = false;
             if let Some(bytes) = encode_mouse(action, at, mods, &modes) {
                 self.output.extend_from_slice(&bytes);
             }
@@ -144,6 +147,7 @@ impl TerminalView {
     }
 
     pub fn paste(&mut self, text: &str) {
+        self.scroll_view(Screen::scroll_to_bottom);
         let mut text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.screen.modes().bracketed_paste {
             // Removing one marker can join the pieces around it into another, so repeat until
