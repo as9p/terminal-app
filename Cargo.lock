@@ -4860,6 +4860,7 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "etagere",
+ "memchr",
  "png",
  "pollster",
  "wgpu",

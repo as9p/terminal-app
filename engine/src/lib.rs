@@ -13,6 +13,7 @@ mod recording;
 mod screen;
 mod theme;
 mod view;
+mod xtversion;
 
 pub use atlas::{Atlas, AtlasSlot, GlyphKey};
 pub use boxdraw::box_glyph;

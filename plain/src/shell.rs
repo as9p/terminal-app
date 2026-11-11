@@ -73,7 +73,7 @@ impl Shell {
         };
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
-        builder.env("TERM_PROGRAM", "snowflake");
+        builder.env("TERM_PROGRAM", crate::NAME);
         builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         if let Some(cwd) = cwd {
             builder.cwd(cwd);

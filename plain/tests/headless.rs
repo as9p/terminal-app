@@ -127,6 +127,18 @@ fn queries_are_answered_through_the_pty() {
 }
 
 #[test]
+fn xtversion_names_the_terminal() {
+    let script = r#"stty -echo; printf "\e[>0q"; read -rs -t 2 -d '\' reply; print -r -- "got ${(V)reply}""#;
+    let run = snowflake(&["--", "/bin/zsh", "-c", script]);
+    assert!(
+        run.stdout.contains(">|snowflake "),
+        "stdout: {:?} stderr: {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
 fn keys_file_is_typed() {
     let keys = TempFile::new("keys");
     std::fs::write(&keys.0, "300 hi\\r\n600 \\x04\n").unwrap();

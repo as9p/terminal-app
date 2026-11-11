@@ -73,6 +73,12 @@ impl TerminalView {
         mem::take(&mut self.events)
     }
 
+    /// Who the terminal says it is when a program asks (XTVERSION), such as `snowflake 1.0`.
+    /// Anything outside printable ASCII is dropped, and an empty name falls back to the engine's.
+    pub fn set_identity(&mut self, identity: &str) {
+        self.screen.set_identity(identity);
+    }
+
     pub fn key(&mut self, key: &KeyInput) {
         if self.platform == Platform::Mac
             && key.kind != KeyEventKind::Release

@@ -15,6 +15,10 @@ use args::{Parsed, USAGE};
 /// The exit code for a command line that cannot be run, as most Unix tools use.
 const USAGE_ERROR: u8 = 2;
 
+/// The name programs see, in `TERM_PROGRAM` and in the answer to XTVERSION. Kept in one place
+/// because the program is about to be renamed.
+const NAME: &str = "snowflake";
+
 fn main() -> ExitCode {
     let args = match args::parse(std::env::args_os().skip(1)) {
         Ok(Parsed::Run(args)) => args,

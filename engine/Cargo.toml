@@ -10,6 +10,7 @@ alacritty_terminal = "0.26"
 bitflags = "2"
 cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
 etagere = "0.2"
+memchr = "2"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "23"
 

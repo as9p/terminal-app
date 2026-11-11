@@ -21,6 +21,7 @@ use bitflags::bitflags;
 
 use crate::geometry::{CellPoint, GridSize, Side};
 use crate::theme::{Palette, Rgb};
+use crate::xtversion::{self, QueryScan};
 
 pub const SCROLLBACK_LINES: usize = 20_000;
 
@@ -199,6 +200,9 @@ pub struct Screen {
     colors: [Rgb; COLOR_COUNT],
     replies: Vec<u8>,
     events: Vec<ScreenEvent>,
+    /// Finds the XTVERSION queries the library ignores, and the reply naming the terminal.
+    version_scan: QueryScan,
+    version_reply: String,
     /// Set by output. The library always reports the cursor's row as damaged, even when nothing
     /// happened, so it is only asked when this is set.
     touched: bool,
@@ -228,6 +232,8 @@ impl Screen {
             colors: color_table(palette),
             replies: Vec::new(),
             events: Vec::new(),
+            version_scan: QueryScan::default(),
+            version_reply: xtversion::default_reply(),
             touched: true,
             full_damage: true,
             selection_range: OnceCell::new(),
@@ -238,10 +244,25 @@ impl Screen {
         if bytes.is_empty() {
             return;
         }
-        self.parser.advance(&mut self.term, bytes);
+        // The reply goes in the inbox between the reads before and after the query, so it keeps
+        // its place among the library's own. Inside a synchronized update the library holds its
+        // replies until the update ends, while this one goes at once.
+        let mut rest = bytes;
+        while let Some(end) = self.version_scan.find(rest) {
+            self.parser.advance(&mut self.term, &rest[..end]);
+            self.inbox.send_event(Event::PtyWrite(self.version_reply.clone()));
+            rest = &rest[end..];
+        }
+        self.parser.advance(&mut self.term, rest);
         self.touched = true;
         self.forget_selection_range();
         self.collect();
+    }
+
+    /// Who the terminal says it is when a program asks (XTVERSION), such as `snowflake 1.0`.
+    /// Anything outside printable ASCII is dropped, and an empty name falls back to the engine's.
+    pub fn set_identity(&mut self, identity: &str) {
+        self.version_reply = xtversion::reply(identity);
     }
 
     pub fn take_replies(&mut self) -> Vec<u8> {

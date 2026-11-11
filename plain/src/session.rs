@@ -36,7 +36,8 @@ impl Session {
         } else {
             Platform::Other
         };
-        let view = TerminalView::new(grid, &Theme::builtin(), platform);
+        let mut view = TerminalView::new(grid, &Theme::builtin(), platform);
+        view.set_identity(&format!("{} {}", crate::NAME, env!("CARGO_PKG_VERSION")));
         // The recording holds the grid the screen really has, which can differ from the one
         // asked for.
         let recorder = match record {
