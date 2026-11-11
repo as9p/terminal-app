@@ -13,6 +13,7 @@ etagere = "0.2"
 memchr = "2"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "23"
+unicode-width = "0.2"
 
 [dev-dependencies]
 png = "0.18"

@@ -254,6 +254,80 @@ fn a_cell_gives_out_at_most_max_zerowidth_marks() {
     assert_eq!(s.selection_text(), Some(all));
 }
 
+/// The text a selection copies from a 20-column screen fed `before`, then `marks` combining
+/// accents, then `after`.
+fn copy_with_marks(
+    marks: usize,
+    before: &str,
+    after: &str,
+    select: fn(&mut Screen),
+) -> Option<String> {
+    let mut s = screen(20, 4);
+    let run: String = std::iter::repeat_n('\u{301}', marks).collect();
+    s.feed(format!("{before}{run}{after}").as_bytes());
+    select(&mut s);
+    s.selection_text()
+}
+
+fn select_chars(s: &mut Screen, from: CellPoint, to: CellPoint) {
+    s.select(SelectKind::Char, from, Side::Left);
+    s.select_to(to, Side::Right);
+}
+
+#[test]
+fn copying_over_long_marks_keeps_the_rows_own_spaces() {
+    let copy = copy_with_marks(100, "h", "ello world", |s| {
+        select_chars(s, at(0, 0), at(5, 0))
+    });
+    let marks = "\u{301}".repeat(MAX_ZEROWIDTH);
+    assert_eq!(copy, Some(format!("h{marks}ello ")));
+}
+
+/// A cell holding 16 marks is copied by the library itself, so the copy of a cell holding 100
+/// must come out the same, whatever the shape of the selection.
+#[test]
+fn copying_over_long_marks_matches_the_librarys_copy_of_the_kept_marks() {
+    type Shape = (&'static str, &'static str, &'static str, fn(&mut Screen));
+    let shapes: [Shape; 7] = [
+        ("ends on a space", "h", "ello world", |s| {
+            select_chars(s, at(0, 0), at(5, 0))
+        }),
+        ("reaches the last column", "h", "ello world", |s| {
+            select_chars(s, at(0, 0), at(19, 0))
+        }),
+        ("first row wraps", "h", "ello world, and more text", |s| {
+            select_chars(s, at(0, 0), at(5, 1))
+        }),
+        ("hard line break", "h", "ello\r\nworld", |s| {
+            select_chars(s, at(0, 0), at(3, 1))
+        }),
+        ("whole line", "h", "ello world", |s| {
+            s.select(SelectKind::Line, at(2, 0), Side::Left)
+        }),
+        ("tab", "h", "\tx y", |s| {
+            select_chars(s, at(0, 0), at(12, 0))
+        }),
+        (
+            "starts on a wide character's right half",
+            "\u{6F22}",
+            "ab",
+            |s| select_chars(s, at(1, 0), at(3, 0)),
+        ),
+    ];
+    let mut differ = Vec::new();
+    for (name, before, after, select) in shapes {
+        let kept = copy_with_marks(MAX_ZEROWIDTH, before, after, select);
+        assert!(
+            kept.as_deref().is_some_and(|text| text.contains('\u{301}')),
+            "{name}: the marked cell is not in the copy"
+        );
+        if copy_with_marks(100, before, after, select) != kept {
+            differ.push(name);
+        }
+    }
+    assert_eq!(differ, Vec::<&str>::new());
+}
+
 #[test]
 fn kitty_keyboard_flags_follow_the_program() {
     let mut s = screen(80, 24);
