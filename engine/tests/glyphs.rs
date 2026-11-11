@@ -309,3 +309,14 @@ fn dirty_region_covers_new_glyphs() {
     assert!(slot.x + slot.w <= x + w && slot.y + slot.h <= y + h);
     assert_eq!(atlas.take_dirty(), None);
 }
+
+#[test]
+fn baseline_is_where_a_capital_letter_ends() {
+    let mut fonts = fonts();
+    for (scale, want) in [(2.0, 30), (1.0, 15)] {
+        let h = fonts.rasterize("H", REGULAR, 14.0, scale, false);
+        assert_eq!(fonts.baseline(14.0, scale), want, "scale {scale}");
+        // Underlines hang from this row, so it has to be the row the letters stand on.
+        assert_eq!((h.top + h.height as i32) as u32, want, "scale {scale}");
+    }
+}

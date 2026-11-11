@@ -167,7 +167,7 @@ impl Gpu {
         let (texture, texture_bind_group) = glyph_texture(&device, &texture_layout, atlas.size());
         let mut fonts = Fonts::new();
         let cell = fonts.cell_size(FONT_PX_DEFAULT, 1.0);
-        let baseline = baseline(&mut fonts, FONT_PX_DEFAULT, 1.0);
+        let baseline = fonts.baseline(FONT_PX_DEFAULT, 1.0);
         Ok(Gpu {
             device,
             queue,
@@ -206,7 +206,7 @@ impl Gpu {
         self.font_px = font_px;
         self.scale = scale;
         self.cell = self.fonts.cell_size(font_px, scale);
-        self.baseline = baseline(&mut self.fonts, font_px, scale);
+        self.baseline = self.fonts.baseline(font_px, scale);
         self.atlas.clear();
     }
 
@@ -333,17 +333,6 @@ pub(crate) fn clear_color(Rgb(r, g, b): Rgb) -> wgpu::Color {
         b: linear(b),
         a: 1.0,
     }
-}
-
-/// The font keeps its metrics to itself, so the baseline is read off a capital H, whose ink ends
-/// exactly on it.
-fn baseline(fonts: &mut Fonts, font_px: f32, scale: f64) -> u32 {
-    let regular = FontStyle {
-        bold: false,
-        italic: false,
-    };
-    let h = fonts.rasterize("H", regular, font_px, scale, false);
-    (h.top + h.height as i32).max(0) as u32
 }
 
 fn pipeline(

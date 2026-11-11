@@ -117,6 +117,18 @@ impl Fonts {
         }
     }
 
+    /// Pixels from the top of a cell to the text baseline. Ascent and descent are centred in the
+    /// row, so the extra space is shared evenly above and below.
+    pub fn baseline(&mut self, font_px: f32, scale: f64) -> u32 {
+        let cell = self.cell_size(font_px, scale);
+        let px = physical_px(font_px, scale) as f32;
+        let ascent = px * self.metrics.ascent;
+        let descent = px * self.metrics.descent;
+        ((cell.h as f32 - (ascent + descent)) / 2.0 + ascent)
+            .round()
+            .max(0.0) as u32
+    }
+
     /// `text` is one cell's base character plus its zero-width characters. `wide` cells are two
     /// cells across. The bitmap is cropped to its ink and never reaches outside the cell box;
     /// text with no ink at all (a space, an unknown control) gives a zero-size mask.
@@ -167,11 +179,7 @@ impl Fonts {
         let layout = line.layout(px, None, Wrap::None, None, None);
 
         let box_w = if wide { cell.w * 2 } else { cell.w };
-        let ascent = px * self.metrics.ascent;
-        let descent = px * self.metrics.descent;
-        // Ascent and descent are centred in the row, so the extra space is shared evenly above
-        // and below.
-        let baseline = ((cell.h as f32 - (ascent + descent)) / 2.0 + ascent).round() as i32;
+        let baseline = self.baseline(font_px, scale) as i32;
         // A fallback glyph narrower than its box (a Han character in a wide cell) sits centred.
         let advance = layout.iter().map(|l| l.w).fold(0.0, f32::max);
         let shift = ((box_w as f32 - advance) / 2.0).max(0.0).round() as i32;
