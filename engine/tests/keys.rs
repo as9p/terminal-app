@@ -85,6 +85,15 @@ fn legacy_keys() {
     );
     assert_eq!(mac(&key(Char('c'), Mods::CTRL), &m), bytes(b"\x03"));
     assert_eq!(mac(&key(Char(' '), Mods::CTRL), &m), bytes(b"\x00"));
+    assert_eq!(mac(&key(Char('['), Mods::CTRL), &m), bytes(b"\x1b"));
+    assert_eq!(mac(&key(Char('\\'), Mods::CTRL), &m), bytes(b"\x1c"));
+    assert_eq!(mac(&key(Char(']'), Mods::CTRL), &m), bytes(b"\x1d"));
+    // A caller that passes the shifted letter by mistake still gets the Ctrl byte.
+    assert_eq!(mac(&key(Char('C'), Mods::CTRL), &m), bytes(b"\x03"));
+    assert_eq!(
+        mac(&key(Char('C'), Mods::CTRL | Mods::SHIFT), &m),
+        bytes(b"\x03")
+    );
     assert_eq!(mac(&key(Char('a'), Mods::ALT), &m), bytes(b"\x1ba"));
     assert_eq!(mac(&key(Enter, none), &m), bytes(b"\r"));
     assert_eq!(mac(&key(Enter, Mods::SHIFT), &m), bytes(b"\x1b\r"));
@@ -191,7 +200,15 @@ fn kitty_keys() {
     );
     assert_eq!(
         other(&kind(text_key(Char('a'), none, "a"), release), &k3),
+        None
+    );
+    assert_eq!(
+        other(&kind(text_key(Char('a'), none, "a"), release), &kitty(11)),
         bytes(b"\x1b[97;1:3u")
+    );
+    assert_eq!(
+        other(&kind(key(Char('a'), Mods::CTRL), release), &k3),
+        bytes(b"\x1b[97;5:3u")
     );
     assert_eq!(other(&kind(key(Enter, none), release), &k3), None);
 
@@ -278,4 +295,34 @@ fn mouse_reports() {
         bytes(&[0x1b, b'[', b'M', 32, 33, 33])
     );
     assert_eq!(encode_mouse(Press(Left), at(300, 0), none, &x10), None);
+    assert_eq!(
+        encode_mouse(Release(Left), origin, none, &x10),
+        bytes(&[0x1b, b'[', b'M', 35, 33, 33])
+    );
+    // Column 222 is position 223, the last that fits in one byte after the offset of 32.
+    assert_eq!(
+        encode_mouse(Press(Left), at(222, 0), none, &x10),
+        bytes(&[0x1b, b'[', b'M', 32, 255, 33])
+    );
+    assert_eq!(encode_mouse(Press(Left), at(223, 0), none, &x10), None);
+
+    assert_eq!(
+        encode_mouse(Press(Left), origin, Mods::SHIFT, &click),
+        bytes(b"\x1b[<4;1;1M")
+    );
+    assert_eq!(
+        encode_mouse(Press(Left), origin, Mods::ALT, &click),
+        bytes(b"\x1b[<8;1;1M")
+    );
+
+    let one_up = b"\x1b[<64;1;1M";
+    let one_down = b"\x1b[<65;1;1M";
+    assert_eq!(
+        encode_mouse(Wheel(1000), origin, none, &click),
+        Some(one_up.repeat(100))
+    );
+    assert_eq!(
+        encode_mouse(Wheel(i32::MIN), origin, none, &click),
+        Some(one_down.repeat(100))
+    );
 }

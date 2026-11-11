@@ -253,11 +253,12 @@ fn kitty(key: &KeyInput, modes: &Modes) -> Option<Vec<u8>> {
     }
 
     if !all_keys {
+        // A key sent as plain text has no release report without flag 8: the protocol only
+        // reports events for text keys in key report mode.
         if let Char(c) = key.code
             && is_text_key(key)
-            && !release
         {
-            return Some(typed(key, c).into_bytes());
+            return (!release).then(|| typed(key, c).into_bytes());
         }
         // Left as legacy bytes, with no release, so a shell stays usable when a program exits
         // without turning the protocol off.
@@ -369,7 +370,8 @@ fn shifted_key(key: &KeyInput, c: char) -> Option<char> {
 fn ctrl_byte(c: char) -> Option<u8> {
     Some(match c {
         ' ' | '2' | '@' => 0,
-        'a'..='z' => c as u8 - b'a' + 1,
+        // Upper case too, so a caller that passes the shifted letter still gets the Ctrl byte.
+        'a'..='z' | 'A'..='Z' => c.to_ascii_lowercase() as u8 - b'a' + 1,
         '3' | '[' => 27,
         '4' | '\\' => 28,
         '5' | ']' => 29,

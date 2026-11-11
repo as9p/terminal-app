@@ -4,6 +4,9 @@ use crate::geometry::CellPoint;
 use crate::keys::Mods;
 use crate::screen::{Modes, MouseTracking};
 
+/// A wild wheel count must not turn into gigabytes of reports; no program needs more per event.
+const MAX_WHEEL_REPORTS: u32 = 100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
     Left,
@@ -46,7 +49,11 @@ pub fn encode_mouse(
             (32 + button.map_or(3, button_code), true, 1)
         }
         MouseAction::Wheel(0) => return None,
-        MouseAction::Wheel(lines) => (if lines > 0 { 64 } else { 65 }, true, lines.unsigned_abs()),
+        MouseAction::Wheel(lines) => (
+            if lines > 0 { 64 } else { 65 },
+            true,
+            lines.unsigned_abs().min(MAX_WHEEL_REPORTS),
+        ),
     };
     let code = code + modifier_bits(mods);
     let x = u32::from(at.col) + 1;
