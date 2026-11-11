@@ -20,3 +20,6 @@ tools/keylat/stop
 
 # Generated speed test output
 tools/speed/.cache/
+
+# Recorded sessions can show account and folder names
+engine/tests/recordings/*.local.rec

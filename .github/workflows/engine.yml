@@ -30,7 +30,7 @@ jobs:
       # The hosted Windows runner is not expected to have a GPU adapter, so it runs only the
       # windowless tests that need none.
       - if: runner.os == 'Windows'
-        run: cargo test -p term-engine --test gate --test keys --test view --test glyphs --lib
+        run: cargo test -p term-engine --test gate --test keys --test view --test glyphs --test replay --lib
       # The shell tests need a Unix pty; on Windows the program only has to compile.
       - if: runner.os == 'Windows'
         run: cargo check -p term-plain
