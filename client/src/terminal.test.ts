@@ -172,17 +172,87 @@ describe("terminal view", () => {
       view.dispose();
     });
 
-    it("a_zoom_fits_and_sends_at_once", () => {
+    it("each_zoom_step_fits_at_once", () => {
+      const { conn, term, view } = setup();
+      for (const [px, cols, rows] of [
+        [20, 76, 22],
+        [21, 72, 21],
+        [22, 70, 20],
+      ] as const) {
+        nextSize.cols = cols;
+        nextSize.rows = rows;
+        view.setFontSize(px);
+        vi.advanceTimersByTime(16);
+        expect({ cols: term.cols, rows: term.rows }).toEqual({ cols, rows });
+      }
+      // The program hears the size only once the steps stop.
+      expect(conn.resize).not.toHaveBeenCalled();
+      view.dispose();
+    });
+
+    it("ten_quick_zoom_steps_send_one_resize_with_the_last_size_after_the_settle", () => {
+      const { conn, term, view } = setup();
+      for (let step = 1; step <= 10; step++) {
+        nextSize.cols = 80 - step * 2;
+        nextSize.rows = 24 - step;
+        view.setFontSize(20 + step);
+        // A held zoom key repeats about 30 times a second.
+        vi.advanceTimersByTime(33);
+        expect(term.cols).toBe(80 - step * 2);
+        expect(conn.resize).not.toHaveBeenCalled();
+      }
+      vi.advanceTimersByTime(100);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      expect(conn.resize).toHaveBeenCalledWith(7, 60, 14);
+      vi.advanceTimersByTime(1000);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
+      view.dispose();
+    });
+
+    it("a_single_zoom_step_sends_one_resize_after_the_settle", () => {
       const { conn, term, view } = setup();
       nextSize.cols = 70;
       nextSize.rows = 20;
-      view.setFontSize(16);
+      view.setFontSize(20);
       vi.advanceTimersByTime(16);
       expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 70, rows: 20 });
+      expect(conn.resize).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(100);
+      expect(conn.resize).toHaveBeenCalledTimes(1);
       expect(conn.resize).toHaveBeenCalledWith(7, 70, 20);
       vi.advanceTimersByTime(1000);
       expect(conn.resize).toHaveBeenCalledTimes(1);
       view.dispose();
+    });
+
+    it("an_attach_takes_a_zoom_wait_with_it", () => {
+      const { conn, term, view } = setup();
+      nextSize.cols = 70;
+      nextSize.rows = 20;
+      view.setFontSize(20);
+      vi.advanceTimersByTime(16);
+      void view.attach(conn as unknown as Connection, 7);
+      expect(conn.attach).toHaveBeenLastCalledWith(7, 70, 20, expect.anything());
+      vi.advanceTimersByTime(1000);
+      expect(term.cols).toBe(70);
+      expect(conn.resize).not.toHaveBeenCalled();
+      view.dispose();
+    });
+
+    it("a_drag_step_before_a_zoom_frame_leaves_one_wait", () => {
+      const { conn, term, view } = setup();
+      view.setFontSize(20);
+      nextSize.cols = 90;
+      nextSize.rows = 30;
+      observed?.([{ contentRect: { width: 600, height: 400 } }]);
+      vi.advanceTimersByTime(16);
+      expect(term.cols).toBe(90);
+      view.dispose();
+      // Nothing armed by the drag step fires after dispose.
+      nextSize.cols = 50;
+      vi.advanceTimersByTime(1000);
+      expect(term.cols).toBe(90);
+      expect(conn.resize).not.toHaveBeenCalled();
     });
 
     it("a_zoom_during_a_drag_takes_the_wait_with_it", () => {
@@ -198,9 +268,11 @@ describe("terminal view", () => {
     });
 
     it("a_wait_started_before_the_frame_fit_is_not_left_behind", () => {
-      const { conn, term, view } = setup();
-      view.setFontSize(16);
-      // A drag step lands before the zoom's frame.
+      const { conn, term, resizeTo, view } = setup();
+      // Parked, then shown: the fit and the send wait for the next frame.
+      resizeTo(80, 24, 0);
+      observed?.([{ contentRect: { width: 600, height: 400 } }]);
+      // A drag step lands before that frame.
       nextSize.cols = 90;
       nextSize.rows = 30;
       observed?.([{ contentRect: { width: 600, height: 400 } }]);

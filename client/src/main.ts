@@ -25,6 +25,7 @@ import { Sidebar, clampWidth } from "./sidebar";
 import { Store, allTabs, leaves, withCollapsed } from "./store";
 import { type Renderer, TerminalView, terminalFontReady } from "./terminal";
 import { theme } from "./theme";
+import { type AttachWiring, type PaneNames, attachView, folderName, folderReported } from "./wiring";
 import { applyZoom, clampSize, nextSize } from "./zoom";
 
 type HostConnection = HostAddress & { home: string };
@@ -148,11 +149,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function folderName(path: string): string {
-  const parts = path.split("/").filter((part) => part !== "");
-  return parts[parts.length - 1] ?? path;
-}
-
 function sessionsIn(tree: Tree): Set<string> {
   return new Set(allTabs(tree).flatMap((tab) => leaves(tab.split)));
 }
@@ -204,25 +200,14 @@ async function main(): Promise<void> {
     }
   }
 
-  async function attachView(view: TerminalView, uuid: string): Promise<void> {
-    const next = connection;
-    if (!next) return;
-    const known = sessions;
-    try {
-      let session = known.number(uuid);
-      if (session === undefined) {
-        // A pane this client created gets its number from `created`; only others need a `list`.
-        session = await known.numberOf(uuid, () => refreshSessions(next, known));
-        // Its pane may have closed while it waited.
-        if (panes.viewFor(uuid) !== view) return;
-      }
-      // Gone already: the tree push that drops its pane is on its way.
-      if (session === undefined || connection !== next) return;
-      await view.attach(next, session);
-    } catch (error) {
-      if (connection === next) bar.note(describe(error, undefined));
-    }
-  }
+  const wiring: AttachWiring<Connection> = {
+    connection: () => connection,
+    sessions: () => sessions,
+    refresh: refreshSessions,
+    isCurrent: (uuid, view) => panes.viewFor(uuid) === view,
+    note: (error) => bar.note(describe(error, undefined)),
+  };
+  const names: PaneNames = { titles, folders, retitle: () => sidebar.retitle() };
 
   function makeView(container: HTMLElement, uuid: string): TerminalView {
     const view = new TerminalView(
@@ -243,7 +228,7 @@ async function main(): Promise<void> {
       renderer,
       fontPx,
     );
-    void attachView(view, uuid);
+    void attachView(wiring, view, uuid);
     return view;
   }
 
@@ -413,10 +398,7 @@ async function main(): Promise<void> {
             );
           },
           onCwd: (session, cwd) => {
-            if (connection !== next) return;
-            const uuid = known.moved(session, cwd);
-            // The sidebar's name for an untitled pane, which the `list` per new tab used to update.
-            if (uuid) folders.set(uuid, folderName(cwd));
+            if (connection === next) folderReported(known, names, session, cwd);
           },
           onTree: (tree) => {
             if (connection === next) onTree(tree);
@@ -448,7 +430,7 @@ async function main(): Promise<void> {
         }
         for (const uuid of existing) {
           const view = panes.viewFor(uuid);
-          if (view) void attachView(view, uuid);
+          if (view) void attachView(wiring, view, uuid);
         }
         settled = true;
         bar.clear();

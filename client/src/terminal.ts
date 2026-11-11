@@ -14,7 +14,7 @@ const ACK_BYTES = 128 * 1024;
 const ACK_QUIET_MS = 100;
 const REATTACH_PAUSE_MS = 1000;
 // Each fit re-wraps the whole buffer and each host resize makes the program redraw, so a drag
-// does both once, for the size it ends on.
+// does both once, for the size it ends on, and a held zoom key resizes the host once.
 const RESIZE_SETTLE_MS = 100;
 const SHIFT_ENTER = "\x1b\r";
 // What Cmd or Option with a line-editing key sends, as kitty and iTerm do on a Mac.
@@ -100,6 +100,8 @@ export class TerminalView {
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   // No box seen yet, or parked (no box) at the last one; the next size fits at once.
   private parked = true;
+  // A fit waiting for the next frame must also send the size then, not after the settle.
+  private sendInFrame = false;
 
   // Bumped per attachment, so a write finishing late cannot count toward a newer total.
   private generation = 0;
@@ -206,12 +208,12 @@ export class TerminalView {
     this.term.focus();
   }
 
-  /** Text zoom. The fit that follows sends the new column and row count to the host. */
+  /** Text zoom. The view fits each step; the host hears the size once the steps stop. */
   setFontSize(px: number): void {
     if (this.term.options.fontSize === px) return;
     this.term.options.letterSpacing = spacingFor(px, referenceCellWidth());
     this.term.options.fontSize = px;
-    this.fitSoon();
+    this.fitSoon(false);
   }
 
   /** Whether the view draws with WebGL now. */
@@ -341,7 +343,7 @@ export class TerminalView {
     const shown = this.parked && !parked;
     this.parked = parked;
     if (shown) {
-      this.fitSoon();
+      this.fitSoon(true);
       return;
     }
     clearTimeout(this.resizeTimer);
@@ -349,15 +351,32 @@ export class TerminalView {
     this.resizeTimer = parked ? undefined : setTimeout(this.fitNow, RESIZE_SETTLE_MS);
   };
 
-  // The first size, a pane shown again and a zoom fit in the next frame, without waiting.
-  private readonly fitSoon = (): void => {
-    clearTimeout(this.resizeTimer);
-    this.resizeTimer = undefined;
+  // The first size, a pane shown again and a zoom fit in the next frame, without waiting. The
+  // first two tell the program in that frame too; a zoom leaves that to the settle wait.
+  private fitSoon(sendAtOnce: boolean): void {
+    if (sendAtOnce) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = undefined;
+      this.sendInFrame = true;
+    }
     if (this.fitFrame) return;
-    this.fitFrame = requestAnimationFrame(() => {
-      this.fitFrame = 0;
+    this.fitFrame = requestAnimationFrame(this.fitInFrame);
+  }
+
+  private readonly fitInFrame = (): void => {
+    this.fitFrame = 0;
+    if (this.sendInFrame) {
+      this.sendInFrame = false;
       this.fitNow();
-    });
+      return;
+    }
+    // A held zoom key steps about 30 times a second: the view follows each step, the program is
+    // told once they stop, so the shell does not redraw at the key repeat rate.
+    this.fitAddon.fit();
+    const { cols, rows } = this.term;
+    if (!this.connection || this.parked || (cols === this.sentCols && rows === this.sentRows)) return;
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(this.fitNow, RESIZE_SETTLE_MS);
   };
 
   // xterm and the program change size in the same step. A fit in the frame also takes a wait
