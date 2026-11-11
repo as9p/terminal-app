@@ -18,14 +18,18 @@ trap 'rm -rf -- "$work"' EXIT
 folder="$work/session"
 keys="$work/keys.txt"
 mkdir -- "$folder"
-# Accept the folder trust question, ask one short thing, then leave.
-print -r -- '4000 \r' >"$keys"
-print -r -- '9000 say hi in five words\r' >>"$keys"
+# The folder trust question starts on "No, exit", so the keys move down one and confirm, then
+# ask one short thing and leave.
+print -r -- '4000 \x1b[B' >"$keys"
+print -r -- '4600 \r' >>"$keys"
+print -r -- '10000 say hi in five words\r' >>"$keys"
 print -r -- '30000 /exit\r' >>"$keys"
 
 cargo build --release -p term-plain --manifest-path "$root/Cargo.toml"
 # The program refuses a recording path whose folder is missing.
 mkdir -p -- "${recording:h}"
+# An old recording would make the size check and the timeout rule describe another run.
+rm -f -- "$recording"
 
 code=0
 # The final screen goes nowhere: it is the session's own text.

@@ -13,6 +13,8 @@ struct Report {
     frames: usize,
     drawn_during_sync: usize,
     saw_sync: bool,
+    /// The engine itself held an update open after a feed, which the byte search cannot show.
+    engine_held: bool,
     kitty_flags: u8,
     rows: Vec<String>,
 }
@@ -71,6 +73,7 @@ fn replay(records: &[Record], merged: bool) -> Report {
         frames: 0,
         drawn_during_sync: 0,
         saw_sync: false,
+        engine_held: false,
         kitty_flags: 0,
         rows: Vec::new(),
     };
@@ -107,6 +110,9 @@ fn replay(records: &[Record], merged: bool) -> Report {
                 view.take_output();
                 view.take_events();
                 clock.after_feed(&view, fed_at, ms);
+                if view.screen().sync_deadline().is_some() {
+                    report.engine_held = true;
+                }
                 view.tick(clock.at(ms));
                 draw(&mut view, &mut report);
                 tail.extend_from_slice(&chunk);
@@ -161,6 +167,16 @@ fn synthetic_full_screen_redraw_never_shows_half_a_frame() {
     assert_eq!(unmerged.drawn_during_sync, 0);
     assert_eq!(merged.drawn_during_sync, 0);
     assert!(unmerged.saw_sync);
+    assert!(unmerged.engine_held, "the engine never held the update");
+    let feeds = records
+        .iter()
+        .filter(|record| matches!(record, Record::Output { .. }))
+        .count();
+    assert!(
+        unmerged.frames < feeds,
+        "{} frames for {feeds} feeds: the held feeds must not each draw",
+        unmerged.frames
+    );
     assert_eq!(
         unmerged.rows[..3],
         ["row one", "row two", "row three"],
@@ -200,6 +216,10 @@ fn claude_session_replays_clean() {
     assert!(
         unmerged.saw_sync,
         "the program never opened a synchronized update"
+    );
+    assert!(
+        unmerged.engine_held,
+        "the program opened a synchronized update but the engine never held one"
     );
     if let Some((first, count)) = row_difference(&merged.rows, &unmerged.rows) {
         panic!("merged and unmerged replays differ in {count} rows, the first is row {first}");
