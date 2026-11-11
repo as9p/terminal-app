@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use term_engine::{
-    CellPoint, CellSize, CellWidth, Damage, GridSize, MouseTracking, Rect, Rgb, Screen,
-    ScreenEvent, SelectKind, Side, Theme, fit,
+    CellPoint, CellSize, CellWidth, Damage, GridSize, MAX_ZEROWIDTH, MouseTracking, Rect, Rgb,
+    Screen, ScreenEvent, SelectKind, Side, Theme, fit,
 };
 
 fn screen(cols: u16, rows: u16) -> Screen {
@@ -196,6 +196,62 @@ fn wide_and_combined_characters_land_in_cells() {
         (cells[5].ch, cells[5].zerowidth.as_slice()),
         ('e', &['\u{301}'][..])
     );
+}
+
+/// `a` followed by `marks` combining acute accents, which all land on the `a` cell.
+fn letter_with_marks(marks: usize) -> String {
+    std::iter::once('a')
+        .chain(std::iter::repeat_n('\u{301}', marks))
+        .collect()
+}
+
+#[test]
+fn real_marks_are_all_kept() {
+    let mut s = screen(80, 24);
+    let text = "e\u{301} \u{2764}\u{FE0F}";
+    s.feed(format!("{text}\r\nnext").as_bytes());
+    let mut cells = Vec::new();
+    s.cells(0, &mut cells);
+    assert_eq!(
+        (cells[0].ch, cells[0].zerowidth.as_slice()),
+        ('e', &['\u{301}'][..])
+    );
+    assert_eq!(
+        (cells[2].ch, cells[2].zerowidth.as_slice()),
+        ('\u{2764}', &['\u{FE0F}'][..])
+    );
+    assert_eq!(s.row_text(0), text);
+    assert_eq!(s.text_around(at(2, 0)), (text.to_string(), 3));
+
+    s.select(SelectKind::Line, at(0, 0), Side::Left);
+    assert_eq!(s.selection_text(), Some(format!("{text}\n")));
+    s.select_all();
+    let all = format!("{text}\nnext{}", "\n".repeat(22));
+    assert_eq!(s.selection_text(), Some(all));
+}
+
+#[test]
+fn a_cell_gives_out_at_most_max_zerowidth_marks() {
+    let mut s = screen(80, 24);
+    s.feed(format!("{}\r\nnext", letter_with_marks(100_000)).as_bytes());
+    let mut cells = Vec::new();
+    s.cells(0, &mut cells);
+    assert_eq!(cells.len(), 80);
+    assert_eq!(cells[0].ch, 'a');
+    assert_eq!(cells[0].zerowidth.len(), MAX_ZEROWIDTH);
+
+    let kept = letter_with_marks(MAX_ZEROWIDTH);
+    assert_eq!(s.row_text(0), kept);
+    assert_eq!(s.text_around(at(0, 0)), (kept.clone(), 0));
+
+    s.select(SelectKind::Char, at(0, 0), Side::Left);
+    s.select_to(at(0, 0), Side::Right);
+    assert_eq!(s.selection_text(), Some(kept.clone()));
+    s.select(SelectKind::Line, at(0, 0), Side::Left);
+    assert_eq!(s.selection_text(), Some(format!("{kept}\n")));
+    s.select_all();
+    let all = format!("{kept}\nnext{}", "\n".repeat(22));
+    assert_eq!(s.selection_text(), Some(all));
 }
 
 #[test]

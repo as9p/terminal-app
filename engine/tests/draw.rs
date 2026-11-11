@@ -359,6 +359,22 @@ fn wide_character_spans_two_cells() {
     );
 }
 
+#[test]
+fn a_letter_with_endless_marks_is_drawn() {
+    let Some(mut gpu) = gpu() else { return };
+    let mut view = view();
+    let text: String = std::iter::once('a')
+        .chain(std::iter::repeat_n('\u{301}', 100_000))
+        .collect();
+    view.feed(text.as_bytes());
+    let mut draw = ViewDraw::new(&gpu);
+    let img = render_full(&mut gpu, &mut draw, &mut view);
+    assert!(
+        cell_pixels(&img, 0, 0).iter().any(|&p| p != BG),
+        "no ink in cell (0,0)"
+    );
+}
+
 const CURSOR: Rgb = Rgb(0xF5, 0xE0, 0xDC);
 const CURSOR_TEXT: Rgb = Rgb(0x1E, 0x1E, 0x2E);
 const SELECTION_BG: Rgb = Rgb(0xF5, 0xE0, 0xDC);

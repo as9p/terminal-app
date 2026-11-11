@@ -3,6 +3,7 @@
 
 use std::cell::OnceCell;
 use std::mem;
+use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -24,6 +25,13 @@ use crate::theme::{Palette, Rgb};
 use crate::xtversion::{self, QueryScan};
 
 pub const SCROLLBACK_LINES: usize = 20_000;
+
+/// The most zero-width characters (combining marks, variation selectors, joiners) we read from
+/// one cell: enough for stacked Thai or Vietnamese marks and for an emoji with a selector and a
+/// joiner, and few enough that a program printing one letter and endless marks after it cannot
+/// make building a row, drawing its glyph or copying its text slow. The rest are ignored. The
+/// library still stores every mark it is sent, and we cannot limit that without changing it.
+pub const MAX_ZEROWIDTH: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScreenEvent {
@@ -526,7 +534,75 @@ impl Screen {
     }
 
     pub fn selection_text(&self) -> Option<String> {
+        let selection = self.term.selection.as_ref()?;
+        let range = selection.to_range(&self.term)?;
+        let grid = self.term.grid();
+        let long_marks = (range.start.line.0..=range.end.line.0).any(|line| {
+            self.selected_columns(&range, Line(line)).any(|column| {
+                grid[Line(line)][Column(column)]
+                    .zerowidth()
+                    .is_some_and(|chars| chars.len() > MAX_ZEROWIDTH)
+            })
+        });
+        if long_marks {
+            let whole_lines = matches!(selection.ty, SelectionType::Lines);
+            return Some(self.capped_selection_text(&range, whole_lines));
+        }
+        // The library's copy gives a tab back as the program printed it, which needs tab stops
+        // it does not share with us, so it does the copy whenever it would read no more marks
+        // from a cell than we do.
         self.term.selection_to_string()
+    }
+
+    /// The selection's text when a selected cell holds more than `MAX_ZEROWIDTH` marks. It reads
+    /// cells the way `row_text` does, so a tab comes out as a space, and otherwise lays out rows
+    /// as the library's copy does.
+    fn capped_selection_text(&self, range: &SelectionRange, whole_lines: bool) -> String {
+        let grid = self.term.grid();
+        let mut text = String::new();
+        for line in range.start.line.0..=range.end.line.0 {
+            let line = Line(line);
+            for column in self.selected_columns(range, line) {
+                push_cell_text(&grid[line][Column(column)], &mut text);
+            }
+            if grid[line][grid.last_column()]
+                .flags
+                .contains(Flags::WRAPLINE)
+            {
+                continue;
+            }
+            text.truncate(text.trim_end_matches(' ').len());
+            if line != range.end.line {
+                text.push('\n');
+            }
+        }
+        if whole_lines {
+            text.push('\n');
+        }
+        text
+    }
+
+    /// The columns of `line` a copy of `range` reads. A range that starts on the right half of a
+    /// wide character also reads the character itself.
+    fn selected_columns(&self, range: &SelectionRange, line: Line) -> RangeInclusive<usize> {
+        let grid = self.term.grid();
+        let mut first = if line == range.start.line {
+            range.start.column.0
+        } else {
+            0
+        };
+        if grid[line][Column(first)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER)
+        {
+            first = first.saturating_sub(1);
+        }
+        let last = if line == range.end.line {
+            range.end.column.0
+        } else {
+            grid.columns() - 1
+        };
+        first..=last
     }
 
     pub fn is_selected(&self, at: CellPoint) -> bool {
@@ -639,7 +715,9 @@ impl Screen {
             .fold(Attrs::empty(), |attrs, (_, attr)| attrs | *attr);
         Cell {
             ch: visible_char(cell.c),
-            zerowidth: cell.zerowidth().map(<[char]>::to_vec).unwrap_or_default(),
+            zerowidth: capped_zerowidth(cell)
+                .map(<[char]>::to_vec)
+                .unwrap_or_default(),
             fg,
             bg,
             attrs,
@@ -687,9 +765,17 @@ fn push_cell_text(cell: &LibCell, text: &mut String) {
         return;
     }
     text.push(visible_char(cell.c));
-    if let Some(zerowidth) = cell.zerowidth() {
+    if let Some(zerowidth) = capped_zerowidth(cell) {
         text.extend(zerowidth);
     }
+}
+
+/// The zero-width characters we read from a cell: the first `MAX_ZEROWIDTH`, sliced from the
+/// library's list without copying it, so a cell with a huge list costs no more than one with 16.
+/// Everything that takes marks out of a cell goes through here.
+fn capped_zerowidth(cell: &LibCell) -> Option<&[char]> {
+    cell.zerowidth()
+        .map(|chars| &chars[..chars.len().min(MAX_ZEROWIDTH)])
 }
 
 /// Dim text at two thirds of its colour's brightness.

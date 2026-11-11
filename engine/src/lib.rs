@@ -26,8 +26,8 @@ pub use links::url_at;
 pub use mouse::{Button, MouseAction, encode_mouse};
 pub use recording::{Record, Recorder, read_recording};
 pub use screen::{
-    Attrs, Cell, CellWidth, Cursor, CursorShape, Damage, Modes, MouseTracking, SCROLLBACK_LINES,
-    Screen, ScreenEvent, SelectKind,
+    Attrs, Cell, CellWidth, Cursor, CursorShape, Damage, MAX_ZEROWIDTH, Modes, MouseTracking,
+    SCROLLBACK_LINES, Screen, ScreenEvent, SelectKind,
 };
 pub use theme::{FONT_PX_DEFAULT, FONT_PX_MAX, FONT_PX_MIN, Palette, Rgb, Theme};
 pub use view::{TerminalView, ViewEvent};
