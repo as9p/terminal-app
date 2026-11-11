@@ -29,7 +29,7 @@ Command-line flags (`plain/src/args.rs`):
 - `--keys FILE` (headless only) types lines of `<milliseconds since start> <text>` at their times. The text may hold `\r`, `\n`, `\t`, `\\` and `\xNN`.
 - `--timeout SECONDS` (headless only) kills the command after that long and exits with code 124.
 
-Exit codes: 2 for a bad command line, 127 when the command cannot start, 124 on a headless timeout.
+Exit codes: the command's own code when it exits by itself (1 if a signal killed it), 2 for a bad command line, 127 when the command cannot start, 124 on a headless timeout, and 1 when the recording file cannot be written or drawing cannot go on.
 
 Environment variables read by the program:
 
@@ -85,7 +85,7 @@ Measured on 2026-11-11 on a MacBook Pro, every terminal in turn in one sitting, 
 | Alacritty 0.17.0 | 14.7 ms | 28.7 ms | 78.4 MB/s | 183.9 MB |
 | Ghostty 1.4.0 | 19.3 ms | 32.5 ms | 129.8 MB/s | 156.2 MB |
 
-p95 means 95 keys in 100 were at least this fast. The terminal draws nothing while idle (0 frames in 5 seconds) and holds about 115 MB then. Ghostty prints faster and uses less memory. This terminal had the lowest typing delay in both sittings of the day, but its lead over Alacritty and kitty (about 0.5 to 1.3 ms) is no bigger than the spread between its own rounds, so read it as level with them and clearly ahead of Ghostty. Both sittings, with their limits, are written up in `DESIGN.md` under "Stage A results".
+p95 means 95 keys in 100 were at least this fast. The terminal draws nothing while idle (0 frames in 5 seconds) and holds about 115 MB then. Ghostty prints faster, and both Ghostty and Alacritty use less memory. This terminal had the lowest typing delay in both sittings of the day, but its lead over Alacritty and kitty (about 0.5 to 1.3 ms) is no bigger than the spread between its own rounds, so read it as level with them and clearly ahead of Ghostty. Both sittings, with their limits, are written up in `DESIGN.md` under "Stage A results".
 
 ## Tests
 
@@ -94,7 +94,7 @@ cargo test -p term-engine
 cargo test -p term-plain
 ```
 
-The engine tests include drawing on the GPU without opening a window. One replay test is skipped unless a local recording of a Claude Code session exists. The plain tests run the built binary in its windowless mode (`--headless`), so they open no window and do not touch the keyboard.
+The engine tests include drawing on the GPU without opening a window. One replay test is marked ignored, so the plain command skips it: it needs a local recording of a Claude Code session, which `zsh tools/plain/record-claude.sh` makes (it runs Claude Code windowless for 30 seconds and the recording never leaves this computer). Run it with `cargo test -p term-engine --test replay -- --ignored`. The plain tests run the built binary in its windowless mode (`--headless`), so they open no window and do not touch the keyboard.
 
 To rerun the speed comparison against kitty, Ghostty and Alacritty, build first, then run from the repository root:
 
