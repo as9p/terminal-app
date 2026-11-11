@@ -15,6 +15,11 @@ test_host_pids() {
 # Usage: open_app <port> <shell program>. Sets APP_PID, APP_WINDOW and APP_DATA.
 open_app() {
   APP_PORT=$1
+  local tabs=${TA_SPEED_TABS:-1}
+  if [[ $tabs != <-> ]] || ((tabs < 1)); then
+    echo "TA_SPEED_TABS must be a whole number of tabs, not $tabs"
+    return 1
+  fi
   [ -x "$APP" ] || { echo "no release build at $APP"; return 1; }
   if lsof -ti tcp:$APP_PORT -sTCP:LISTEN > /dev/null; then
     echo "port $APP_PORT is already in use"
@@ -42,13 +47,42 @@ open_app() {
   fi
   # AeroSpace tiles new windows, and a floated window has the same size on every run.
   aerospace layout floating --window-id $APP_WINDOW
+  # TA_SPEED_TABS=<n> measures with n tabs in the sidebar. The extra tabs start in speed-idle,
+  # where the test's shell program sits idle, and the app keeps showing its own first tab.
+  if ((tabs > 1)); then
+    mkdir -p $APP_DATA/speed-idle
+    if ! python3 $REPO/tools/speed/add-tabs.py $APP_PORT $APP_DATA $tabs $APP_DATA/speed-idle; then
+      echo "could not give the app $tabs tabs"
+      close_app
+      return 1
+    fi
+  fi
 }
 
 # The host outlives the app by design, so stopping the app alone would leave it running.
 close_app() {
+  local pids pid alive i
   kill $APP_PID 2> /dev/null
   /bin/sleep 0.5
-  local pids=$(test_host_pids $APP_PORT)
+  pids=$(test_host_pids $APP_PORT)
   [ -n "$pids" ] && kill ${=pids}
-  rm -rf "$APP_DATA"
+  # A host still writing its files while rm walks the folder makes rm fail with "Directory not
+  # empty", so wait for it to be gone first.
+  for i in {1..30}; do
+    alive=""
+    for pid in ${=pids}; do
+      kill -0 $pid 2> /dev/null && alive=$pid
+    done
+    [ -z "$alive" ] && break
+    /bin/sleep 0.1
+  done
+  [ -n "$alive" ] && echo "the test host $alive was still running after 3 seconds"
+  rm -rf "$APP_DATA" 2> /dev/null
+  if [ -e "$APP_DATA" ]; then
+    # Whatever is still there names what kept writing, so it goes into the run's output.
+    echo "the data folder was not empty after the test, left in it:"
+    find "$APP_DATA" | sed 's/^/  /'
+    /bin/sleep 0.5
+    rm -rf "$APP_DATA"
+  fi
 }

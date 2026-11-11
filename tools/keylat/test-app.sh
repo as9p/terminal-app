@@ -13,5 +13,6 @@ open_app $PORT ${0:A:h}/cat-shell.sh || exit 1
 aerospace focus --window-id $APP_WINDOW
 /bin/sleep 3
 $K/keylat $APP_PID 60 $2 $APP_WINDOW keep-size > $1 2>&1
-close_app
+# Kept with the run, so a note about what was left behind is not lost in the job log.
+close_app >> $1 2>&1
 [ -n "$PREV" ] && aerospace focus --window-id $PREV

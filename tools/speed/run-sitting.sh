@@ -16,8 +16,8 @@ if ! pgrep -f runner.command > /dev/null; then
   aerospace focus --window-id $(cat $K/focus.tmp)
 fi
 rm -f $K/job.log
-# The runner is its own process, so the renderer choice has to travel in the job line.
-print -r -- "${TA_RENDERER:+TA_RENDERER=$TA_RENDERER }zsh $here/sitting.sh $out" > $K/job.tmp
+# The runner is its own process, so the renderer and tab count have to travel in the job line.
+print -r -- "${TA_RENDERER:+TA_RENDERER=$TA_RENDERER }${TA_SPEED_TABS:+TA_SPEED_TABS=$TA_SPEED_TABS }zsh $here/sitting.sh $out" > $K/job.tmp
 mv $K/job.tmp $K/job.sh
 echo "Test running. Hands off the keyboard for about 4 minutes."
 for i in {1..600}; do

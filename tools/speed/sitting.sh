@@ -34,6 +34,7 @@ typing_stats() {
 
 {
   echo "release build modified $(stat -f '%Sm' $here/../../target/release/bundle/macos/terminal-app.app/Contents/MacOS/terminal-app)"
+  echo "TA_SPEED_TABS=${TA_SPEED_TABS:-unset, so 1 tab} TA_RENDERER=${TA_RENDERER:-unset, so webgl}"
   for target in app kitty; do
     typing_stats 2 "$target typing" $out/$target-*-raw.csv
     typing_stats 4 "$target backspace" $out/$target-*-raw.csv
