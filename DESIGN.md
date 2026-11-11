@@ -592,11 +592,12 @@ Keeping Claude settings and knowledge in step across devices is a separate proje
 1. Prove the risky parts: reopening a chat under another account, resuming under a different path, reading a list of Remote Control sessions, two Remote Control servers under different accounts, the hook signals behind the "your move" rule, and starting the host as a service on Windows.
 2. Host process on Mac and Windows, plus the Mac client with a basic sidebar tab list and restore. Measure against the speed targets with `tools/keylat` as soon as typing works through the host, then finish with the speed pass. Steps 1 and 2 are stage 1. The Windows client follows.
 3. After the UI review: the full sidebar, groups from folders with the `cd` rule, the focus rule, the four session states with blocked rollup, and typing `claude` with the usual flags.
-4. Accounts with automatic switching, since Alex ranks this highest.
-5. Tailscale attach from the PC, SSH into the PC and the restart action, then move session and cross-device Claude, then the Remote Control sidebar and silent host.
-6. The `ta` command line, the master agent with cleanup, agent team rows, alerts, then the board with the artifact to-do list.
-7. Viewer pane, browser pane with cookie import, computer control, presets, other agent tools with messaging between sessions, quick commands, search and SSH hosts.
-8. The phone web app, the plugin system and Uber Eats, triggers.
+4. Tailscale attach in both directions: a host on the Mac and a host on the PC, each computer's app showing and opening the other's sessions. Moved ahead of accounts on 2026-11-11. **(Alex: "i want them both to be hosts. tailscale higher than account switch")**
+5. Accounts with automatic switching.
+6. SSH into the PC and the restart action, then move session and cross-device Claude, then the Remote Control sidebar and silent host.
+7. The `ta` command line, the master agent with cleanup, agent team rows, alerts, then the board with the artifact to-do list.
+8. Viewer pane, browser pane with cookie import, computer control, presets, other agent tools with messaging between sessions, quick commands, search and SSH hosts.
+9. The phone web app, the plugin system and Uber Eats, triggers.
 
 ## Left to the builder
 
