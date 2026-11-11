@@ -3,11 +3,13 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use term_engine::{CellSize, GridSize, TerminalView};
 
+use crate::backlog::{Backlog, CloseOnDrop, QUEUE_LIMIT, counted};
 use crate::session::{self, Session};
 use crate::shell::{Shell, ShellEvent};
 
@@ -34,7 +36,8 @@ pub struct Key {
 /// Returns the process exit code.
 pub fn run(options: Options) -> i32 {
     let (tx, events) = mpsc::channel();
-    let on_event = Box::new(move |event| {
+    let backlog = Arc::new(Backlog::new(QUEUE_LIMIT));
+    let on_event = counted(backlog.clone(), move |event| {
         // The receiver is gone only when this function has returned, and then nobody listens.
         let _ = tx.send(event);
     });
@@ -56,6 +59,8 @@ pub fn run(options: Options) -> i32 {
         }
     };
     session.set_grid(options.grid, CELL);
+    // Made after the session, so it drops first on every return below.
+    let backlog = CloseOnDrop(backlog);
 
     let start = Instant::now();
     let deadline = options.timeout.map(|timeout| start + timeout);
@@ -90,6 +95,7 @@ pub fn run(options: Options) -> i32 {
         match event {
             ShellEvent::Output(bytes) => {
                 session.output(&bytes);
+                backlog.fed(bytes.len());
                 // Titles and bells mean nothing without a window; drop them so they do not pile up.
                 session.view.take_events();
             }

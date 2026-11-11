@@ -1,6 +1,7 @@
 //! Snowflake, the plain terminal: arguments, then the windowless mode or the window.
 
 mod args;
+mod backlog;
 mod headless;
 mod input;
 mod session;

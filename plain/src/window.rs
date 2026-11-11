@@ -19,6 +19,7 @@ use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDe
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
+use crate::backlog::{Backlog, CloseOnDrop, QUEUE_LIMIT, counted};
 use crate::input::{self, Clicks, Settle, WheelLines, WindowKey};
 use crate::session::{self, Session};
 use crate::shell::{Shell, ShellEvent};
@@ -127,9 +128,11 @@ impl ApplicationHandler<ShellEvent> for App {
     }
 }
 
-/// Everything that exists while the window is open. Fields drop in order: the session (and the
-/// shell with it) goes first.
+/// Everything that exists while the window is open. Fields drop in order: the backlog closes
+/// first, so a reader waiting on it is let go, then the session (and the shell with it) goes.
 struct Term {
+    /// Output handed to the loop and not yet fed, in `pending` or still in winit's queue.
+    backlog: CloseOnDrop,
     session: Session,
     draw: ViewDraw,
     gpu: Gpu,
@@ -231,8 +234,10 @@ impl Term {
 
         let cell = gpu.cell_size();
         let grid = input::grid_for(size, cell);
-        // Runs on the shell's threads: hand the event over and nothing else.
-        let on_event = Box::new(move |event| {
+        // Made before the shell, so every way out of here, and later out of `Term`, closes it.
+        let backlog = CloseOnDrop(Arc::new(Backlog::new(QUEUE_LIMIT)));
+        // Runs on the shell's threads: hand the event over, then wait while the backlog is full.
+        let on_event = counted(backlog.0.clone(), move |event| {
             // The loop is gone only after the window closed, and then nobody listens.
             let _ = proxy.send_event(event);
         });
@@ -245,6 +250,7 @@ impl Term {
         session.set_grid(grid, cell);
 
         let mut term = Term {
+            backlog,
             session,
             draw: ViewDraw::new(&gpu),
             gpu,
@@ -337,6 +343,7 @@ impl Term {
         {
             let start = Instant::now();
             self.session.output(&bytes);
+            self.backlog.fed(bytes.len());
             self.fed_for += start.elapsed();
         }
         self.view_events();
@@ -349,7 +356,10 @@ impl Term {
         }
 
         let now = Instant::now();
-        if self.settle.due(now) || mem::take(&mut self.refit_now) {
+        // A minimised window can report no size at all, which would fit the shell to one cell.
+        // The refit stays pending, unconsumed, until the window has a size again.
+        let sized = input::may_present(true, self.size);
+        if sized && (self.settle.due(now) || mem::take(&mut self.refit_now)) {
             self.refit();
         }
         let wake = self.session.view.tick(now);
@@ -363,7 +373,10 @@ impl Term {
             self.fed_for = Duration::ZERO;
             return Ok(ControlFlow::Poll);
         }
-        Ok(match wake.into_iter().chain(self.settle.deadline()).min() {
+        // A settle deadline already past would wake the loop at once, again and again, while the
+        // refit waits for a size; the next resize wakes it instead.
+        let settle = self.settle.deadline().filter(|_| sized);
+        Ok(match wake.into_iter().chain(settle).min() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         })
